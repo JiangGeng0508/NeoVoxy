@@ -85,6 +85,10 @@ runs {
 configurations {
     configureEach {
         exclude group: 'org.lz4', module: 'lz4-java'
+        resolutionStrategy.capabilitiesResolution.withCapability('org.lz4:lz4-java') {
+            select('at.yawk.lz4:lz4-java:1.10.1')
+            because 'Voxy uses the maintained at.yawk lz4-java artifact instead of the legacy org.lz4 module.'
+        }
     }
     runtimeClasspath.extendsFrom localRuntime
     sodiumOuter
@@ -214,6 +218,12 @@ tasks.named('jarJar') {
 }
 
 dependencies {
+    modules {
+        module('org.lz4:lz4-java') {
+            replacedBy('at.yawk.lz4:lz4-java', 'Voxy uses the maintained at.yawk lz4-java artifact.')
+        }
+    }
+
     implementation("net.neoforged:neoforge:${neo_version}") {
         exclude group: 'org.lz4', module: 'lz4-java'
     }

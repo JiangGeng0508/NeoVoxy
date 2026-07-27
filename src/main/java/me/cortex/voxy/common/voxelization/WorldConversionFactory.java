@@ -21,8 +21,6 @@ import net.minecraft.world.level.chunk.SingleValuePalette;
 import java.util.WeakHashMap;
 
 public class WorldConversionFactory {
-    private static final boolean LITHIUM_INSTALLED = false;
-
     private static final class Cache {
         private final int[] biomeCache = new int[4*4*4];
         private final WeakHashMap<Mapper, Reference2IntOpenHashMap<BlockState>> localMapping = new WeakHashMap<>();
@@ -42,56 +40,39 @@ public class WorldConversionFactory {
     //TODO: create a mapping for world/mapper -> local mapping
     private static final ThreadLocal<Cache> THREAD_LOCAL = ThreadLocal.withInitial(Cache::new);
 
-    private static boolean setupLithiumLocalPallet(Palette<BlockState> vp, Reference2IntOpenHashMap<BlockState> blockCache, Mapper mapper, int[] pc)  {
-        return false;
+    private static void setupPaletteEntry(Palette<BlockState> palette, Reference2IntOpenHashMap<BlockState> blockCache, Mapper mapper, int[] pc, int index) {
+        BlockState state = null;
+        int blockId = -1;
+        try { state = palette.valueFor(index); } catch (Exception e) {}
+        if (state != null) {
+            blockId = blockCache.getOrDefault(state, -1);
+            if (blockId == -1) {
+                blockId = mapper.getIdForBlockState(state);
+                blockCache.put(state, blockId);
+            }
+        }
+        pc[index] = blockId;
     }
+
     private static int setupLocalPalette(Palette<BlockState> vp, Reference2IntOpenHashMap<BlockState> blockCache, Mapper mapper, int[] pc) {
         int c = vp.getSize();
         if (vp instanceof LinearPalette<BlockState>) {
             for (int i = 0; i < vp.getSize(); i++) {
-                var state = vp.valueFor(i);
-                int blockId = -1;
-                if (state != null) {
-                    blockId = blockCache.getOrDefault(state, -1);
-                    if (blockId == -1) {
-                        blockId = mapper.getIdForBlockState(state);
-                        blockCache.put(state, blockId);
-                    }
-                }
-                pc[i] = blockId;
+                setupPaletteEntry(vp, blockCache, mapper, pc, i);
             }
         } else if (vp instanceof HashMapPalette<BlockState> pal) {
             //var map = pal.map;
             //TODO: heavily optimize this by reading the map directly
 
             for (int i = 0; i < vp.getSize(); i++) {
-                BlockState state = null;
-                int blockId = -1;
-                try { state = vp.valueFor(i); } catch (Exception e) {}
-                if (state != null) {
-                    blockId = blockCache.getOrDefault(state, -1);
-                    if (blockId == -1) {
-                        blockId = mapper.getIdForBlockState(state);
-                        blockCache.put(state, blockId);
-                    }
-                }
-                pc[i] = blockId;
+                setupPaletteEntry(vp, blockCache, mapper, pc, i);
             }
 
         } else if (vp instanceof SingleValuePalette<BlockState>) {
-            int blockId = -1;
-            var state = vp.valueFor(0);
-            if (state != null) {
-                blockId = blockCache.getOrDefault(state, -1);
-                if (blockId == -1) {
-                    blockId = mapper.getIdForBlockState(state);
-                    blockCache.put(state, blockId);
-                }
-            }
-            pc[0] = blockId;
+            setupPaletteEntry(vp, blockCache, mapper, pc, 0);
         } else {
-            if (!(LITHIUM_INSTALLED && setupLithiumLocalPallet(vp, blockCache, mapper, pc))) {
-                throw new IllegalStateException("Unknown palette type: " + vp);
+            for (int i = 0; i < vp.getSize(); i++) {
+                setupPaletteEntry(vp, blockCache, mapper, pc, i);
             }
         }
         return c;
