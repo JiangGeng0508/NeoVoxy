@@ -1,7 +1,7 @@
 package me.cortex.voxy.common;
 
 import me.cortex.voxy.common.config.Serialization;
-import me.cortex.voxy.common.config.compressors.ZSTDCompressor;
+import me.cortex.voxy.common.config.compressors.LZ4Compressor;
 import me.cortex.voxy.common.config.section.SectionSerializationStorage;
 import me.cortex.voxy.common.config.section.SectionStorageConfig;
 import me.cortex.voxy.common.config.storage.other.CompressionStorageAdaptor;
@@ -56,8 +56,7 @@ public class StorageConfigUtil {
         //Create the default config
         var baseDB = new RocksDBStorageBackend.Config();
 
-        var compressor = new ZSTDCompressor.Config();
-        compressor.compressionLevel = 1;
+        var compressor = new LZ4Compressor.Config();
 
         var compression = new CompressionStorageAdaptor.Config();
         compression.delegate = baseDB;
