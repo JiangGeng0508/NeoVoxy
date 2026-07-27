@@ -79,6 +79,8 @@ runs {
 configurations {
     runtimeClasspath.extendsFrom localRuntime
     sodiumOuter
+    prunedRocksDB
+    prunedSqlite
 }
 
 def sodiumNeoForgeModJar = layout.buildDirectory.file('extracted/sodium-neoforge-mod.jar')
@@ -92,6 +94,114 @@ def extractSodiumNeoForgeModJar = tasks.register('extractSodiumNeoForgeModJar', 
         includeEmptyDirs = false
     }
     into layout.buildDirectory.dir('extracted')
+}
+
+def prunedLibraryDir = layout.buildDirectory.dir('pruned-libs')
+
+tasks.register('makePrunedRocksDBJar', Zip) {
+    group = 'build'
+    description = 'Removes non-desktop RocksDB native libraries from the JarJar dependency.'
+    dependsOn configurations.prunedRocksDB
+
+    archiveFileName.set('rocksdbjni-10.2.1.jar')
+    destinationDirectory.set(prunedLibraryDir)
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+
+    from { zipTree(configurations.prunedRocksDB.singleFile) }
+
+    exclude { details ->
+        def file = details.name
+        if (file.endsWith('.jnilib') || file.endsWith('.dylib')) {
+            return true
+        }
+        if (!file.endsWith('.so')) {
+            return false
+        }
+        return ['linux32', 'musl', 's390x', 'riscv64', 'ppc64le', 'aarch64'].any { file.contains(it) }
+    }
+}
+
+tasks.register('makePrunedSqliteJar', Zip) {
+    group = 'build'
+    description = 'Keeps only Windows x64 and Linux x64 SQLite native libraries in the JarJar dependency.'
+    dependsOn configurations.prunedSqlite
+
+    archiveFileName.set('sqlite-jdbc-3.49.1.0.jar')
+    destinationDirectory.set(prunedLibraryDir)
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+
+    from { zipTree(configurations.prunedSqlite.singleFile) }
+
+    exclude { details ->
+        def path = details.path.replace('\\', '/')
+        if (!path.startsWith('org/sqlite/native/')) {
+            return false
+        }
+        return !(
+                path.startsWith('org/sqlite/native/Windows/x86_64/') ||
+                path.startsWith('org/sqlite/native/Linux/x86_64/')
+        )
+    }
+}
+
+def replaceZipEntries = { File jarFile, Map<String, File> replacements ->
+    def tempFile = new File(jarFile.parentFile, "${jarFile.name}.tmp")
+    def buffer = new byte[8192]
+    def seen = [] as Set
+
+    new java.util.zip.ZipInputStream(new BufferedInputStream(new FileInputStream(jarFile))).withCloseable { zin ->
+        new java.util.zip.ZipOutputStream(new BufferedOutputStream(new FileOutputStream(tempFile))).withCloseable { zout ->
+            java.util.zip.ZipEntry entry
+            while ((entry = zin.nextEntry) != null) {
+                def replacement = replacements[entry.name]
+                def outEntry = new java.util.zip.ZipEntry(entry.name)
+                outEntry.time = entry.time
+                zout.putNextEntry(outEntry)
+
+                if (replacement != null) {
+                    replacement.withInputStream { input -> input.transferTo(zout) }
+                    seen.add(entry.name)
+                } else if (!entry.directory) {
+                    int read
+                    while ((read = zin.read(buffer)) > 0) {
+                        zout.write(buffer, 0, read)
+                    }
+                }
+
+                zout.closeEntry()
+                zin.closeEntry()
+            }
+        }
+    }
+
+    def missing = replacements.keySet() - seen
+    if (!missing.isEmpty()) {
+        tempFile.delete()
+        throw new GradleException("JarJar entries not found for pruning: ${missing}")
+    }
+    if (!jarFile.delete()) {
+        tempFile.delete()
+        throw new GradleException("Could not replace ${jarFile}")
+    }
+    if (!tempFile.renameTo(jarFile)) {
+        throw new GradleException("Could not move ${tempFile} to ${jarFile}")
+    }
+}
+
+tasks.named('jarJar') {
+    dependsOn tasks.named('makePrunedRocksDBJar')
+    dependsOn tasks.named('makePrunedSqliteJar')
+    inputs.files(
+            tasks.named('makePrunedRocksDBJar').flatMap { it.archiveFile },
+            tasks.named('makePrunedSqliteJar').flatMap { it.archiveFile }
+    )
+
+    doLast {
+        replaceZipEntries(archiveFile.get().asFile, [
+                'META-INF/jarjar/rocksdbjni-10.2.1.jar' : tasks.named('makePrunedRocksDBJar').get().archiveFile.get().asFile,
+                'META-INF/jarjar/sqlite-jdbc-3.49.1.0.jar': tasks.named('makePrunedSqliteJar').get().archiveFile.get().asFile
+        ])
+    }
 }
 
 dependencies {
@@ -116,6 +226,9 @@ dependencies {
     implementation 'org.lz4:lz4-java:1.8.0'
     implementation 'org.tukaani:xz:1.10'
     implementation 'org.xerial:sqlite-jdbc:3.49.1.0'
+
+    prunedRocksDB 'org.rocksdb:rocksdbjni:10.2.1'
+    prunedSqlite 'org.xerial:sqlite-jdbc:3.49.1.0'
 
     jarJar 'redis.clients:jedis:5.1.0'
     jarJar 'org.rocksdb:rocksdbjni:10.2.1'
