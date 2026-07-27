@@ -1,3 +1,9 @@
+//file:noinspection GroovyAssignabilityCheck
+import java.util.zip.ZipEntry
+import java.util.zip.ZipInputStream
+import java.util.zip.ZipOutputStream
+
+//file:noinspection GroovyAssignabilityCheck
 plugins {
     id 'java-library'
     id 'maven-publish'
@@ -60,7 +66,7 @@ runs {
             runtime 'redis.clients:jedis:5.1.0'
             runtime 'org.rocksdb:rocksdbjni:10.2.1'
             runtime 'org.apache.commons:commons-pool2:2.12.0'
-            runtime 'org.lz4:lz4-java:1.8.0'
+            runtime 'at.yawk.lz4:lz4-java:1.10.1'
             runtime 'org.tukaani:xz:1.10'
             runtime 'org.xerial:sqlite-jdbc:3.49.1.0'
         }
@@ -77,6 +83,9 @@ runs {
 }
 
 configurations {
+    configureEach {
+        exclude group: 'org.lz4', module: 'lz4-java'
+    }
     runtimeClasspath.extendsFrom localRuntime
     sodiumOuter
     prunedRocksDB
@@ -149,12 +158,12 @@ def replaceZipEntries = { File jarFile, Map<String, File> replacements ->
     def buffer = new byte[8192]
     def seen = [] as Set
 
-    new java.util.zip.ZipInputStream(new BufferedInputStream(new FileInputStream(jarFile))).withCloseable { zin ->
-        new java.util.zip.ZipOutputStream(new BufferedOutputStream(new FileOutputStream(tempFile))).withCloseable { zout ->
-            java.util.zip.ZipEntry entry
+    new ZipInputStream(new BufferedInputStream(new FileInputStream(jarFile))).withCloseable { zin ->
+        new ZipOutputStream(new BufferedOutputStream(new FileOutputStream(tempFile))).withCloseable { zout ->
+            ZipEntry entry
             while ((entry = zin.nextEntry) != null) {
                 def replacement = replacements[entry.name]
-                def outEntry = new java.util.zip.ZipEntry(entry.name)
+                def outEntry = new ZipEntry(entry.name)
                 outEntry.time = entry.time
                 zout.putNextEntry(outEntry)
 
@@ -205,7 +214,9 @@ tasks.named('jarJar') {
 }
 
 dependencies {
-    implementation "net.neoforged:neoforge:${neo_version}"
+    implementation("net.neoforged:neoforge:${neo_version}") {
+        exclude group: 'org.lz4', module: 'lz4-java'
+    }
 
     sodiumOuter "maven.modrinth:sodium:mc1.21.1-0.8.12-neoforge"
     compileOnly files(sodiumNeoForgeModJar).builtBy(extractSodiumNeoForgeModJar)
@@ -223,7 +234,7 @@ dependencies {
     implementation 'redis.clients:jedis:5.1.0'
     implementation 'org.rocksdb:rocksdbjni:10.2.1'
     implementation 'org.apache.commons:commons-pool2:2.12.0'
-    implementation 'org.lz4:lz4-java:1.8.0'
+    implementation 'at.yawk.lz4:lz4-java:1.10.1'
     implementation 'org.tukaani:xz:1.10'
     implementation 'org.xerial:sqlite-jdbc:3.49.1.0'
 
