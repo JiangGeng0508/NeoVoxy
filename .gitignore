@@ -3,3 +3,6 @@ build/
 run/
 out/
 *.iml
+.reference
+.agents
+.idea
