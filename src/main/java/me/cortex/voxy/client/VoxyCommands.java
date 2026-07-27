@@ -54,7 +54,7 @@ public class VoxyCommands {
                 .then(Commands.literal("cancel")
                         .executes(VoxyCommands::cancelImport));
 
-        if (DHImporter.HasRequiredLibraries) {
+        if (hasDistantHorizonsImportLibraries()) {
             imports = imports
                     .then(Commands.literal("distant_horizons")
                             .then(Commands.argument("sqlDbPath", StringArgumentType.string())
@@ -73,6 +73,19 @@ public class VoxyCommands {
                         .executes(VoxyCommands::reloadInstance))
                 .then(imports)
                 .then(debug);
+    }
+
+    private static boolean hasDistantHorizonsImportLibraries() {
+        try {
+            var loader = VoxyCommands.class.getClassLoader();
+            Class.forName("org.sqlite.JDBC", false, loader);
+            Class.forName("org.tukaani.xz.XZInputStream", false, loader);
+            Class.forName("org.lwjgl.util.zstd.Zstd", false, loader);
+            return true;
+        } catch (ClassNotFoundException | NoClassDefFoundError e) {
+            Logger.warn("Distant Horizons import command disabled because sqlite, xz, or zstd is unavailable", e);
+            return false;
+        }
     }
 
     private static int reloadInstance(CommandContext<CommandSourceStack> ctx) {

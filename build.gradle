@@ -42,6 +42,20 @@ runs {
         systemProperty 'forge.logging.console.level', 'debug'
         workingDirectory project.layout.projectDirectory.dir('run').dir(name)
         modSource project.sourceSets.main
+        dependencies {
+            runtime 'org.lwjgl:lwjgl-lmdb'
+            runtime 'org.lwjgl:lwjgl-zstd'
+            runtime 'org.lwjgl:lwjgl-lmdb:3.3.3:natives-windows'
+            runtime 'org.lwjgl:lwjgl-zstd:3.3.3:natives-windows'
+            runtime 'org.lwjgl:lwjgl-lmdb:3.3.3:natives-linux'
+            runtime 'org.lwjgl:lwjgl-zstd:3.3.3:natives-linux'
+            runtime 'redis.clients:jedis:5.1.0'
+            runtime 'org.rocksdb:rocksdbjni:10.2.1'
+            runtime 'org.apache.commons:commons-pool2:2.12.0'
+            runtime 'org.lz4:lz4-java:1.8.0'
+            runtime 'org.tukaani:xz:1.10'
+            runtime 'org.xerial:sqlite-jdbc:3.49.1.0'
+        }
     }
 
     client {
@@ -94,6 +108,7 @@ dependencies {
     implementation 'org.lz4:lz4-java:1.8.0'
     implementation 'org.tukaani:xz:1.10'
     implementation 'org.xerial:sqlite-jdbc:3.49.1.0'
+
 }
 
 tasks.withType(ProcessResources).configureEach {

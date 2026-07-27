@@ -2,6 +2,7 @@ package me.cortex.voxy.client.core.gl.shader;
 
 
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.client.Minecraft;
 
 import org.apache.commons.io.IOUtils;
 
@@ -50,14 +51,24 @@ public class ShaderLoader {
         private static String loadShaderAsset(ResourceLocation id) {
             String path = String.format("/assets/%s/shaders/%s", id.getNamespace(), id.getPath());
             try (InputStream in = ShaderLoadingParser.class.getResourceAsStream(path)) {
-                if (in == null) {
-                    throw new RuntimeException("Shader not found: " + path);
-                } else {
+                if (in != null) {
                     return IOUtils.toString(in, StandardCharsets.UTF_8);
                 }
             } catch (IOException e) {
                 throw new RuntimeException("Failed to read shader source for " + path, e);
             }
+
+            var resourceId = ResourceLocation.fromNamespaceAndPath(id.getNamespace(), "shaders/" + id.getPath());
+            var resource = Minecraft.getInstance().getResourceManager().getResource(resourceId);
+            if (resource.isPresent()) {
+                try (InputStream in = resource.get().open()) {
+                    return IOUtils.toString(in, StandardCharsets.UTF_8);
+                } catch (IOException e) {
+                    throw new RuntimeException("Failed to read shader source for " + resourceId, e);
+                }
+            }
+
+            throw new RuntimeException("Shader not found: " + path + " or " + resourceId);
         }
     }
 }

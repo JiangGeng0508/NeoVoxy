@@ -5,6 +5,18 @@ import com.google.gson.reflect.TypeToken;
 import com.google.gson.stream.JsonReader;
 import com.google.gson.stream.JsonWriter;
 import me.cortex.voxy.common.Logger;
+import me.cortex.voxy.common.config.compressors.LZ4Compressor;
+import me.cortex.voxy.common.config.compressors.ZSTDCompressor;
+import me.cortex.voxy.common.config.section.SectionSerializationStorage;
+import me.cortex.voxy.common.config.storage.inmemory.MemoryStorageBackend;
+import me.cortex.voxy.common.config.storage.lmdb.LMDBStorageBackend;
+import me.cortex.voxy.common.config.storage.other.BasicPathInsertionConfig;
+import me.cortex.voxy.common.config.storage.other.CompressionStorageAdaptor;
+import me.cortex.voxy.common.config.storage.other.ConditionalStorageBackendConfig;
+import me.cortex.voxy.common.config.storage.other.FragmentedStorageBackendAdaptor;
+import me.cortex.voxy.common.config.storage.other.ReadonlyCachingLayer;
+import me.cortex.voxy.common.config.storage.redis.RedisStorageBackend;
+import me.cortex.voxy.common.config.storage.rocksdb.RocksDBStorageBackend;
 import me.cortex.voxy.commonImpl.VoxyCommon;
 
 import java.io.BufferedReader;
@@ -96,6 +108,7 @@ public class Serialization {
 
         Set<String> clazzs = new LinkedHashSet<>();
         clazzs.addAll(collectAllClasses(BASE_SEARCH_PACKAGE));
+        clazzs.addAll(knownConfigClasses());
         int count = 0;
         outer:
         for (var clzName : clazzs) {
@@ -167,6 +180,9 @@ public class Serialization {
         try {
             InputStream stream = Serialization.class.getClassLoader()
                     .getResourceAsStream(pack.replaceAll("[.]", "/"));
+            if (stream == null) {
+                return List.of();
+            }
             BufferedReader reader = new BufferedReader(new InputStreamReader(stream));
             return reader.lines().flatMap(inner -> {
                 if (inner.endsWith(".class")) {
@@ -181,6 +197,24 @@ public class Serialization {
             Logger.error("Failed to collect classes in package: " + pack, e);
             return List.of();
         }
+    }
+
+    private static List<String> knownConfigClasses() {
+        return List.of(
+                LZ4Compressor.Config.class.getName(),
+                ZSTDCompressor.Config.class.getName(),
+                SectionSerializationStorage.Config.class.getName(),
+                MemoryStorageBackend.Config.class.getName(),
+                LMDBStorageBackend.Config.class.getName(),
+                BasicPathInsertionConfig.class.getName(),
+                CompressionStorageAdaptor.Config.class.getName(),
+                ConditionalStorageBackendConfig.class.getName(),
+                FragmentedStorageBackendAdaptor.Config.class.getName(),
+                FragmentedStorageBackendAdaptor.Config2.class.getName(),
+                ReadonlyCachingLayer.Config.class.getName(),
+                RedisStorageBackend.Config.class.getName(),
+                RocksDBStorageBackend.Config.class.getName()
+        );
     }
     private static List<String> collectAllClasses(Path base, String pack) {
         if (!Files.exists(base.resolve(pack.replaceAll("[.]", "/")))) {

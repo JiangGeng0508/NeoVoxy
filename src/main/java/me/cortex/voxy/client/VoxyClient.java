@@ -23,7 +23,14 @@ import java.util.HashSet;
 public class VoxyClient {
     private static final HashSet<String> FREX = new HashSet<>();
     private static FileLock EXCLUSIVE_LOCK;
-    public static void initVoxyClient() {
+    private static boolean INITIALIZED;
+
+    public static synchronized void initVoxyClient() {
+        if (INITIALIZED) {
+            return;
+        }
+        INITIALIZED = true;
+
         Capabilities.init();//Ensure clinit is called
 
         if (Capabilities.INSTANCE.hasBrokenDepthSampler) {

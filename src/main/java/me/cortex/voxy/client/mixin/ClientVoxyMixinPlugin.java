@@ -1,6 +1,7 @@
 package me.cortex.voxy.client.mixin;
 
 import net.neoforged.fml.ModList;
+import net.neoforged.fml.loading.LoadingModList;
 import org.objectweb.asm.tree.ClassNode;
 import org.spongepowered.asm.mixin.extensibility.IMixinConfigPlugin;
 import org.spongepowered.asm.mixin.extensibility.IMixinInfo;
@@ -16,9 +17,9 @@ public class ClientVoxyMixinPlugin implements IMixinConfigPlugin {
 
     @Override
     public void onLoad(String mixinPackage) {
-        valkyrienSkiesInstalled = ModList.get().isLoaded("valkyrienskies");
-        nvidiumInstalled = ModList.get().isLoaded("nvidium");
-        connectorInstalled = ModList.get().isLoaded("connector");
+        valkyrienSkiesInstalled = isModLoaded("valkyrienskies");
+        nvidiumInstalled = isModLoaded("nvidium");
+        connectorInstalled = isModLoaded("connector");
     }
 
     @Override
@@ -27,9 +28,19 @@ public class ClientVoxyMixinPlugin implements IMixinConfigPlugin {
             return false;
         }
         if (mixinClassName.contains(".sodium.")) {
-            return ModList.get().isLoaded("sodium");
+            return isModLoaded("sodium");
         }
         return true;
+    }
+
+    private static boolean isModLoaded(String modId) {
+        var runtimeMods = ModList.get();
+        if (runtimeMods != null) {
+            return runtimeMods.isLoaded(modId);
+        }
+
+        var loadingMods = LoadingModList.get();
+        return loadingMods != null && loadingMods.getModFileById(modId) != null;
     }
 
     @Override public List<String> getMixins() {
