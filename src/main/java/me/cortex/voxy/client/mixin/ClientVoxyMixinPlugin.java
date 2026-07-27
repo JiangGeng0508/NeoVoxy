@@ -27,6 +27,9 @@ public class ClientVoxyMixinPlugin implements IMixinConfigPlugin {
         if (mixinClassName.contains(".iris.") || mixinClassName.contains(".flashback.") || mixinClassName.contains(".nvidium.")) {
             return false;
         }
+        if (mixinClassName.contains(".reforgedplay.")) {
+            return isModLoaded("reforgedplaymod") || isModLoaded("replaymod");
+        }
         if (mixinClassName.contains(".sodium.")) {
             return isModLoaded("sodium");
         }
