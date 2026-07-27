@@ -1,0 +1,121 @@
+plugins {
+    id 'java-library'
+    id 'maven-publish'
+    id 'net.neoforged.gradle.userdev' version '7.1.38'
+}
+
+version = mod_version
+group = mod_group_id
+
+base {
+    archivesName = mod_id
+}
+
+java.toolchain.languageVersion = JavaLanguageVersion.of(21)
+
+repositories {
+    mavenCentral()
+    maven { url = 'https://api.modrinth.com/maven' }
+    maven { url = 'https://maven.caffeinemc.net/releases' }
+}
+
+sourceSets.main.java {
+    exclude 'me/cortex/voxy/client/iris/**'
+    exclude 'me/cortex/voxy/client/mixin/iris/**'
+    exclude 'me/cortex/voxy/client/mixin/flashback/**'
+    exclude 'me/cortex/voxy/client/mixin/nvidium/**'
+    exclude 'me/cortex/voxy/client/core/IrisVoxyRenderPipeline.java'
+    exclude 'me/cortex/voxy/client/config/ModMenuIntegration.java'
+    exclude 'me/cortex/voxy/commonImpl/mixin/chunky/**'
+}
+
+sourceSets.main.resources {
+    exclude 'fabric.mod.json'
+    exclude 'voxy.accesswidener'
+}
+
+minecraft.accessTransformers.file rootProject.file('src/main/resources/META-INF/accesstransformer.cfg')
+
+runs {
+    configureEach {
+        systemProperty 'forge.logging.markers', 'REGISTRIES'
+        systemProperty 'forge.logging.console.level', 'debug'
+        workingDirectory project.layout.projectDirectory.dir('run').dir(name)
+        modSource project.sourceSets.main
+    }
+
+    client {
+        systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
+    }
+
+    server {
+        systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
+        argument '--nogui'
+    }
+}
+
+configurations {
+    runtimeClasspath.extendsFrom localRuntime
+    sodiumOuter
+}
+
+def sodiumNeoForgeModJar = layout.buildDirectory.file('extracted/sodium-neoforge-mod.jar')
+
+def extractSodiumNeoForgeModJar = tasks.register('extractSodiumNeoForgeModJar', Copy) {
+    from({ zipTree(configurations.sodiumOuter.singleFile) }) {
+        include 'META-INF/jarjar/net.caffeinemc.sodium-neoforge-0.8.12+mc1.21.1-mod.jar'
+        eachFile { details ->
+            details.path = 'sodium-neoforge-mod.jar'
+        }
+        includeEmptyDirs = false
+    }
+    into layout.buildDirectory.dir('extracted')
+}
+
+dependencies {
+    implementation "net.neoforged:neoforge:${neo_version}"
+
+    sodiumOuter "maven.modrinth:sodium:mc1.21.1-0.8.12-neoforge"
+    compileOnly files(sodiumNeoForgeModJar).builtBy(extractSodiumNeoForgeModJar)
+    localRuntime "maven.modrinth:sodium:mc1.21.1-0.8.12-neoforge"
+
+    implementation platform('org.lwjgl:lwjgl-bom:3.3.3')
+    implementation 'org.lwjgl:lwjgl'
+    implementation 'org.lwjgl:lwjgl-lmdb'
+    implementation 'org.lwjgl:lwjgl-zstd'
+    runtimeOnly 'org.lwjgl:lwjgl-lmdb:3.3.3:natives-windows'
+    runtimeOnly 'org.lwjgl:lwjgl-zstd:3.3.3:natives-windows'
+    runtimeOnly 'org.lwjgl:lwjgl-lmdb:3.3.3:natives-linux'
+    runtimeOnly 'org.lwjgl:lwjgl-zstd:3.3.3:natives-linux'
+
+    implementation 'redis.clients:jedis:5.1.0'
+    implementation 'org.rocksdb:rocksdbjni:10.2.1'
+    implementation 'org.apache.commons:commons-pool2:2.12.0'
+    implementation 'org.lz4:lz4-java:1.8.0'
+    implementation 'org.tukaani:xz:1.10'
+    implementation 'org.xerial:sqlite-jdbc:3.49.1.0'
+}
+
+tasks.withType(ProcessResources).configureEach {
+    var replaceProperties = [
+            minecraft_version      : minecraft_version,
+            minecraft_version_range: minecraft_version_range,
+            neo_version            : neo_version,
+            loader_version_range   : loader_version_range,
+            mod_id                 : mod_id,
+            mod_name               : mod_name,
+            mod_license            : mod_license,
+            mod_version            : mod_version,
+    ]
+    inputs.properties replaceProperties
+
+    filesMatching(['META-INF/neoforge.mods.toml']) {
+        expand replaceProperties
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.release = 21
+    options.deprecation = true
+}
