@@ -56,6 +56,9 @@ import static org.lwjgl.opengl.GL30C.*;
 import static org.lwjgl.opengl.GL33.glBindSampler;
 import static org.lwjgl.opengl.GL43.GL_SHADER_STORAGE_BUFFER;
 import static org.lwjgl.opengl.GL43C.GL_SHADER_STORAGE_BUFFER_BINDING;
+import static org.lwjgl.opengl.GL45C.glGetNamedFramebufferAttachmentParameteri;
+import static org.lwjgl.opengl.GL45C.glGetNamedRenderbufferParameteri;
+import static org.lwjgl.opengl.GL45C.glGetTextureLevelParameteri;
 
 public class VoxyRenderSystem {
     private final WorldEngine worldIn;
@@ -91,6 +94,10 @@ public class VoxyRenderSystem {
     public float getCapturedFogStart() { return this.capturedFogStart; }
     public float getCapturedFogEnd()   { return this.capturedFogEnd; }
     public float[] getCapturedFogColor() { return this.capturedFogColor; }
+
+    public void refreshModelMaterialMapping() {
+        this.pipeline.setupExtraModelBakeryData(this.modelService);
+    }
 
     private static AbstractSectionRenderer.Factory<?,? extends IGeometryData> getRenderBackendFactory() {
         //TODO: need todo a thing where selects optimal section render based on if supports the pipeline and geometry data type
@@ -265,11 +272,13 @@ public class VoxyRenderSystem {
         }
 
 
-        int oldFB = GL11.glGetInteger(GL_DRAW_FRAMEBUFFER_BINDING);
-        int boundFB = oldFB;
+        int oldDrawFB = GL11.glGetInteger(GL_DRAW_FRAMEBUFFER_BINDING);
+        int oldReadFB = GL11.glGetInteger(GL_READ_FRAMEBUFFER_BINDING);
+        int boundFB = oldDrawFB;
 
         int[] dims = new int[4];
         glGetIntegerv(GL_VIEWPORT, dims);
+        int oldActiveTexture = glGetInteger(GL_ACTIVE_TEXTURE);
 
         glViewport(0,0, viewport.width, viewport.height);
 
@@ -294,7 +303,8 @@ public class VoxyRenderSystem {
 
         GPUTiming.INSTANCE.marker();
         //The entire rendering pipeline (excluding the chunkbound thing)
-        this.pipeline.runPipeline(viewport, boundFB, dims[2], dims[3]);
+        int[] sourceSize = getFramebufferDepthSize(boundFB, dims[2], dims[3]);
+        this.pipeline.runPipeline(viewport, boundFB, sourceSize[0], sourceSize[1]);
         GPUTiming.INSTANCE.marker();
 
 
@@ -319,13 +329,21 @@ public class VoxyRenderSystem {
 
         GPUTiming.INSTANCE.tick();
 
-        glBindFramebuffer(GlConst.GL_FRAMEBUFFER, oldFB);
+        glBindFramebuffer(GlConst.GL_DRAW_FRAMEBUFFER, oldDrawFB);
+        glBindFramebuffer(GlConst.GL_READ_FRAMEBUFFER, oldReadFB);
         glViewport(dims[0], dims[1], dims[2], dims[3]);
 
         {//Reset state manager stuffs
             glUseProgram(0);
             glEnable(GL_DEPTH_TEST);
+            glDepthMask(true);
+            glDepthFunc(this.properties.closerEqualDepthCompare());
+            glColorMask(true, true, true, true);
+            glDisable(GL_BLEND);
             glDisable(GL_STENCIL_TEST);
+            glEnable(GL_CULL_FACE);
+            glFrontFace(GL_CCW);
+            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
 
             GlStateManager._glBindVertexArray(0);//Clear binding
 
@@ -337,6 +355,7 @@ public class VoxyRenderSystem {
             }
 
             IrisUtil.clearIrisSamplers();//Thanks iris (sigh)
+            GlStateManager._activeTexture(oldActiveTexture);
 
             //TODO: should/needto actually restore all of these, not just clear them
             //Clear all the bindings
@@ -376,6 +395,49 @@ public class VoxyRenderSystem {
         this.postProcessing.renderPost(viewport, matrices.projection(), boundFB);
         TimingStatistics.F.stop();
          */
+    }
+
+    private static int[] getFramebufferDepthSize(int framebuffer, int fallbackWidth, int fallbackHeight) {
+        int depthAttachment = GL_DEPTH_ATTACHMENT;
+        int objectType = glGetNamedFramebufferAttachmentParameteri(
+                framebuffer,
+                depthAttachment,
+                GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE
+        );
+        int object = glGetNamedFramebufferAttachmentParameteri(
+                framebuffer,
+                depthAttachment,
+                GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME
+        );
+
+        if (object == 0) {
+            depthAttachment = GL_DEPTH_STENCIL_ATTACHMENT;
+            objectType = glGetNamedFramebufferAttachmentParameteri(
+                    framebuffer,
+                    depthAttachment,
+                    GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE
+            );
+            object = glGetNamedFramebufferAttachmentParameteri(
+                    framebuffer,
+                    depthAttachment,
+                    GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME
+            );
+            if (object == 0) {
+                return new int[]{fallbackWidth, fallbackHeight};
+            }
+        }
+
+        return switch (objectType) {
+            case GL_TEXTURE -> new int[]{
+                    glGetTextureLevelParameteri(object, 0, GL_TEXTURE_WIDTH),
+                    glGetTextureLevelParameteri(object, 0, GL_TEXTURE_HEIGHT)
+            };
+            case GL_RENDERBUFFER -> new int[]{
+                    glGetNamedRenderbufferParameteri(object, GL_RENDERBUFFER_WIDTH),
+                    glGetNamedRenderbufferParameteri(object, GL_RENDERBUFFER_HEIGHT)
+            };
+            default -> new int[]{fallbackWidth, fallbackHeight};
+        };
     }
 
 

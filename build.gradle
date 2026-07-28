@@ -26,11 +26,8 @@ repositories {
 }
 
 sourceSets.main.java {
-    exclude 'me/cortex/voxy/client/iris/**'
-    exclude 'me/cortex/voxy/client/mixin/iris/**'
     exclude 'me/cortex/voxy/client/mixin/flashback/**'
     exclude 'me/cortex/voxy/client/mixin/nvidium/**'
-    exclude 'me/cortex/voxy/client/core/IrisVoxyRenderPipeline.java'
     exclude 'me/cortex/voxy/client/config/ModMenuIntegration.java'
     exclude 'me/cortex/voxy/commonImpl/mixin/chunky/**'
 }
@@ -231,6 +228,7 @@ dependencies {
     sodiumOuter "maven.modrinth:sodium:mc1.21.1-0.8.12-neoforge"
     compileOnly files(sodiumNeoForgeModJar).builtBy(extractSodiumNeoForgeModJar)
     localRuntime "maven.modrinth:sodium:mc1.21.1-0.8.12-neoforge"
+    compileOnly "maven.modrinth:iris:1.8.0+1.21.1-neoforge"
 
     implementation platform('org.lwjgl:lwjgl-bom:3.3.3')
     implementation 'org.lwjgl:lwjgl'

@@ -13,18 +13,23 @@ import java.util.Set;
 public class ClientVoxyMixinPlugin implements IMixinConfigPlugin {
     private static boolean valkyrienSkiesInstalled;
     private static boolean nvidiumInstalled;
+    private static boolean irisInstalled;
     private static boolean connectorInstalled = false;
 
     @Override
     public void onLoad(String mixinPackage) {
         valkyrienSkiesInstalled = isModLoaded("valkyrienskies");
         nvidiumInstalled = isModLoaded("nvidium");
+        irisInstalled = isModLoaded("iris");
         connectorInstalled = isModLoaded("connector");
     }
 
     @Override
     public boolean shouldApplyMixin(String targetClassName, String mixinClassName) {
-        if (mixinClassName.contains(".iris.") || mixinClassName.contains(".flashback.") || mixinClassName.contains(".nvidium.")) {
+        if (mixinClassName.contains(".iris.")) {
+            return irisInstalled;
+        }
+        if (mixinClassName.contains(".flashback.") || mixinClassName.contains(".nvidium.")) {
             return false;
         }
         if (mixinClassName.contains(".reforgedplay.")) {

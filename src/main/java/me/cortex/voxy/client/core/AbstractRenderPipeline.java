@@ -150,7 +150,12 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
 
 
         this.depthStencilSetup.bind();
-        int depthTexture = glGetNamedFramebufferAttachmentParameteri(sourceFrameBuffer, GL_DEPTH_ATTACHMENT, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME);
+        int depthAttachment = getDepthAttachment(sourceFrameBuffer);
+        int depthTexture = glGetNamedFramebufferAttachmentParameteri(
+                sourceFrameBuffer,
+                depthAttachment,
+                GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME
+        );
         glBindTextureUnit(0, depthTexture);
         glBindSampler(0, DEPTH_SAMPLER);
         glUniform2f(1,((float)width)/srcWidth, ((float)height)/srcHeight);
@@ -165,6 +170,15 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         //Make voxy terrain render only where there isnt mc terrain
         glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
         glStencilFunc(GL_EQUAL, 1, 0xFF);
+    }
+
+    private static int getDepthAttachment(int framebuffer) {
+        int depthObject = glGetNamedFramebufferAttachmentParameteri(
+                framebuffer,
+                GL_DEPTH_ATTACHMENT,
+                GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME
+        );
+        return depthObject != 0 ? GL_DEPTH_ATTACHMENT : GL_DEPTH_STENCIL_ATTACHMENT;
     }
 
     private static final long SCRATCH = MemoryUtil.nmemAlloc(4*4*4);

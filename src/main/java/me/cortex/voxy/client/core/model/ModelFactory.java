@@ -65,9 +65,9 @@ public class ModelFactory {
 
     //TODO: replace the fluid BlockState with a client model id integer of the fluidState, requires looking up
     // the fluid state in the mipper
-    private record ModelEntry(ColourDepthTextureData down, ColourDepthTextureData up, ColourDepthTextureData north, ColourDepthTextureData south, ColourDepthTextureData west, ColourDepthTextureData east, int fluidBlockStateId, int tintingColour) {
-        public ModelEntry(ColourDepthTextureData[] textures, int fluidBlockStateId, int tintingColour) {
-            this(textures[0], textures[1], textures[2], textures[3], textures[4], textures[5], fluidBlockStateId, tintingColour);
+    private record ModelEntry(ColourDepthTextureData down, ColourDepthTextureData up, ColourDepthTextureData north, ColourDepthTextureData south, ColourDepthTextureData west, ColourDepthTextureData east, int fluidBlockStateId, int tintingColour, int customId) {
+        public ModelEntry(ColourDepthTextureData[] textures, int fluidBlockStateId, int tintingColour, int customId) {
+            this(textures[0], textures[1], textures[2], textures[3], textures[4], textures[5], fluidBlockStateId, tintingColour, customId);
         }
     }
 
@@ -150,6 +150,40 @@ public class ModelFactory {
 
     public void setCustomBlockStateMapping(Object2IntMap<BlockState> mapping) {
         this.customBlockStateIdMapping = mapping;
+        if (mapping != null) {
+            this.refreshCustomBlockStateIds();
+        }
+    }
+
+    private int getCustomBlockStateId(BlockState blockState) {
+        if (this.customBlockStateIdMapping != null && this.customBlockStateIdMapping.containsKey(blockState)) {
+            return this.customBlockStateIdMapping.getInt(blockState);
+        }
+        return 0;
+    }
+
+    private void refreshCustomBlockStateIds() {
+        int[] firstBlockForModel = new int[this.modelTexture2id.size()];
+        Arrays.fill(firstBlockForModel, -1);
+        for (int blockId = 0; blockId < this.idMappings.length; blockId++) {
+            int modelId = this.idMappings[blockId];
+            if (modelId >= 0 && modelId < firstBlockForModel.length && firstBlockForModel[modelId] == -1) {
+                firstBlockForModel[modelId] = blockId;
+            }
+        }
+
+        for (int modelId = 0; modelId < firstBlockForModel.length; modelId++) {
+            int blockId = firstBlockForModel[modelId];
+            if (blockId == -1) {
+                continue;
+            }
+            int customId = getCustomBlockStateId(this.mapper.getBlockStateFromBlockId(blockId));
+            MemoryUtil.memPutInt(
+                    UploadStream.INSTANCE.upload(this.storage.modelBuffer, (long) modelId * MODEL_SIZE + 32, 4),
+                    customId
+            );
+        }
+        UploadStream.INSTANCE.commit();
     }
 
     private static final record BlockBake(int blockId, BlockState state) {
@@ -427,7 +461,12 @@ public class ModelFactory {
 
         ModelEntry entry;
         {//Deduplicate same entries
-            entry = new ModelEntry(textureData, clientFluidStateId, isBiomeColourDependent||colourProvider==null?-1:captureColourConstant(colourProvider, blockState, DEFAULT_BIOME)|0xFF000000);
+            entry = new ModelEntry(
+                    textureData,
+                    clientFluidStateId,
+                    isBiomeColourDependent||colourProvider==null?-1:captureColourConstant(colourProvider, blockState, DEFAULT_BIOME)|0xFF000000,
+                    getCustomBlockStateId(blockState)
+            );
             int possibleDuplicate = this.modelTexture2id.getInt(entry);
             if (possibleDuplicate != -1) {//Duplicate found
                 this.idMappings[blockId] = possibleDuplicate;
@@ -664,11 +703,7 @@ public class ModelFactory {
         //have 32 bytes of free space after here
 
         //install the custom mapping id if it exists
-        if (this.customBlockStateIdMapping != null && this.customBlockStateIdMapping.containsKey(blockState)) {
-            MemoryUtil.memPutInt(uploadPtr, this.customBlockStateIdMapping.getInt(blockState));
-        } else {
-            MemoryUtil.memPutInt(uploadPtr, 0);
-        } uploadPtr += 4;
+        MemoryUtil.memPutInt(uploadPtr, entry.customId()); uploadPtr += 4;
 
 
         //Note: if the layer isSolid then need to fill all the points in the texture where alpha == 0 with the average colour

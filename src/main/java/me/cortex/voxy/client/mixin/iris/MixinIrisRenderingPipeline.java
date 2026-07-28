@@ -51,6 +51,16 @@ public class MixinIrisRenderingPipeline implements IGetVoxyPatchData, IGetIrisVo
         }
     }
 
+    @Inject(method = "beginLevelRendering", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/renderer/LevelRenderer;allChanged()V", shift = At.Shift.BEFORE), remap = false)
+    private void voxy$beginBlockMaterialInitialization(CallbackInfo ci) {
+        IrisUtil.beginBlockMaterialInitialization();
+    }
+
+    @Inject(method = "beginLevelRendering", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/renderer/LevelRenderer;allChanged()V", shift = At.Shift.AFTER), remap = false)
+    private void voxy$endBlockMaterialInitialization(CallbackInfo ci) {
+        IrisUtil.endBlockMaterialInitialization();
+    }
+
     @Override
     public IrisShaderPatch voxy$getPatchData() {
         return this.patchData;

@@ -15,6 +15,7 @@ public class MixinShaderPackSourceNames {
         builder.add("voxy.json");
         builder.add("voxy_opaque.glsl");
         builder.add("voxy_translucent.glsl");
+        builder.add("voxy_taa.glsl");
         return builder;
     }
 }
