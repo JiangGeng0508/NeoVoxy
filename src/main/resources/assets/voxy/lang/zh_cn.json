@@ -1,0 +1,49 @@
+{
+  "voxy.config.title": "Voxy",
+
+  "voxy.config.general": "通用",
+  "voxy.config.rendering": "渲染",
+
+  "voxy.config.general.enabled": "启用 Voxy",
+  "voxy.config.general.enabled.tooltip": "完全启用或禁用 Voxy",
+
+  "voxy.config.general.serviceThreads": "服务线程",
+  "voxy.config.general.serviceThreads.tooltip": "ServiceThreadPool 可使用的线程数量",
+
+  "voxy.config.general.useSodiumBuilder": "使用 Sodium 线程",
+  "voxy.config.general.useSodiumBuilder.tooltip": "将 Sodium 的区块构建线程纳入 Voxy 线程池；在高渲染距离下快速移动时可减少卡顿和延迟",
+
+  "voxy.config.general.ingest": "区块接收",
+  "voxy.config.general.ingest.tooltip": "启用或禁用 Voxy 将新区块转换为 LOD 的能力",
+
+  "voxy.config.general.rendering": "Voxy 渲染",
+  "voxy.config.general.rendering.tooltip": "启用或禁用 Voxy 渲染",
+
+  "voxy.config.general.subDivisionSize": "细分尺寸的像素平方",
+  "voxy.config.general.subDivisionSize.tooltip": "屏幕空间 AABB 在细分到更小 LOD 前允许的最大像素面积；数值越小质量越高",
+
+  "voxy.config.general.renderDistance": "渲染距离",
+  "voxy.config.general.renderDistance.tooltip": "Voxy 的渲染距离，单位为区块",
+
+  "voxy.config.general.environmental_fog": "启用环境雾",
+  "voxy.config.general.environmental_fog.tooltip": "启用或禁用 Voxy 渲染的环境雾",
+
+  "voxy.config.general.ssao_mode": "SSAO 模式",
+  "voxy.config.general.ssao_mode.tooltip": "屏幕空间环境光遮蔽使用的模式；自动模式会尝试在画质和性能影响之间选择合适方案",
+  "voxy.config.general.ssao_mode.auto": "自动",
+  "voxy.config.general.ssao_mode.basic": "基础",
+  "voxy.config.general.ssao_mode.better": "较好",
+  "voxy.config.general.ssao_mode.best": "最佳",
+
+  "voxy.config.general.adaptCloudDistance": "自适应云层距离",
+  "voxy.config.general.adaptCloudDistance.tooltip": "启用或禁用自适应云层距离",
+  "voxy.config.general.cloudDistance": "云层距离",
+  "voxy.config.general.cloudDistance.tooltip": "云层距离，单位为区块；仅在禁用自适应云层距离时使用",
+
+  "voxy.config.general.fogIntensity": "雾效强度",
+  "voxy.config.general.fogIntensity.tooltip": "雾效强度，数值越高雾越浓，可见度越低",
+  "voxy.config.general.fogDensity": "雾效密度",
+  "voxy.config.general.fogDensity.tooltip": "雾效密度，数值越高雾越浓",
+  "voxy.config.general.skyFogDistance": "天空雾距离",
+  "voxy.config.general.skyFogDistance.tooltip": "天空雾开始渲染的距离，单位为区块"
+}

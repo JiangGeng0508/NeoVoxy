@@ -25,13 +25,6 @@ repositories {
     maven { url = 'https://maven.caffeinemc.net/releases' }
 }
 
-sourceSets.main.java {
-    exclude 'me/cortex/voxy/client/mixin/flashback/**'
-    exclude 'me/cortex/voxy/client/mixin/nvidium/**'
-    exclude 'me/cortex/voxy/client/config/ModMenuIntegration.java'
-    exclude 'me/cortex/voxy/commonImpl/mixin/chunky/**'
-}
-
 sourceSets.main.resources {
     exclude 'fabric.mod.json'
     exclude 'voxy.accesswidener'
