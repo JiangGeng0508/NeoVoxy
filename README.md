@@ -64,4 +64,6 @@ NeoVoxy 是面向 Minecraft 1.21.1 + NeoForge 的 Voxy 移植项目，目标是�
 
 1. 有时lod区块不会自动细化，需要重新加载，光影环境下更容易触发。
 
+使用ComplementaryReimagined效果
+<img width="2560" height="1441" alt="2026-07-28_12 22 49" src="https://github.com/user-attachments/assets/2a3499b8-c860-4e9e-9dcc-20343c99a080" />
 
