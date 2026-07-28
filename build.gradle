@@ -25,11 +25,6 @@ repositories {
     maven { url = 'https://maven.caffeinemc.net/releases' }
 }
 
-sourceSets.main.resources {
-    exclude 'fabric.mod.json'
-    exclude 'voxy.accesswidener'
-}
-
 minecraft.accessTransformers.file rootProject.file('src/main/resources/META-INF/accesstransformer.cfg')
 
 jar {

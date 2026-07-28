@@ -1,8 +1,10 @@
 # NeoVoxy
 
-NeoVoxy 是面向 Minecraft 1.21.1 + NeoForge 的 Voxy 移植项目，目标是在 NeoForge 环境中提供基于 LoD 的远距离地形渲染能力。
+NeoVoxy 是面向 Minecraft 1.21.1 + NeoForge 的 Voxy 移植项目，目标是在 NeoForge 环境中提供 Voxy 强大的远距离渲染能力。本分支不依赖于信雅联结，强制依赖只有sodium0.8.12。
 
-项目主要参考 `voxy`，并针对 NeoForge 1.21.1 的加载流程、Mixin、运行时依赖、资源系统和外部启动器环境做了适配。当前仍处于 beta 验证阶段。
+项目主要参考 [voxy](https://github.com/M4G4MED/voxy)，并针对 NeoForge 1.21.1 做了适配。当前仍处于 beta 验证阶段。
+
+>  主要工作由gpt5.5完成，代码质量不能保证，但在作者自制的整合包（含300+模组）中基本可用。
 
 ## 当前状态
 
@@ -15,7 +17,7 @@ NeoVoxy 是面向 Minecraft 1.21.1 + NeoForge 的 Voxy 移植项目，目标是�
 ## 功能范围
 
 - Sodium 渲染管线集成
-- Voxy LoD 区块摄入、存储、保存和渲染
+- Voxy LoD 区块加载、保存和渲染
 - 单人世界和服务器世界的本地 LoD 数据路径管理
 - `/voxy reload`
 - `/voxy import world`
@@ -24,35 +26,42 @@ NeoVoxy 是面向 Minecraft 1.21.1 + NeoForge 的 Voxy 移植项目，目标是�
 - `/voxy import zip`
 - `/voxy import current`
 - `/voxy import cancel`
-- `/voxy debug verifyTLNChildMask`
-- Distant Horizons 导入命令会在运行时检测到 `sqlite`、`xz`、`zstd` 相关类后启用
 
 ## 兼容性
 
-已验证或已做适配：
+已测试环境：
 
-- Sodium NeoForge `0.8.12+mc1.21.1`
-- Lithium NeoForge `0.15.4+mc1.21.1`
-- NeoForge `21.1.244`
+| 模组名称         | 版本                              | 兼容状态    |
+| ------------ | ------------------------------- | ------- |
+| Sodium       | `mc1.21.1-0.8.12-neoforge`      | 兼容良好    |
+| Iris         | `1.8.14-beta.1+1.21.1-neoforge` | 有少量视觉问题 |
+| ReForgedPlay | `0.3`                           | 兼容良好    |
+| Lithium      | `mc1.21.1-0.15.4-neoforge`      | 暂未发现冲突  |
+| Chunky       | `1.4.23`                        | 暂未发现冲突  |
 
-暂未测试的模组兼容：
+不确定的工作：
 
-- Iris
+- 代码中似乎有导入DH区块的部分，但未经测试。
+
+原版有但本分支暂未移植的兼容：
+
 - Nvidium
-- Chunky
 - Vivecraft
-- Mod Menu
 
 ## 构建
 
-NeoVoxy:jar 在build/libs中生成jar
+使用Gradle 运行 NeoVoxy:jarJar
+
+> 注意是jarJar不是jar，模组需要包含rockdb和sqlite等，需要jarJar生成
 
 ## 安装
 
-1. 将 `build/libs/voxy-0.2.15-beta+neoforge.jar` 放入实例的 `mods` 目录。
+1. 将构建的 Jar 放入实例的 `mods` 目录。
 2. 同时安装 Sodium NeoForge `0.8.12+mc1.21.1` 或更新版本。
 3. 使用 Minecraft `1.21.1`、NeoForge `21.1.244` 版本启动。
 
 ## 已知问题
 
-1. 加载光影时lod区块会闪烁
+1. 有时lod区块不会自动细化，需要重新加载，光影环境下更容易触发。
+
+

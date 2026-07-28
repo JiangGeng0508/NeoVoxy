@@ -28,9 +28,6 @@ public class VoxyClientInstance extends VoxyInstance {
     public VoxyClientInstance() {
         super();
         var path = ReForgedPlayCompat.getReplayStoragePath();
-        if (path == null) {
-            path = FlashbackCompat.getReplayStoragePath();
-        }
         this.noIngestOverride = path != null;
         if (path == null) {
             path = getBasePath();
@@ -132,9 +129,9 @@ public class VoxyClientInstance extends VoxyInstance {
 
     private static Path getBasePath() {
         Path basePath = Minecraft.getInstance().gameDirectory.toPath().resolve(".voxy").resolve("saves");
-        var iserver = Minecraft.getInstance().getSingleplayerServer();
-        if (iserver != null) {
-            basePath = iserver.getWorldPath(LevelResource.ROOT).resolve("voxy");
+        var isServer = Minecraft.getInstance().getSingleplayerServer();
+        if (isServer != null) {
+            basePath = isServer.getWorldPath(LevelResource.ROOT).resolve("voxy");
         } else {
             var netHandle = Minecraft.getInstance().gameMode;
             if (netHandle == null) {
