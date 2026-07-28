@@ -61,6 +61,20 @@ public class MixinIrisRenderingPipeline implements IGetVoxyPatchData, IGetIrisVo
         IrisUtil.endBlockMaterialInitialization();
     }
 
+    @Inject(method = "destroy", at = @At("HEAD"), remap = false)
+    private void voxy$destroyPipelineData(CallbackInfo ci) {
+        IrisVoxyRenderPipelineData data = this.pipeline;
+        if (data == null) {
+            return;
+        }
+
+        data.markIrisPipelineDestroyed();
+        if (data.thePipeline != null && Minecraft.getInstance().levelRenderer instanceof IGetVoxyRenderSystem renderer) {
+            renderer.voxy$shutdownRenderer();
+        }
+        this.pipeline = null;
+    }
+
     @Override
     public IrisShaderPatch voxy$getPatchData() {
         return this.patchData;

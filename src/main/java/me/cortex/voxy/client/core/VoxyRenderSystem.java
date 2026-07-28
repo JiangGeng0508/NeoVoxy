@@ -258,6 +258,9 @@ public class VoxyRenderSystem {
             Logger.error("Viewport width or height was zero, this is bad bad bad, exiting frame");
             return;//Only render on valid viewport
         }
+        if (!this.pipeline.isValid()) {
+            return;
+        }
 
         TimingStatistics.resetSamplers();
 

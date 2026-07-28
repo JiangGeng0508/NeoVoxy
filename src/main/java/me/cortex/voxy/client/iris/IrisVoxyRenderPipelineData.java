@@ -54,6 +54,7 @@ public class IrisVoxyRenderPipelineData {
     public final boolean useViewportDims;
     public final boolean deferTranslucency;
     public boolean skipShaderDepthHackFix;
+    private boolean destroyed;
 
     private IrisVoxyRenderPipelineData(IrisShaderPatch patch, int[] opaqueDrawTargets, int[] translucentDrawTargets, StructLayout uniformSet, Runnable blendingSetup, ImageSet imageSet, SSBOSet ssboSet) {
         this.opaqueDrawTargets = opaqueDrawTargets;
@@ -91,6 +92,19 @@ public class IrisVoxyRenderPipelineData {
     }
     public String translucentFragPatch() {
         return this.translucentPatch;
+    }
+
+    public boolean isValid() {
+        return !this.destroyed;
+    }
+
+    public void markIrisPipelineDestroyed() {
+        this.destroyed = true;
+    }
+
+    public static boolean isDestroyedRenderTargetsException(IllegalStateException exception) {
+        String message = exception.getMessage();
+        return message != null && message.contains("destroyed RenderTargets");
     }
 
 

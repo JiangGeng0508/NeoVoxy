@@ -19,6 +19,9 @@ import java.util.List;
 import java.util.function.BooleanSupplier;
 
 import static org.lwjgl.opengl.GL11.GL_DEPTH_BUFFER_BIT;
+import static org.lwjgl.opengl.GL11C.GL_VIEWPORT;
+import static org.lwjgl.opengl.GL11C.glGetIntegerv;
+import static org.lwjgl.opengl.GL11C.glViewport;
 import static org.lwjgl.opengl.GL30C.*;
 import static org.lwjgl.opengl.GL31.GL_UNIFORM_BUFFER;
 import static org.lwjgl.opengl.GL45C.*;
@@ -163,12 +166,18 @@ public class IrisVoxyRenderPipeline extends AbstractRenderPipeline {
 
     @Override
     protected void finish(Viewport<?> viewport, int sourceFrameBuffer, int srcWidth, int srcHeight) {
-        if (this.data.renderToVanillaDepth && srcWidth == viewport.width  && srcHeight == viewport.height) {//We can only depthblit out if destination size is the same
+        if (this.data.renderToVanillaDepth && srcWidth > 0 && srcHeight > 0) {
+            int[] oldViewport = new int[4];
+            glGetIntegerv(GL_VIEWPORT, oldViewport);
+            glViewport(0, 0, srcWidth, srcHeight);
+
             glColorMask(false, false, false, false);
             AbstractRenderPipeline.transformBlitDepth(this.depthBlit,
                     this.fbTranslucent.getDepthTex().id, sourceFrameBuffer,
                     viewport, new Matrix4f(viewport.vanillaProjection).mul(viewport.modelView));
             glColorMask(true, true, true, true);
+
+            glViewport(oldViewport[0], oldViewport[1], oldViewport[2], oldViewport[3]);
         } else {
             // normally disabled by AbstractRenderPipeline but since we are skipping it we do it here
             glDisable(GL_STENCIL_TEST);
@@ -176,6 +185,10 @@ public class IrisVoxyRenderPipeline extends AbstractRenderPipeline {
         }
     }
 
+    @Override
+    public boolean isValid() {
+        return this.data.isValid() && this.data.thePipeline == this;
+    }
 
     @Override
     public void bindUniforms() {
@@ -190,12 +203,23 @@ public class IrisVoxyRenderPipeline extends AbstractRenderPipeline {
     }
 
     private void doBindings() {
+        if (!this.isValid()) {
+            return;
+        }
         this.bindUniforms();
         if (this.data.getSsboSet() != null) {
             this.data.getSsboSet().bindingFunction().accept(10);
         }
         if (this.data.getImageSet() != null) {
-            this.data.getImageSet().bindingFunction().accept(6);
+            try {
+                this.data.getImageSet().bindingFunction().accept(6);
+            } catch (IllegalStateException e) {
+                if (IrisVoxyRenderPipelineData.isDestroyedRenderTargetsException(e)) {
+                    this.data.markIrisPipelineDestroyed();
+                    return;
+                }
+                throw e;
+            }
         }
     }
     @Override

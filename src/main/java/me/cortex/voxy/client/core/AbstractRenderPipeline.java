@@ -261,6 +261,10 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         return false;
     }
 
+    public boolean isValid() {
+        return true;
+    }
+
     //null means no function, otherwise return the taa injection function
     public String taaFunction(String functionName) {
         return this.taaFunction(-1, functionName);
