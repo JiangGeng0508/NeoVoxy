@@ -6,6 +6,8 @@ NeoVoxy 是面向 Minecraft 1.21.1 + NeoForge 的 Voxy 移植项目，目标是�
 
 >  主要工作由gpt5.5完成，代码质量不能保证，但在作者自制的整合包（含300+模组）中基本可用。
 
+可以参考类似项目: [voxy-forged](https://github.com/falling-colud/voxy-forged)
+
 ## 当前状态
 
 - Minecraft: `1.21.1`
