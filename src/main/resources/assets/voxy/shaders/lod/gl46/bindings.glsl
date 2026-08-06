@@ -3,6 +3,10 @@ layout(binding = 0, std140) uniform SceneUniform {
     ivec3 baseSectionPos;
     uint frameId;
     vec3 cameraSubPos;
+    float uEarthRadius; // 0.0 = disabled, otherwise radius in blocks for world curvature
+    float uColorFix;    // 1.0 = LOD colour/brightness fix applied, 0.0 = raw brightness (toggled via /voxy colorfix)
+    float uVanillaEnd;  // horizontal distance (blocks, from camera) where vanilla ends / LOD begins; curve starts here
+    float uCurveFix;    // 1.0 = fixed curve (seamless + camera-relative), 0.0 = original curve (toggled via /voxy curvefix)
 };
 
 //TODO: see if making the stride 2*4*4 bytes or something cause you get that 16 byte write

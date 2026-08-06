@@ -9,6 +9,9 @@ layout(local_size_x=WORK_SIZE, local_size_y=1) in;
 
 #import <voxy:lod/hierarchical/node.glsl>
 
+layout(location=0) uniform uint visibilityCounter;
+layout(location=1) uniform uint minEvictAge;
+
 layout(binding = VISIBILITY_BUFFER_BINDING, std430) restrict readonly buffer VisibilityDataBuffer {
     uint[] visibility;
 };
@@ -141,6 +144,14 @@ void main() {
         uint id = gl_GlobalInvocationID.x*ELEMS_PER_THREAD+i;
         uint vis = visibility[id];
         if (vis == uint(-1)) {
+            continue;
+        }
+        //Never consider geometry rendered within the last minEvictAge frames: under memory
+        // pressure the least-recently-rendered set would otherwise include currently visible
+        // sections, evicting meshes that are still on screen and making lods flicker between
+        // detail levels as they get removed and immediately rebuilt. (The counter+60 future
+        // values written on eviction underflow the subtraction and so still rank as recent.)
+        if ((visibilityCounter - vis) < minEvictAge) {
             continue;
         }
         //Quick exit if this element is already bigger than global output

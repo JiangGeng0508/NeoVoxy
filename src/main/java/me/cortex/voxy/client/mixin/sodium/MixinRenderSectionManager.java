@@ -4,6 +4,7 @@ import me.cortex.voxy.client.ICheekyClientChunkCache;
 import me.cortex.voxy.client.config.VoxyConfig;
 import me.cortex.voxy.client.core.IGetVoxyRenderSystem;
 import me.cortex.voxy.client.core.VoxyRenderSystem;
+import me.cortex.voxy.client.core.rendering.ChunkBoundRenderer;
 import me.cortex.voxy.common.world.service.VoxelIngestService;
 import me.cortex.voxy.commonImpl.VoxyCommon;
 import net.caffeinemc.mods.sodium.client.gl.device.CommandList;
@@ -25,6 +26,7 @@ import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.ModifyArg;
 import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
@@ -48,6 +50,27 @@ public class MixinRenderSectionManager {
         this.bottomSectionY = this.level.getMinBuildHeight()>>4;
     }
 
+    // Render the OUTERMOST ~1-chunk ring of the vanilla render distance as Voxy LOD instead of vanilla.
+    // The outermost ring is the newest, actively-streaming border chunks, and their water rendered wrong
+    // right at the vanilla<->LOD boundary (weird colour without shaders, blowing out white with shaders).
+    // By shrinking Sodium's section-visibility search distance by one chunk, those border sections are
+    // never visited -> never built -> never drawn as vanilla, AND (because the LOD-occlusion bound is
+    // keyed on BUILT sections via voxy$updateOnUpload) they never mask the LOD. So Voxy LOD fills that
+    // ring cleanly, with no vanilla there to render wrong or fight the LOD. Only the visibility BFS is
+    // affected; chunk loading/ingest still happen at full distance.
+    @ModifyArg(
+        method = "createTerrainRenderList",
+        at = @At(value = "INVOKE", target = "Lnet/caffeinemc/mods/sodium/client/render/chunk/occlusion/OcclusionCuller;findVisible(Lnet/caffeinemc/mods/sodium/client/render/chunk/lists/RenderSectionVisitor;Lnet/caffeinemc/mods/sodium/client/render/viewport/Viewport;FZI)V"),
+        index = 2
+    )
+    private float voxy$cullOutermostVanillaRing(float searchDistance) {
+        float culled = Math.max(searchDistance - 16.0f, 16.0f);
+        // Publish the EXACT vanilla cull edge to the LOD-occlusion circle (ChunkBoundRenderer) so the
+        // two align perfectly.
+        ChunkBoundRenderer.VANILLA_CULL_DISTANCE = culled;
+        return culled;
+    }
+
     @Inject(method = "onChunkRemoved", at = @At("HEAD"))
     private void voxy$injectIngest(int x, int z, CallbackInfo ci) {
         //TODO: Am not quite sure if this is right
@@ -62,6 +85,30 @@ public class MixinRenderSectionManager {
         }
     }
 
+
+    // Sodium 0.8: when a section is disposed (chunk unloads / leaves render distance), explicitly
+    // clear it from the LOD-occlusion bound. The build-state redirect (voxy$updateOnUpload) misses
+    // this in 0.8 because RenderSection.setInfo() returns false during disposal, which made the
+    // section keep masking Voxy's LOD - so the area went invisible for a moment until something
+    // else cleared it. Keying matches voxy$updateOnUpload so add/remove line up.
+    @Inject(method = "onSectionRemoved", at = @At("HEAD"))
+    private void voxy$clearBoundOnSectionRemoved(int x, int y, int z, CallbackInfo ci) {
+        if (this.level.levelRenderer == null) {
+            return;
+        }
+        var system = ((IGetVoxyRenderSystem)(this.level.levelRenderer)).voxy$getRenderSystem();
+        if (system == null) {
+            return;
+        }
+        if (VoxyCommon.IS_MINE_IN_ABYSS) {
+            int sector = (x+512)>>10;
+            x -= sector<<10;
+            y += 16+(256-32-sector*30);
+        }
+        // Disposal means Sodium has stopped drawing this section, so clear the mask immediately
+        // (the delayed path would leave a brief see-through gap before the LOD shows).
+        system.chunkBoundRenderer.removeSectionImmediate(SectionPos.asLong(x, y, z));
+    }
 
     @Inject(method = "onChunkAdded", at = @At("HEAD"))
     private void voxy$ingestOnAdd(int x, int z, CallbackInfo ci) {

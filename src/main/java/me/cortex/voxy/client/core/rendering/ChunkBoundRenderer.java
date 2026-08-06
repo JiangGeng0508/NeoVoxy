@@ -1,6 +1,7 @@
 package me.cortex.voxy.client.core.rendering;
 
 import it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap;
+import it.unimi.dsi.fastutil.longs.LongArrayList;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import me.cortex.voxy.client.core.AbstractRenderPipeline;
 import me.cortex.voxy.client.core.RenderProperties;
@@ -32,6 +33,11 @@ import static org.lwjgl.opengl.GL42.glDrawElementsInstancedBaseInstance;
 //This is a render subsystem, its very simple in what it does
 // it renders an AABB around loaded chunks, thats it
 public class ChunkBoundRenderer {
+    // Set each frame by MixinRenderSectionManager.voxy$cullOutermostVanillaRing to the EXACT distance
+    // (blocks) within which Sodium still renders vanilla (its search distance minus our 1-chunk cull).
+    // -1 until Sodium's first render-list build; callers fall back to an estimate until then.
+    public static volatile float VANILLA_CULL_DISTANCE = -1.0f;
+
     private static final int INIT_MAX_CHUNK_COUNT = 1<<12;
     private GlBuffer chunkPosBuffer = new GlBuffer(INIT_MAX_CHUNK_COUNT*8);//Stored as ivec2
     private final GlBuffer uniformBuffer = new GlBuffer(128);
@@ -42,11 +48,27 @@ public class ChunkBoundRenderer {
 
     private final LongOpenHashSet addQueue = new LongOpenHashSet();
     private final LongOpenHashSet remQueue = new LongOpenHashSet();
+    // Tracks sections currently sitting in a delayed-removal slot, so removeSection is idempotent
+    // (it can be driven from multiple Sodium hooks for the same section without double-removing).
+    private final LongOpenHashSet pendingRemoval = new LongOpenHashSet();
+
+    // Delayed removal to prevent pop-out when chunks unload
+    // Each entry is processed after REMOVAL_DELAY_FRAMES frames
+    // 12 frames @ 60fps = ~200ms delay for LOD system to prepare
+    private static final int REMOVAL_DELAY_FRAMES = 12;
+
+    private final LongArrayList[] delayedRemovalQueue = new LongArrayList[REMOVAL_DELAY_FRAMES];
+    private int delayQueueIndex = 0;
 
     private final AbstractRenderPipeline pipeline;
     public ChunkBoundRenderer(AbstractRenderPipeline pipeline) {
         this.chunk2idx.defaultReturnValue(-1);
         this.properties = pipeline.properties;
+
+        // Initialize delayed removal queues
+        for (int i = 0; i < REMOVAL_DELAY_FRAMES; i++) {
+            this.delayedRemovalQueue[i] = new LongArrayList();
+        }
 
         String vert = ShaderLoader.parse("voxy:chunkoutline/outline.vsh");
         String taa = pipeline.taaFunction("getTAA");
@@ -68,19 +90,74 @@ public class ChunkBoundRenderer {
     }
 
     public void addSection(long pos) {
+        // First check if it's pending removal in any delay queue
+        if (this.pendingRemoval.remove(pos)) {
+            for (LongArrayList queue : this.delayedRemovalQueue) {
+                if (queue.rem(pos)) {
+                    break;
+                }
+            }
+            return; // Was pending removal, now cancelled
+        }
         if (!this.remQueue.remove(pos)) {
             this.addQueue.add(pos);
         }
     }
 
     public void removeSection(long pos) {
-        if (!this.addQueue.remove(pos)) {
-            this.remQueue.add(pos);
+        if (this.addQueue.remove(pos)) {
+            return; // Was a pending add that never became live; just cancel it
         }
+        // Only sections actually being masked need removing. Sodium drives this from several places
+        // (build-state change and section disposal), so ignore anything not currently tracked to
+        // avoid spurious "not in map" churn, and dedupe via pendingRemoval.
+        if (!this.chunk2idx.containsKey(pos)) {
+            return;
+        }
+        if (this.pendingRemoval.add(pos)) {
+            // Add to delayed removal queue instead of immediate removal
+            // This gives LOD system time to prepare before chunk bounds disappear
+            this.delayedRemovalQueue[this.delayQueueIndex].add(pos);
+        }
+    }
+
+    // Removes a section from the occlusion bound on the next frame, skipping the delayed-removal
+    // window. Use this when Sodium has actually disposed the section (chunk unloaded / left render
+    // distance): the LOD is already prepared, so the ~200ms delay would only leave a see-through
+    // gap. The delayed path is still used for transient build-state changes (rebuilds).
+    public void removeSectionImmediate(long pos) {
+        if (this.addQueue.remove(pos)) {
+            return; // Was a pending add that never became live; just cancel it
+        }
+        if (!this.chunk2idx.containsKey(pos)) {
+            return;
+        }
+        // Cancel any in-flight delayed removal so we don't process it twice.
+        if (this.pendingRemoval.remove(pos)) {
+            for (LongArrayList queue : this.delayedRemovalQueue) {
+                if (queue.rem(pos)) {
+                    break;
+                }
+            }
+        }
+        this.remQueue.add(pos);
     }
 
     //Bind and render, changing as little gl state as possible so that the caller may configure how it wants to render
     public void render(Viewport<?> viewport) {
+        // Process delayed removals - rotate to next slot and move oldest entries to remQueue
+        int oldestSlot = (this.delayQueueIndex + 1) % REMOVAL_DELAY_FRAMES;
+        LongArrayList oldestQueue = this.delayedRemovalQueue[oldestSlot];
+        if (!oldestQueue.isEmpty()) {
+            for (int i = 0; i < oldestQueue.size(); i++) {
+                long p = oldestQueue.getLong(i);
+                this.remQueue.add(p);
+                this.pendingRemoval.remove(p);
+            }
+            oldestQueue.clear();
+        }
+        this.delayQueueIndex = oldestSlot;
+
         if (!this.remQueue.isEmpty()) {
             boolean wasEmpty = this.chunk2idx.isEmpty();
             this.remQueue.forEach(this::_remPos);//TODO: REPLACE WITH SCATTER COMPUTE
@@ -97,7 +174,11 @@ public class ChunkBoundRenderer {
         long ptr = UploadStream.INSTANCE.upload(this.uniformBuffer, 0, 128);
         long matPtr = ptr; ptr += 4*4*4;
 
-        final float renderDistance = Minecraft.getInstance().options.getEffectiveRenderDistance()*16;//In blocks
+        // Use the exact vanilla cull edge published by MixinRenderSectionManager when available, falling
+        // back to an estimate from the configured render distance otherwise.
+        final float renderDistance = VANILLA_CULL_DISTANCE >= 0.0f
+                ? VANILLA_CULL_DISTANCE
+                : Math.max(Minecraft.getInstance().options.getEffectiveRenderDistance()*16 - 16.0f, 16.0f);//In blocks
 
         {//This is recomputed to be in chunk section space not worldsection
 
@@ -231,6 +312,12 @@ public class ChunkBoundRenderer {
 
     public void reset() {
         this.chunk2idx.clear();
+        this.remQueue.clear();
+        this.addQueue.clear();
+        this.pendingRemoval.clear();
+        for (LongArrayList queue : this.delayedRemovalQueue) {
+            queue.clear();
+        }
     }
 
     public void free() {

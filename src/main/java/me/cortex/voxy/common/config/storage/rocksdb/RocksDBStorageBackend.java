@@ -20,6 +20,9 @@ import java.util.List;
 import java.util.function.LongConsumer;
 
 public class RocksDBStorageBackend extends StorageBackend {
+    private static final long DEFAULT_BLOCK_CACHE_SIZE = 128L * 1024L * 1024L;
+    private static final long BLOCK_CACHE_SIZE = Long.getLong("voxy.rocksdb.blockCacheMb", DEFAULT_BLOCK_CACHE_SIZE >> 20) << 20;
+
     private final RocksDB db;
     private final ColumnFamilyHandle worldSections;
     private final ColumnFamilyHandle idMappings;
@@ -65,7 +68,7 @@ public class RocksDBStorageBackend extends StorageBackend {
                 .setLevelCompactionDynamicLevelBytes(true)
                 .optimizeForPointLookup(128);
 
-        var bCache = new HyperClockCache(128*1024L*1024L,0, 4, false);
+        var bCache = new HyperClockCache(BLOCK_CACHE_SIZE, 0, 4, false);
         var filter = new BloomFilter(10);
         cfWorldSecOpts.setTableFormatConfig(new BlockBasedTableConfig()
                 .setCacheIndexAndFilterBlocksWithHighPriority(true)

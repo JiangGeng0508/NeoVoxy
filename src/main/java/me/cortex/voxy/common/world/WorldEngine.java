@@ -57,6 +57,10 @@ public class WorldEngine {
         if (Runtime.getRuntime().maxMemory()>=(1L<<32)-(200L<<20)) {
             cacheSize = 2048;
         }
+        cacheSize = Integer.getInteger("voxy.activeSectionCacheSize", cacheSize);
+        if (cacheSize < 0) {
+            throw new IllegalArgumentException("voxy.activeSectionCacheSize must be >= 0");
+        }
 
         this.storage = storage;
         this.mapper = new Mapper(this.storage);

@@ -39,7 +39,7 @@ public class MixinSodiumWorldRendererVS {
                 if (IrisUtil.irisShaderPackEnabled()) {
                     viewport = renderer.getViewport();
                 } else {
-                    viewport = renderer.setupViewport(matrices.projection(), matrices.modelView(), x, y, z);
+                    viewport = renderer.setupViewport(matrices, x, y, z);
                 }
                 renderer.renderOpaque(viewport);
             }

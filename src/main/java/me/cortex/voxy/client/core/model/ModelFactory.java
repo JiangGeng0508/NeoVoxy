@@ -455,8 +455,23 @@ public class ModelFactory {
         var colourProvider = getColourProvider(blockState.getBlock());
 
         boolean isBiomeColourDependent = false;
+        int constantTint = -1;
         if (colourProvider != null) {
-            isBiomeColourDependent = isBiomeDependentColour(colourProvider, blockState);
+            //Modded colour providers can throw when probed with the synthetic tint getter (they may cast the
+            // world or dereference block entities the getter stubs out with null/zero, e.g. Integrated
+            // Dynamics). An exception here propagates off the bakery thread and crashes the game, so treat
+            // such blocks as untinted instead.
+            try {
+                isBiomeColourDependent = isBiomeDependentColour(colourProvider, blockState);
+                if (!isBiomeColourDependent) {
+                    constantTint = captureColourConstant(colourProvider, blockState, DEFAULT_BIOME)|0xFF000000;
+                }
+            } catch (Throwable t) {
+                Logger.warn("Colour provider for " + blockState + " threw while being probed, treating the block as untinted", t);
+                colourProvider = null;
+                isBiomeColourDependent = false;
+                constantTint = -1;
+            }
         }
 
         ModelEntry entry;
@@ -464,7 +479,7 @@ public class ModelFactory {
             entry = new ModelEntry(
                     textureData,
                     clientFluidStateId,
-                    isBiomeColourDependent||colourProvider==null?-1:captureColourConstant(colourProvider, blockState, DEFAULT_BIOME)|0xFF000000,
+                    constantTint,
                     getCustomBlockStateId(blockState)
             );
             int possibleDuplicate = this.modelTexture2id.getInt(entry);

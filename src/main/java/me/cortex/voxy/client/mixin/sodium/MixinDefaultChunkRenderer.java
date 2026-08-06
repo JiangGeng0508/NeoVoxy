@@ -52,7 +52,7 @@ public abstract class MixinDefaultChunkRenderer extends ShaderChunkRenderer {
                 if (IrisUtil.irisShaderPackEnabled()) {
                     viewport = renderer.getViewport();
                 } else {
-                    viewport = renderer.setupViewport(matrices.projection(), matrices.modelView(), camera.x, camera.y, camera.z);
+                    viewport = renderer.setupViewport(matrices, camera.x, camera.y, camera.z);
                 }
                 renderer.renderOpaque(viewport);
             }

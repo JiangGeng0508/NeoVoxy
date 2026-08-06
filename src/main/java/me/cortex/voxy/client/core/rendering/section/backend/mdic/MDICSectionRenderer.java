@@ -10,7 +10,9 @@ import me.cortex.voxy.client.core.gl.GlVertexArray;
 import me.cortex.voxy.client.core.gl.shader.Shader;
 import me.cortex.voxy.client.core.gl.shader.ShaderLoader;
 import me.cortex.voxy.client.core.gl.shader.ShaderType;
+import me.cortex.voxy.client.config.VoxyConfig;
 import me.cortex.voxy.client.core.model.ModelStore;
+import me.cortex.voxy.client.core.rendering.ChunkBoundRenderer;
 import me.cortex.voxy.client.core.rendering.section.backend.AbstractSectionRenderer;
 import me.cortex.voxy.client.core.rendering.section.geometry.BasicSectionGeometryData;
 import me.cortex.voxy.client.core.rendering.util.DownloadStream;
@@ -164,6 +166,29 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         }
         MemoryUtil.memPutInt(ptr, viewport.frameId&0x7fffffff); ptr += 4;
         viewport.innerTranslation.getToAddress(ptr); ptr += 4*3;
+
+        // Earth curvature radius: 0 = disabled, otherwise compute radius in blocks
+        // DH uses: radius = 6371000.0 / ratio (Earth radius in meters / ratio factor)
+        // We use blocks (1 block = 1 meter), so same formula
+        int earthCurveRatio = VoxyConfig.CONFIG.earthCurveRatio;
+        float earthRadius = 0.0f;
+        if (earthCurveRatio >= 50) {
+            earthRadius = 6371000.0f / earthCurveRatio;
+        }
+        MemoryUtil.memPutFloat(ptr, earthRadius); ptr += 4;
+
+        // LOD colour/brightness fix toggle (see /voxy colorfix). 1.0 = apply fix, 0.0 = raw brightness.
+        MemoryUtil.memPutFloat(ptr, VoxyConfig.CONFIG.colorFix ? 1.0f : 0.0f); ptr += 4;
+
+        // Vanilla render-distance edge in blocks (where LOD begins). World curvature starts here so it
+        // seamlessly continues the flat vanilla terrain. Match ChunkBoundRenderer's exact cull distance.
+        float vanillaEnd = ChunkBoundRenderer.VANILLA_CULL_DISTANCE >= 0.0f
+                ? ChunkBoundRenderer.VANILLA_CULL_DISTANCE
+                : Math.max(Minecraft.getInstance().options.getEffectiveRenderDistance()*16 - 16.0f, 16.0f);
+        MemoryUtil.memPutFloat(ptr, vanillaEnd); ptr += 4;
+
+        // World-curvature fix toggle (see /voxy curvefix). 1.0 = fixed curve, 0.0 = original curve.
+        MemoryUtil.memPutFloat(ptr, VoxyConfig.CONFIG.curveFix ? 1.0f : 0.0f); ptr += 4;
 
         UploadStream.INSTANCE.commit();
     }

@@ -107,7 +107,9 @@ vec4 computeColour(vec2 texturePos, vec4 colour) {
     if (doTint) {
         colour *= uint2vec4RGBA(interData.z).yzwx;
     }
-    return (colour * uint2vec4RGBA(interData.y)) + vec4(0,0,0,float(interData.w&0xFFu)/255);
+    // uColorFix toggles the brightness fix: 1.0 => 0.955 (fix on), 0.0 => 1.0 (raw). Toggle via /voxy colorfix.
+    float b = mix(1.0, 0.955, uColorFix);
+    return (colour * uint2vec4RGBA(interData.y)) * vec4(b, b, b, 1.0) + vec4(0,0,0,float(interData.w&0xFFu)/255);
 }
 
 #endif
@@ -216,7 +218,12 @@ void main() {
 
     uint face = getFace();
     face ^= uint((face&1u)!=uint(gl_FrontFacing!=((face>>1)!=0u)));
-    voxy_emitFragment(VoxyFragmentParameters(colour, tile, texPos, face, modelId, getLightmapUv(interData.y), tint, model.customId));
+    // Under shaderpacks the pack lights LOD from the lightmap + face normal only, without the smooth AO /
+    // ambient data full chunks provide, so LOD reads a little dark. Lift the albedo we hand the pack to
+    // compensate. Tune LOD_SHADER_BRIGHTNESS to taste (1.0 = no lift, matches raw block colour).
+    float LOD_SHADER_BRIGHTNESS = mix(1.0, 1.025, uColorFix);
+    vec4 emitColour = vec4(colour.rgb * LOD_SHADER_BRIGHTNESS, colour.a);
+    voxy_emitFragment(VoxyFragmentParameters(emitColour, tile, texPos, face, modelId, getLightmapUv(interData.y), tint, model.customId));
 
     #endif
 }

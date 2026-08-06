@@ -89,10 +89,11 @@ uvec3 makeRemainingAttributes(const in BlockModel model, const in Quad quad, uin
 
     vec4 tinting = getLighting(lighting);
 
-    uint conditionalTinting = 0;
-    if (tintColour != uint(-1)) {
-        conditionalTinting = tintColour;
-    }
+    //-1 means "no tint", which must multiply as white, not as zero. Mapping it to 0 here renders anything
+    // that reaches the tint path with an unresolved tint as solid black (e.g. a biome LUT slot that could
+    // not be resolved, or a colour provider that returned -1). 0xFFFFFFFF unpacks to white, so this is an
+    // identity multiply and the block keeps its texture colour.
+    uint conditionalTinting = tintColour;
 
     uint addin = 0;
     if (!isTranslucent) {
@@ -150,9 +151,57 @@ void setupQuad(out QuadData quad, const in Quad rawQuad, uvec2 sPos, bool genera
     quad.uvCorner = faceSize.xz;
 }
 
+// Apply spherical world curvature effect (inspired by Distant Horizons)
+// Makes distant terrain curve downward as if standing on a spherical planet
+vec3 applyWorldCurvature(vec3 worldPos) {
+    if (uEarthRadius <= 0.0) {
+        return worldPos;
+    }
+
+    if (uCurveFix < 0.5) {
+        // Original curve (kept for A/B via /voxy curvefix): measured from the section origin and applied
+        // everywhere, so it cuts into the flat vanilla terrain at the boundary and snaps every 32 blocks.
+        float localRadius = uEarthRadius + worldPos.y;
+        float horizontalDist = length(worldPos.xz);
+        float phi = horizontalDist / localRadius;
+        worldPos.y += (cos(phi) - 1.0) * localRadius;
+        if (phi > 0.0001) {
+            worldPos.xz = worldPos.xz * sin(phi) / phi;
+        }
+        return worldPos;
+    }
+
+    // Fixed curve. Horizontal offset from the EXACT camera position (cameraSubPos), not the section origin.
+    // The section origin only updates every 32 blocks, which made the curve snap/jag while moving; anchoring
+    // to the camera makes it track smoothly.
+    vec2 fromCam = worldPos.xz - cameraSubPos.xz;
+    float dist = length(fromCam);
+
+    // Only curve terrain BEYOND the vanilla render-distance edge so the curve seamlessly continues the flat
+    // vanilla terrain instead of cutting into it. At the edge the drop is 0 with 0 slope (cos'(0)=0) and the
+    // horizontal pivot is unchanged, so vanilla and LOD meet with no step or kink.
+    float curveDist = dist - uVanillaEnd;
+    if (curveDist <= 0.0) {
+        return worldPos;
+    }
+
+    float localRadius = uEarthRadius + worldPos.y;
+    float phi = curveDist / localRadius;
+
+    // Y displacement: terrain curves down past the edge
+    worldPos.y += (cos(phi) - 1.0) * localRadius;
+
+    // XZ convergence of the beyond-edge portion (prevents horizon stretching), pivoting at the edge
+    float converged = uVanillaEnd + sin(phi) * localRadius;
+    worldPos.xz = cameraSubPos.xz + (fromCam / dist) * converged;
+
+    return worldPos;
+}
+
 vec4 getQuadCornerPos(in QuadData quad, uint cornerId) {
     vec2 cornerMask = vec2((cornerId>>1)&1u, cornerId&1u)*quad.lodScale;
     vec3 point = quad.basePoint + swizzelDataAxis(quad.axis,vec3(quad.quadSizeAddin*cornerMask,0));
+    point = applyWorldCurvature(point);
     vec4 pos = MVP * vec4(point, 1.0f);
     pos.xy += taaOffset*pos.w;
     return pos;

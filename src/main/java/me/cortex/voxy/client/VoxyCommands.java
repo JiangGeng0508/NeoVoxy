@@ -6,7 +6,9 @@ import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.context.CommandContext;
 import com.mojang.brigadier.suggestion.Suggestions;
 import com.mojang.brigadier.suggestion.SuggestionsBuilder;
+import me.cortex.voxy.client.config.VoxyConfig;
 import me.cortex.voxy.client.core.IGetVoxyRenderSystem;
+import me.cortex.voxy.client.distgen.DistantGenerationManager;
 import me.cortex.voxy.common.DebugUtils;
 import me.cortex.voxy.common.Logger;
 import me.cortex.voxy.commonImpl.VoxyCommon;
@@ -71,8 +73,92 @@ public class VoxyCommands {
         return Commands.literal("voxy")//.requires((ctx)-> VoxyCommon.getInstance() != null)
                 .then(Commands.literal("reload")
                         .executes(VoxyCommands::reloadInstance))
+                .then(Commands.literal("distantgen")
+                        .then(Commands.literal("status")
+                                .executes(VoxyCommands::distantGenStatus))
+                        .then(Commands.literal("pause")
+                                .executes(ctx->distantGenSetPaused(ctx, true)))
+                        .then(Commands.literal("resume")
+                                .executes(ctx->distantGenSetPaused(ctx, false)))
+                        .then(Commands.literal("reset")
+                                .executes(VoxyCommands::distantGenReset)))
+                .then(Commands.literal("colorfix")
+                        .executes(VoxyCommands::toggleColorFix)
+                        .then(Commands.literal("on").executes(ctx->setColorFix(ctx, true)))
+                        .then(Commands.literal("off").executes(ctx->setColorFix(ctx, false))))
+                .then(Commands.literal("curvefix")
+                        .executes(VoxyCommands::toggleCurveFix)
+                        .then(Commands.literal("on").executes(ctx->setCurveFix(ctx, true)))
+                        .then(Commands.literal("off").executes(ctx->setCurveFix(ctx, false))))
                 .then(imports)
                 .then(debug);
+    }
+
+    private static int toggleColorFix(CommandContext<CommandSourceStack> ctx) {
+        return setColorFix(ctx, !VoxyConfig.CONFIG.colorFix);
+    }
+
+    private static int setColorFix(CommandContext<CommandSourceStack> ctx, boolean on) {
+        VoxyConfig.CONFIG.colorFix = on;
+        ctx.getSource().sendSuccess(()->Component.literal("Voxy LOD colour fix " + (on ? "ENABLED" : "DISABLED (raw brightness)")), false);
+        return 0;
+    }
+
+    private static int toggleCurveFix(CommandContext<CommandSourceStack> ctx) {
+        return setCurveFix(ctx, !VoxyConfig.CONFIG.curveFix);
+    }
+
+    private static int setCurveFix(CommandContext<CommandSourceStack> ctx, boolean on) {
+        VoxyConfig.CONFIG.curveFix = on;
+        ctx.getSource().sendSuccess(()->Component.literal("Voxy world-curve fix " + (on ? "ENABLED (seamless + smooth)" : "DISABLED (original curve)")), false);
+        return 0;
+    }
+
+    private static int distantGenStatus(CommandContext<CommandSourceStack> ctx) {
+        var src = ctx.getSource();
+        if (!VoxyConfig.CONFIG.distantGenEnabled) {
+            src.sendSuccess(()->Component.literal("Distant generation is disabled in the Voxy config"), false);
+            return 0;
+        }
+        if (Minecraft.getInstance().getSingleplayerServer() == null) {
+            src.sendSuccess(()->Component.literal("Distant generation only runs on the integrated server (singleplayer/LAN host)"), false);
+            return 0;
+        }
+        src.sendSuccess(()->Component.literal("Distant generation: " + (DistantGenerationManager.isPaused()?"paused":"running")
+                + ", radius " + VoxyConfig.CONFIG.distantGenRadius + " chunks"), false);
+        var lines = DistantGenerationManager.statusLines();
+        if (lines.isEmpty()) {
+            src.sendSuccess(()->Component.literal("  (no active generators yet)"), false);
+        }
+        for (var line : lines) {
+            src.sendSuccess(()->Component.literal("  " + line), false);
+        }
+        return 0;
+    }
+
+    private static int distantGenSetPaused(CommandContext<CommandSourceStack> ctx, boolean pause) {
+        DistantGenerationManager.setPaused(pause);
+        ctx.getSource().sendSuccess(()->Component.literal("Distant generation " + (pause?"paused":"resumed")), false);
+        return 0;
+    }
+
+    private static int distantGenReset(CommandContext<CommandSourceStack> ctx) {
+        var server = Minecraft.getInstance().getSingleplayerServer();
+        var level = Minecraft.getInstance().level;
+        if (server == null || level == null) {
+            ctx.getSource().sendFailure(Component.literal("Distant generation only runs on the integrated server"));
+            return 1;
+        }
+        var dim = level.dimension();
+        //Generator state is owned by the server thread
+        server.execute(()->{
+            var serverLevel = server.getLevel(dim);
+            if (serverLevel != null) {
+                DistantGenerationManager.resetLevel(serverLevel);
+            }
+        });
+        ctx.getSource().sendSuccess(()->Component.literal("Distant generation progress reset for " + dim.location() + " (terrain will re-ingest)"), false);
+        return 0;
     }
 
     private static boolean hasDistantHorizonsImportLibraries() {

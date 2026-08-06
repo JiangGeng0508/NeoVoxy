@@ -14,7 +14,7 @@ import java.io.IOException;
 public class IrisUtil {
     public record CapturedViewportParameters(ChunkRenderMatrices matrices, double x, double y, double z) {
         public Viewport<?> apply(VoxyRenderSystem vrs) {
-            return vrs.setupViewport(this.matrices.projection(), this.matrices.modelView(), this.x, this.y, this.z);
+            return vrs.setupViewport(this.matrices, this.x, this.y, this.z);
         }
     }
 

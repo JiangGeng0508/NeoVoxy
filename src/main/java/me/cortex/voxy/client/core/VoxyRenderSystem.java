@@ -201,7 +201,7 @@ public class VoxyRenderSystem {
     }
 
 
-    public Viewport<?> setupViewport(Matrix4fc vanillaProjection, Matrix4fc modelView, double cameraX, double cameraY, double cameraZ) {
+    public Viewport<?> setupViewport(ChunkRenderMatrices matrices, double cameraX, double cameraY, double cameraZ) {
         var viewport = this.getViewport();
         if (viewport == null) {
             return null;
@@ -215,13 +215,21 @@ public class VoxyRenderSystem {
         }
 
         //cameraY += 100;
-        var voxyProjection = computeProjectionMat(this.properties, vanillaProjection);
+        var voxyProjection = computeProjectionMat(this.properties, matrices.projection());
 
         int[] dims = new int[4];
         glGetIntegerv(GL_VIEWPORT, dims);
 
         int width = dims[2];
         int height = dims[3];
+
+        // Under Iris the GL viewport can be 0 at capture time, which would build a 0-sized (incomplete)
+        // framebuffer and crash. Fall back to the actual window size in that case.
+        if (width <= 0 || height <= 0) {
+            var window = Minecraft.getInstance().getWindow();
+            width = window.getWidth();
+            height = window.getHeight();
+        }
 
         {//Apply render scaling factor
             var factor = this.pipeline.getRenderScalingFactor();
@@ -236,9 +244,9 @@ public class VoxyRenderSystem {
         }
 
         viewport
-                .setVanillaProjection(vanillaProjection)
+                .setVanillaProjection(matrices.projection())
                 .setProjection(voxyProjection)
-                .setModelView(new Matrix4f(modelView))
+                .setModelView(new Matrix4f(matrices.modelView()))
                 .setCamera(cameraX, cameraY, cameraZ)
                 .setScreenSize(width, height)
                 .update();
@@ -288,7 +296,10 @@ public class VoxyRenderSystem {
         //var target = DefaultTerrainRenderPasses.CUTOUT.getTarget();
         //boundFB = ((net.minecraft.client.texture.GlTexture) target.getColorAttachment()).getOrCreateFramebuffer(((GlBackend) RenderSystem.getDevice()).getFramebufferManager(), target.getDepthAttachment());
         if (boundFB == 0) {
-            throw new IllegalStateException("Cannot use the default framebuffer as cannot source from it");
+            // Immersive Portals renders the world into the default framebuffer, so the draw/read FBO can be 0
+            // during its passes. getFramebufferDepthSize + runPipeline handle id 0 (default FB) fine, so fall
+            // through and render to the default framebuffer instead of crashing.
+            Logger.warn("Voxy rendering into the default framebuffer (draw FBO 0)");
         }
 
         //this.autoBalanceSubDivSize();

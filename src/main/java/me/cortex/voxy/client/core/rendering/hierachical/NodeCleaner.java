@@ -34,6 +34,15 @@ public class NodeCleaner {
     static final int OUTPUT_COUNT = 256;
 
 
+    //Sections rendered within this many frames are never eviction candidates: evicting the visible
+    // working set just forces an immediate rebuild and makes lods flicker between detail levels
+    private static final int MIN_EVICT_AGE = 180;
+    //Fallback age used once uploads have been starved for a sustained period: at that point nothing
+    // old enough exists, and reclaiming younger geometry (bounded thrash) beats freezing all uploads
+    private static final int STARVED_MIN_EVICT_AGE = 30;
+    //Uploads stop below this much free geometry memory (see AsyncNodeManager upload loop's 50mb gate)
+    private static final long UPLOAD_STARVED_THRESHOLD = 55_000_000L;
+
     private final AutoBindingShader sorter = Shader.makeAuto(PrintfDebugUtil.PRINTF_processor)
             .define("WORK_SIZE", SORTING_WORKER_SIZE)
             .define("ELEMS_PER_THREAD", WORK_PER_THREAD)
@@ -65,6 +74,7 @@ public class NodeCleaner {
 
     private final AsyncNodeManager nodeManager;
     int visibilityId = 0;
+    private int starvedTicks = 0;
 
 
     public NodeCleaner(AsyncNodeManager nodeManager) {
@@ -105,10 +115,18 @@ public class NodeCleaner {
 
     public void tick(GlBuffer nodeDataBuffer) {
         this.visibilityId++;
+        long free = this.nodeManager.getGeometryCapacity() - this.nodeManager.getUsedGeometryCapacity();
+        if (free < UPLOAD_STARVED_THRESHOLD) {
+            this.starvedTicks++;
+        } else {
+            this.starvedTicks = 0;
+        }
         if (this.shouldCleanGeometry()) {
             this.outputBuffer.fill(this.nodeManager.maxNodeCount - 2);//TODO: maybe dont set to zero??
 
             this.sorter.bind();
+            glUniform1ui(0, this.visibilityId);
+            glUniform1ui(1, this.starvedTicks > 240 ? STARVED_MIN_EVICT_AGE : MIN_EVICT_AGE);
             glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, nodeDataBuffer.id);
 
             //TODO: choose whether this is in nodeSpace or section/geometryId space
@@ -140,8 +158,12 @@ public class NodeCleaner {
             long used = this.nodeManager.getUsedGeometryCapacity();
             return 3 < ((double) used) / ((double) (this.nodeManager.getGeometryCapacity() - used));
         } else {
-            long remaining = this.nodeManager.getGeometryCapacity() - this.nodeManager.getUsedGeometryCapacity();
-            return remaining < 256_000_000;//If less than 256 mb free memory
+            long capacity = this.nodeManager.getGeometryCapacity();
+            long remaining = capacity - this.nodeManager.getUsedGeometryCapacity();
+            //Keep the trigger proportional to the buffer size: on small (VRAM limited) buffers a flat
+            // 256mb trigger starts evicting while half the store is still actively rendered, causing
+            // visible sections to lose their mesh and flicker between lod levels as they rebuild
+            return remaining < Math.min(256_000_000L, capacity / 8);
         }
     }
 
