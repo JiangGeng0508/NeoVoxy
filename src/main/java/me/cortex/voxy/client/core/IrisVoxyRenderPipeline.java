@@ -166,7 +166,11 @@ public class IrisVoxyRenderPipeline extends AbstractRenderPipeline {
 
     @Override
     protected void finish(Viewport<?> viewport, int sourceFrameBuffer, int srcWidth, int srcHeight) {
-        if (this.data.renderToVanillaDepth && srcWidth > 0 && srcHeight > 0) {
+        // Always write the LOD depth into the vanilla/gbuffer depth. Packs like ComplementaryReimagined
+        // set 'excludeLodsFromVanillaDepth' in their voxy.json, which used to suppress this and left the
+        // LOD chunks out of the pack's depth-dependent effects (e.g. water screen-space reflections).
+        // The depth transform is correct, so keep them in.
+        if (srcWidth > 0 && srcHeight > 0) {
             int[] oldViewport = new int[4];
             glGetIntegerv(GL_VIEWPORT, oldViewport);
             glViewport(0, 0, srcWidth, srcHeight);

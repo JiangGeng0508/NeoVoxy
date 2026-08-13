@@ -28,11 +28,23 @@ repositories {
 minecraft.accessTransformers.file rootProject.file('src/main/resources/META-INF/accesstransformer.cfg')
 
 jar {
-    archiveClassifier = 'slim'
+    // The distributable is the jar-in-jar (full) build produced by the jarJar task. 'jar' rebuilds
+    // that output under the standard file name, so `gradlew jar` yields the complete mod and there
+    // is no separate slim jar to worry about.
+    dependsOn tasks.named('jarJar')
+    inputs.files(tasks.named('jarJar').flatMap { it.archiveFile })
+    doLast {
+        def full = tasks.named('jarJar').get().archiveFile.get().asFile
+        def out = archiveFile.get().asFile
+        if (full.exists() && full != out) {
+            out.delete()
+            full.copyTo(out)
+        }
+    }
 }
 
 tasks.named('jarJar') {
-    archiveClassifier = ''
+    archiveClassifier = 'bundled'
 }
 
 runs {
@@ -48,12 +60,8 @@ runs {
             runtime 'org.lwjgl:lwjgl-zstd:3.3.3:natives-windows'
             runtime 'org.lwjgl:lwjgl-lmdb:3.3.3:natives-linux'
             runtime 'org.lwjgl:lwjgl-zstd:3.3.3:natives-linux'
-            runtime 'redis.clients:jedis:5.1.0'
             runtime 'org.rocksdb:rocksdbjni:10.2.1'
-            runtime 'org.apache.commons:commons-pool2:2.12.0'
             runtime 'at.yawk.lz4:lz4-java:1.10.1'
-            runtime 'org.tukaani:xz:1.10'
-            runtime 'org.xerial:sqlite-jdbc:3.49.1.0'
         }
     }
 
@@ -78,7 +86,6 @@ configurations {
     runtimeClasspath.extendsFrom localRuntime
     sodiumOuter
     prunedRocksDB
-    prunedSqlite
 }
 
 def sodiumNeoForgeModJar = layout.buildDirectory.file('extracted/sodium-neoforge-mod.jar')
@@ -116,29 +123,6 @@ tasks.register('makePrunedRocksDBJar', Zip) {
             return false
         }
         return ['linux32', 'musl', 's390x', 'riscv64', 'ppc64le', 'aarch64'].any { file.contains(it) }
-    }
-}
-
-tasks.register('makePrunedSqliteJar', Zip) {
-    group = 'build'
-    description = 'Keeps only Windows x64 and Linux x64 SQLite native libraries in the JarJar dependency.'
-    dependsOn configurations.prunedSqlite
-
-    archiveFileName.set('sqlite-jdbc-3.49.1.0.jar')
-    destinationDirectory.set(prunedLibraryDir)
-    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
-
-    from { zipTree(configurations.prunedSqlite.singleFile) }
-
-    exclude { details ->
-        def path = details.path.replace('\\', '/')
-        if (!path.startsWith('org/sqlite/native/')) {
-            return false
-        }
-        return !(
-                path.startsWith('org/sqlite/native/Windows/x86_64/') ||
-                path.startsWith('org/sqlite/native/Linux/x86_64/')
-        )
     }
 }
 
@@ -188,16 +172,11 @@ def replaceZipEntries = { File jarFile, Map<String, File> replacements ->
 
 tasks.named('jarJar') {
     dependsOn tasks.named('makePrunedRocksDBJar')
-    dependsOn tasks.named('makePrunedSqliteJar')
-    inputs.files(
-            tasks.named('makePrunedRocksDBJar').flatMap { it.archiveFile },
-            tasks.named('makePrunedSqliteJar').flatMap { it.archiveFile }
-    )
+    inputs.files(tasks.named('makePrunedRocksDBJar').flatMap { it.archiveFile })
 
     doLast {
         replaceZipEntries(archiveFile.get().asFile, [
-                'META-INF/jarjar/rocksdbjni-10.2.1.jar' : tasks.named('makePrunedRocksDBJar').get().archiveFile.get().asFile,
-                'META-INF/jarjar/sqlite-jdbc-3.49.1.0.jar': tasks.named('makePrunedSqliteJar').get().archiveFile.get().asFile
+                'META-INF/jarjar/rocksdbjni-10.2.1.jar' : tasks.named('makePrunedRocksDBJar').get().archiveFile.get().asFile
         ])
     }
 }
@@ -236,13 +215,8 @@ dependencies {
     implementation 'org.xerial:sqlite-jdbc:3.49.1.0'
 
     prunedRocksDB 'org.rocksdb:rocksdbjni:10.2.1'
-    prunedSqlite 'org.xerial:sqlite-jdbc:3.49.1.0'
 
-    jarJar 'redis.clients:jedis:5.1.0'
     jarJar 'org.rocksdb:rocksdbjni:10.2.1'
-    jarJar 'org.apache.commons:commons-pool2:2.12.0'
-    jarJar 'org.tukaani:xz:1.10'
-    jarJar 'org.xerial:sqlite-jdbc:3.49.1.0'
 }
 
 tasks.withType(ProcessResources).configureEach {
