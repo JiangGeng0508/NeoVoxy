@@ -10,6 +10,7 @@ import me.cortex.voxy.client.core.gl.shader.Shader;
 import me.cortex.voxy.client.core.gl.shader.ShaderLoader;
 import me.cortex.voxy.client.core.gl.shader.ShaderType;
 import me.cortex.voxy.client.core.rendering.Viewport;
+import me.cortex.voxy.client.core.rendering.ChunkBoundRenderer;
 import me.cortex.voxy.client.core.rendering.building.RenderGenerationService;
 import me.cortex.voxy.client.core.rendering.util.DownloadStream;
 import me.cortex.voxy.client.core.rendering.util.PrintfDebugUtil;
@@ -17,6 +18,7 @@ import me.cortex.voxy.client.core.rendering.util.UploadStream;
 import me.cortex.voxy.common.Logger;
 import me.cortex.voxy.common.util.MemoryBuffer;
 import me.cortex.voxy.common.world.WorldEngine;
+import net.minecraft.client.Minecraft;
 import org.lwjgl.system.MemoryUtil;
 
 import java.util.List;
@@ -228,6 +230,14 @@ public class HierarchicalOcclusionTraverser {
         //Put the render distance here so that it can generate a correct circle, TODO: make it not top level section sized
         MemoryUtil.memPutFloat(ptr, (float) Math.pow(VoxyConfig.CONFIG.sectionRenderDistance*16*32,2));ptr += 4;
 
+        //World-curvature parameters, so the occlusion culling can expand nodes downward and stop
+        // wrongly culling the curved LOD that drops below the flat vanilla chunks (black holes).
+        int earthCurveRatio = VoxyConfig.CONFIG.earthCurveRatio;
+        float earthRadius = earthCurveRatio >= 50 ? 6371000.0f / earthCurveRatio : 0.0f;
+        MemoryUtil.memPutFloat(ptr, earthRadius); ptr += 4;
+        MemoryUtil.memPutFloat(ptr, ChunkBoundRenderer.VANILLA_CULL_DISTANCE >= 0.0f
+                ? ChunkBoundRenderer.VANILLA_CULL_DISTANCE
+                : Math.max(Minecraft.getInstance().options.getEffectiveRenderDistance()*16 - 16.0f, 16.0f)); ptr += 4;
 
     }
 

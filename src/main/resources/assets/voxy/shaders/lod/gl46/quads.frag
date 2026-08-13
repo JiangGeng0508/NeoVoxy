@@ -21,6 +21,7 @@ layout(location = 0) in flat uvec4 interData;
 #ifndef USE_NV_BARRY
 layout(location = 1) in vec2 uv;
 #endif
+in float vViewDist;
 
 #ifdef DEBUG_RENDER
 layout(location = 7) in flat uint quadDebug;
@@ -115,6 +116,14 @@ vec4 computeColour(vec2 texturePos, vec4 colour) {
 #endif
 
 
+//Fades the far LOD edge into the fog colour so the hard mesh edge at the horizon doesn't show
+// as a black line on distant water/terrain.
+vec3 applyFarFade(vec3 col) {
+    float farFade = 1.0 - smoothstep(uFadeStart, uFadeEnd, vViewDist);
+    return mix(uFogColor.rgb, col, farFade);
+}
+
+
 void main() {
     //vec2 uv = vec2(0);
     //Tile is the tile we are in
@@ -189,7 +198,7 @@ void main() {
 
     #ifndef PATCHED_SHADER
     colour = computeColour(texPos, colour);
-    outColour = colour;
+    outColour = vec4(applyFarFade(colour.rgb), colour.a);
 
     #ifdef DEBUG_RENDER
     uint hash = quadDebug*1231421+123141;
@@ -222,7 +231,7 @@ void main() {
     // ambient data full chunks provide, so LOD reads a little dark. Lift the albedo we hand the pack to
     // compensate. Tune LOD_SHADER_BRIGHTNESS to taste (1.0 = no lift, matches raw block colour).
     float LOD_SHADER_BRIGHTNESS = mix(1.0, 1.025, uColorFix);
-    vec4 emitColour = vec4(colour.rgb * LOD_SHADER_BRIGHTNESS, colour.a);
+    vec4 emitColour = vec4(applyFarFade(colour.rgb) * LOD_SHADER_BRIGHTNESS, colour.a);
     voxy_emitFragment(VoxyFragmentParameters(emitColour, tile, texPos, face, modelId, getLightmapUv(interData.y), tint, model.customId));
 
     #endif

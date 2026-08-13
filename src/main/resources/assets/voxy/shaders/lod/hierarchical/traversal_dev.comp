@@ -18,6 +18,8 @@ layout(binding = SCENE_UNIFORM_BINDING, std140) uniform SceneUniform {
     uint frameId;
     uint requestQueueSize;
     float renderDistance;
+    float uEarthRadius;
+    float uVanillaEnd;
 };
 
 #import <voxy:lod/hierarchical/queue.glsl>

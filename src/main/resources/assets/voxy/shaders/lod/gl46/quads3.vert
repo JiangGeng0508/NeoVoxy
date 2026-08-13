@@ -29,6 +29,7 @@ layout(location = 0) out flat uvec4 interData;
 #ifndef USE_NV_BARRY
 layout(location = 1) out vec2 uv;
 #endif
+out float vViewDist;
 
 #ifdef USE_NV_JANK
 #ifdef GL_NV_gpu_shader5
@@ -63,6 +64,11 @@ void main() {
     #endif
     #endif
     (getQuadCornerPos(quad, cornerId));
+
+    //Horizontal distance from the camera (in blocks) for the far fade-out in the fragment shader
+    vec2 cornerMask = vec2((cornerId>>1)&1u, cornerId&1u)*quad.lodScale;
+    vec3 viewPoint = applyWorldCurvature(quad.basePoint + swizzelDataAxis(quad.axis, vec3(quad.quadSizeAddin*cornerMask, 0)));
+    vViewDist = length(viewPoint.xz - cameraSubPos.xz);
 
 
     #ifndef USE_NV_BARRY

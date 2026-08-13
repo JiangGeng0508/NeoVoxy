@@ -420,6 +420,13 @@ public class IrisVoxyRenderPipelineData {
             }
         };
         CommonUniforms.addDynamicUniforms(uniformBuilder, FogMode.PER_FRAGMENT);
+
+        if (!seenUniforms.contains("endFlashIntensity")) {
+            FloatSupplier endFlashIntensity = () -> 0.0f;
+            uniformBuilder.uniform1f("endFlashIntensity", endFlashIntensity, null);
+            uniformBuilder.uniform1f("previousEndFlashIntensity", endFlashIntensity, null);
+        }
+
         cu.assignTo(uniformBuilder);
         cu.mapholderToPass(uniformBuilder, patch);
 
