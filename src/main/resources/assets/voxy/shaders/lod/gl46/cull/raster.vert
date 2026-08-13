@@ -34,9 +34,28 @@ void main() {
     //TODO maybe make the size expansion 0.5 (or maybe get rid of it all together?)
     const float EXPANSION = 1.0f;
 
+    //World curvature drops the LOD mesh below this flat AABB, so expand the box downward by the
+    // drop at its farthest corner. Without this the curved boundary sections are wrongly culled as
+    // occluded by the flat vanilla chunks -> black holes in the void below them.
+    float drop = 0.0f;
+    if (uEarthRadius > 0.0f) {
+        float s = float(1<<detail);
+        vec2 minXZ = vec2(pos.xz) + (vec2(aabbOffset.xz) - EXPANSION) * s;
+        vec2 maxXZ = vec2(pos.xz) + (vec2(aabbOffset.xz) + vec2(size.xz) + EXPANSION) * s;
+        vec2 farXZ = mix(minXZ, maxXZ, greaterThan(abs(maxXZ), abs(minXZ)));
+        float curveDist = length(farXZ) - uVanillaEnd;
+        if (curveDist > 0.0f) {
+            float radius = uEarthRadius + max(float(pos.y), 0.0f);
+            float phi = curveDist / radius;
+            drop = (cos(phi) - 1.0f) * radius;
+        }
+    }
 
     vec3 offset = aabbOffset-EXPANSION;
     offset += vec3(gl_VertexID&1, (gl_VertexID>>2)&1, (gl_VertexID>>1)&1)*(size+2*EXPANSION);
+    if (((gl_VertexID>>2)&1) == 0) {
+        offset.y += drop;
+    }
 
     gl_Position = MVP * vec4(vec3(pos)+offset*(1<<detail),1);
 

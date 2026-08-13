@@ -66,6 +66,22 @@ void setupScreenspace(in UnpackedNode node) {
 
     vec3 basePos = vec3(((node.pos<<node.lodLevel)-camSecPos)<<5)-camSubSecPos;
 
+    //World curvature drops the LOD terrain below the flat section boxes, so expand the culling
+    // box downward by the maximum drop inside this node. Otherwise the HiZ test culls the curved
+    // boundary sections as if they were fully behind the vanilla chunks -> black holes in the void.
+    float maxDrop = 0.0f;
+    if (uEarthRadius > 0.0f) {
+        float scale = float(32<<node.lodLevel);
+        vec2 nPos = basePos.xz;
+        vec2 farXZ = mix(nPos+scale, mix(nPos, vec2(0.0f), greaterThan(nPos, vec2(0.0f))), lessThan(nPos+scale, vec2(0.0f)));
+        float curveDist = length(farXZ) - uVanillaEnd;
+        if (curveDist > 0.0f) {
+            float radius = uEarthRadius + max(basePos.y + scale, 0.0f);
+            float phi = curveDist / radius;
+            maxDrop = (cos(phi) - 1.0f) * radius;
+        }
+    }
+
     _frustumCulled = outsideFrustum(frustum, basePos, float(32<<node.lodLevel));
 
     //Fast exit
@@ -83,6 +99,12 @@ void setupScreenspace(in UnpackedNode node) {
     vec4 P110 = Axis[1] + P100;
     vec4 P011 = Axis[1] + P001;
     vec4 P111 = Axis[1] + P101;
+    //Bottom corners are pushed down by the curvature drop so the culled region covers the curved mesh
+    vec4 dropOffset = MVP * vec4(0.0f, maxDrop, 0.0f, 0.0f);
+    P000 += dropOffset;
+    P100 += dropOffset;
+    P001 += dropOffset;
+    P101 += dropOffset;
 
     //vec4 P000 = MVP * vec4(basePos, 1);
     //vec4 P100 = MVP * vec4(basePos+vec3(1,0,0)*(32<<node.lodLevel), 1);

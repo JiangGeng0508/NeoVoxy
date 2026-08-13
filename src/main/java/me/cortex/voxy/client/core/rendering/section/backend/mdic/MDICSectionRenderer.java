@@ -22,6 +22,7 @@ import me.cortex.voxy.client.core.rendering.util.UploadStream;
 import me.cortex.voxy.client.core.util.GPUTiming;
 import me.cortex.voxy.common.Logger;
 import me.cortex.voxy.common.world.WorldEngine;
+import com.mojang.blaze3d.systems.RenderSystem;
 import net.minecraft.client.Minecraft;
 import net.minecraft.core.Direction;
 import org.joml.Matrix4f;
@@ -189,6 +190,22 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
 
         // World-curvature fix toggle (see /voxy curvefix). 1.0 = fixed curve, 0.0 = original curve.
         MemoryUtil.memPutFloat(ptr, VoxyConfig.CONFIG.curveFix ? 1.0f : 0.0f); ptr += 4;
+
+        ptr += 4;//Padding to align uFogColor (vec4, align 16)
+
+        // Fog colour + far fade range, used to fade the distant LOD into the sky so its hard edge
+        // at the horizon doesn't show as a black line on far water/terrain.
+        float[] fogColor = RenderSystem.getShaderFogColor();
+        MemoryUtil.memPutFloat(ptr, fogColor[0]); ptr += 4;
+        MemoryUtil.memPutFloat(ptr, fogColor[1]); ptr += 4;
+        MemoryUtil.memPutFloat(ptr, fogColor[2]); ptr += 4;
+        MemoryUtil.memPutFloat(ptr, 1.0f); ptr += 4;
+
+        float meshEdge = (VoxyConfig.CONFIG.sectionRenderDistance + 1) * 512.0f;
+        float fadeEnd = meshEdge;
+        float fadeStart = Math.max(fadeEnd - 600.0f, 0.0f);
+        MemoryUtil.memPutFloat(ptr, fadeStart); ptr += 4;
+        MemoryUtil.memPutFloat(ptr, fadeEnd); ptr += 4;
 
         UploadStream.INSTANCE.commit();
     }

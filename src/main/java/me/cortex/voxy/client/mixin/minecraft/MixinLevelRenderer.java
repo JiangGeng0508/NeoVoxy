@@ -32,10 +32,14 @@ public abstract class MixinLevelRenderer implements IGetVoxyRenderSystem {
     @Inject(method = "allChanged()V", at = @At("RETURN"), order = 900)//We want to inject before sodium
     private void voxy$reloadVoxyRenderer(CallbackInfo ci) {
         if (IrisUtil.isBlockMaterialInitialization()) {
+            // Iris pipeline recreation destroys the renderer together with the old pipeline, then
+            // calls allChanged() from beginLevelRendering with this flag set. If the renderer is
+            // still alive, only refresh the material mapping; if it was destroyed, recreate it,
+            // otherwise Voxy stays dead until the player manually toggles it off and on.
             if (this.renderer != null) {
                 this.renderer.refreshModelMaterialMapping();
+                return;
             }
-            return;
         }
         this.voxy$shutdownRenderer();
         if (this.level != null) {

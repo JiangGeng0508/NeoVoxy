@@ -7,6 +7,9 @@ layout(binding = 0, std140) uniform SceneUniform {
     float uColorFix;    // 1.0 = LOD colour/brightness fix applied, 0.0 = raw brightness (toggled via /voxy colorfix)
     float uVanillaEnd;  // horizontal distance (blocks, from camera) where vanilla ends / LOD begins; curve starts here
     float uCurveFix;    // 1.0 = fixed curve (seamless + camera-relative), 0.0 = original curve (toggled via /voxy curvefix)
+    vec4 uFogColor;     // fog colour used to fade the far LOD edge into the sky
+    float uFadeStart;   // horizontal distance where the far fade-out starts
+    float uFadeEnd;     // horizontal distance where the far fade-out is complete (LOD mesh edge)
 };
 
 //TODO: see if making the stride 2*4*4 bytes or something cause you get that 16 byte write

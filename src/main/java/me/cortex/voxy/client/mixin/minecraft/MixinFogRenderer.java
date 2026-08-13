@@ -32,31 +32,40 @@ public class MixinFogRenderer {
         var vrs = IGetVoxyRenderSystem.getNullable();
         if (vrs == null) return;
 
-        if (RenderSystem.getShaderFogEnd() < 10.0f) return;
+        // Leave fluid fog (underwater/lava/powder snow) completely alone
+        if (camera.getFluidInCamera() != FogType.NONE) return;
 
-        // Adjust sky fog so it always looks smooth and doesn't change with render distance
+        // Adjust sky fog so it always looks smooth and doesn't change with render distance,
+        // but leave dense effect fog (e.g. blindness) untouched so the sky also goes dark
         if (fogMode == FogMode.FOG_SKY) {
-            RenderSystem.setShaderFogStart(0);
-            RenderSystem.setShaderFogEnd(VoxyConfig.CONFIG.skyFogDistance);
+            if (RenderSystem.getShaderFogEnd() >= 10.0f) {
+                RenderSystem.setShaderFogStart(0);
+                RenderSystem.setShaderFogEnd(VoxyConfig.CONFIG.skyFogDistance);
+            }
+            return;
         }
 
-        if (fogMode == FogMode.FOG_TERRAIN) {
-            // Do NOT override unique fog, it's always displayed close and meant for restricting vision
-            boolean noFogType = camera.getFluidInCamera() == FogType.NONE;
+        if (fogMode != FogMode.FOG_TERRAIN) return;
 
-            // Capture original fog values BEFORE we modify them,
-            // so Voxy's own fog pass can use the correct values
-            float capturedFogEnd = noFogType ?
-                VoxyConfig.CONFIG.sectionRenderDistance * 32 * 16 : RenderSystem.getShaderFogEnd();
+        float fogStart = RenderSystem.getShaderFogStart();
+        float fogEnd = RenderSystem.getShaderFogEnd();
 
-            vrs.setCapturedFog(RenderSystem.getShaderFogStart(), capturedFogEnd, RenderSystem.getShaderFogColor());
+        // Dense effect fog (blindness ~5 blocks, darkness up to ~15 blocks) must be captured as-is
+        // so Voxy's own fog pass reproduces it for the LOD, and vanilla fog must stay enabled so the
+        // loaded chunks keep the effect. Normal long range fog is still overridden to the LOD distance.
+        boolean effectFog = fogEnd < 16.0f;
 
-            // Always hide vanilla terrain fog - either replaced by voxy or disabled completely
-            // unless it's special fog, in that case it must be rendered to restrict vision in regular chunks
-            if (noFogType) {
-                RenderSystem.setShaderFogStart(999999999);
-                RenderSystem.setShaderFogEnd(999999999);
-            }
+        float capturedFogEnd = effectFog
+            ? fogEnd
+            : VoxyConfig.CONFIG.sectionRenderDistance * 32 * 16;
+
+        vrs.setCapturedFog(fogStart, capturedFogEnd, RenderSystem.getShaderFogColor());
+
+        // Always hide vanilla terrain fog - either replaced by voxy or disabled completely.
+        // Never disable it for dense effect fog or the vanilla chunks would lose it.
+        if (!effectFog) {
+            RenderSystem.setShaderFogStart(999999999);
+            RenderSystem.setShaderFogEnd(999999999);
         }
     }
 }
