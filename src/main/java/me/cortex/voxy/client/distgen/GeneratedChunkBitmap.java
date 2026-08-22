@@ -18,11 +18,16 @@ import java.nio.file.StandardCopyOption;
  * skip chunks it already ingested in previous sessions without probing the voxel DB.
  *
  * Format: [int magic][int version] then repeated [long regionKey][16 longs bitmap].
- * All access must happen on the server thread.
+ * Thread-safe: marks may arrive from ingest worker threads (distant gen batch callbacks)
+ * while the server thread reads/saves.
  */
 public class GeneratedChunkBitmap {
     private static final int MAGIC = 0x56594447;//"VYDG"
-    private static final int VERSION = 1;
+    //Version 2: older builds had a bug where chunks that failed/gave up ingesting were still
+    // marked done in here, permanently poisoning those entries as skip-forever holes in the
+    // LOD. Bumping the version invalidates every bitmap written by those builds so the
+    // affected area gets regenerated (and correctly ingested) by the fixed pipeline.
+    private static final int VERSION = 2;
     private static final int LONGS_PER_REGION = (32*32)/64;
 
     private final Path file;
@@ -43,7 +48,7 @@ public class GeneratedChunkBitmap {
         return ((cz&31)<<5)|(cx&31);
     }
 
-    public boolean contains(int cx, int cz) {
+    public synchronized boolean contains(int cx, int cz) {
         long[] region = this.regions.get(regionKey(cx, cz));
         if (region == null) {
             return false;
@@ -52,7 +57,7 @@ public class GeneratedChunkBitmap {
         return (region[idx>>6]&(1L<<(idx&63))) != 0;
     }
 
-    public void mark(int cx, int cz) {
+    public synchronized void mark(int cx, int cz) {
         long[] region = this.regions.computeIfAbsent(regionKey(cx, cz), k->new long[LONGS_PER_REGION]);
         int idx = bitIndex(cx, cz);
         long mask = 1L<<(idx&63);
@@ -63,7 +68,7 @@ public class GeneratedChunkBitmap {
         }
     }
 
-    public int getCount() {
+    public synchronized int getCount() {
         return this.count;
     }
 
@@ -92,7 +97,7 @@ public class GeneratedChunkBitmap {
         }
     }
 
-    public void saveIfDirty() {
+    public synchronized void saveIfDirty() {
         if (!this.dirty) {
             return;
         }
@@ -116,7 +121,7 @@ public class GeneratedChunkBitmap {
         }
     }
 
-    public void reset() {
+    public synchronized void reset() {
         this.regions.clear();
         this.count = 0;
         this.dirty = false;

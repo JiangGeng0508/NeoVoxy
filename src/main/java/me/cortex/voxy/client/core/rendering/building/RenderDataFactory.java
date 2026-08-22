@@ -38,6 +38,7 @@ public class RenderDataFactory {
     //private final long[] sectionData = new long[32*32*32*2];
     private final long[] sectionData = new long[32*32*32*2];
     private final long[] neighboringFaces = new long[32*32*6];
+    private WorldSection currentSection;
     //private final int[] neighboringOpaqueMasks = new int[32*6];
 
     private final int[] opaqueMasks = new int[32*32];
@@ -351,6 +352,49 @@ public class RenderDataFactory {
     }
 
     private static final long LM = (0xFFL<<55);
+
+    //True when the fluid slab at boundary column `i` (indexed y*32+z for X-normal
+    // faces) is the exposed top of the fluid column, i.e. the block directly above
+    // it is air. At LOD ring boundaries the coarse water surface is raised up to
+    // 2^lvl-1 blocks, so this top strip must stay meshed or it shows through as a
+    // black line.
+    private static boolean isFluidSurfaceSlab(long[] sectionData, int i, boolean positiveX) {
+        int y = i >> 5;
+        if (y >= 31) return false;
+        int above = ((i + 32) << 5) + (positiveX ? 31 : 0);
+        return Mapper.isAir(sectionData[above * 2]);
+    }
+
+    //True when the exposed fluid surface strip on this boundary column actually borders
+    // lower terrain across the face, detected by sampling the finest (level 0) data at
+    // the neighboring column just below the slab top. At LOD ring boundaries the coarse
+    // water surface is raised up to 2^lvl-1 blocks above the true surface that the
+    // adjacent fine geometry renders, so the strip must be meshed or it shows through as
+    // a black line. Inside a uniformly raised coarse region the true surface continues at
+    // the same height across interior section boundaries, so those faces must stay culled
+    // or they draw a grid over the water. Missing finer data also returns false (no known
+    // discontinuity). `i` is the callers column index matching the neighboringFaces
+    // region encoding for level 0 sections.
+    private boolean fluidSurfaceBordersLowerColumn(int i, int lx, int ly, int lz, int dir) {//dir: 0=-x,1=+x,2=-z,3=+z
+        WorldSection section = this.currentSection;
+        if (section.lvl == 0) {
+            int base = switch (dir) {case 0 -> 0; case 1 -> 32*32; case 2 -> 32*32*4; default -> 32*32*5;};
+            return Mapper.isAir(this.neighboringFaces[base + i]);
+        }
+        int wx = ((section.x<<5) + lx) << section.lvl;
+        int wz = ((section.z<<5) + lz) << section.lvl;
+        int y = ((((section.y<<5) + ly) + 1) << section.lvl) - 1;//Just below our raised slab top
+        wx += dir == 0 ? -1 : dir == 1 ? (1<<section.lvl) : 0;
+        wz += dir == 2 ? -1 : dir == 3 ? (1<<section.lvl) : 0;
+
+        var sec = this.world.acquireIfExists(0, wx>>5, y>>5, wz>>5);
+        if (sec == null) {
+            return false;
+        }
+        long block = sec._unsafeGetRawDataArray()[((y&31)<<10)|((wz&31)<<5)|(wx&31)];
+        sec.release(WorldSection.RELEASE_HINT_POSSIBLE_REUSE);
+        return Mapper.isAir(block);
+    }
 
     private static boolean shouldMeshNonOpaqueBlockFace(int face, long quad, long meta, long neighborQuad, long neighborMeta) {
         if (((quad^neighborQuad)&(0xFFFFL<<26))==0 && (DISABLE_CULL_SAME_OCCLUDES || ModelQueries.cullsSame(meta))) return false;//This is a hack, if the neigbor and this are the same, dont mesh the face// TODO: FIXME
@@ -671,8 +715,20 @@ public class RenderDataFactory {
                             }
                             if (ModelQueries.cullsSame(Am)) {
                                 if (modelId == ((A>>26)&0xFFFF)) {
-                                    this.blockMesher.skip(1);
-                                    continue;
+                                    //Keep the exposed top strip of a fluid column at section
+                                    // boundaries only when it borders lower terrain across the
+                                    // face (see isFluidSurfaceSlab/fluidSurfaceBordersLowerColumn);
+                                    // without it the raised coarse water surface leaves a
+                                    // see-through black line at LOD ring boundaries, but meshing
+                                    // it unconditionally draws a grid over interior water.
+                                    boolean cull = axis == 0
+                                            || other >= 31
+                                            || !Mapper.isAir(this.sectionData[(idx + 1024) * 2])
+                                            || !this.fluidSurfaceBordersLowerColumn(other*32+index, index, other, side == 0 ? 0 : 31, side == 0 ? 2 : 3);
+                                    if (cull) {
+                                        this.blockMesher.skip(1);
+                                        continue;
+                                    }
                                 }
                             }
 
@@ -1313,7 +1369,10 @@ public class RenderDataFactory {
 
                         if (ModelQueries.cullsSame(Am)) {
                             if (modelId == ((A>>26)&0xFFFF)) {
-                                oki = false;
+                                if (!isFluidSurfaceSlab(this.sectionData, i, false)
+                                        || !this.fluidSurfaceBordersLowerColumn(i, 0, i>>5, i&31, 0)) {
+                                    oki = false;
+                                }
                             }
                         }
                     }
@@ -1377,7 +1436,10 @@ public class RenderDataFactory {
 
                         if (ModelQueries.cullsSame(Am)) {
                             if (modelId == ((A>>26)&0xFFFF)) {
-                                oki = false;
+                                if (!isFluidSurfaceSlab(this.sectionData, i, true)
+                                        || !this.fluidSurfaceBordersLowerColumn(i, 31, i>>5, i&31, 1)) {
+                                    oki = false;
+                                }
                             }
                         }
                     }
@@ -1686,6 +1748,8 @@ public class RenderDataFactory {
         //TODO: FIXME: because of the exceptions that are thrown when aquiring modelId
         // this can result in the state of all block meshes and well _everything_ from being incorrect
         //THE EXCEPTION THAT THIS THROWS CAUSES MAJOR ISSUES
+
+        this.currentSection = section;//Used by fluidSurfaceBordersLowerColumn for world position math
 
         //Copy section data to end of array so that can mutate array while reading safely
         //section.copyDataTo(this.sectionData, 32*32*32);

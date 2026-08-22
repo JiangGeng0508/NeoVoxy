@@ -17,7 +17,6 @@ public class VoxySamplers {
                 translucentNames = new String[]{"vxDepthTexTrans", "dhDepthTex", "dhDepthTex0"};
             }*/
 
-            //TODO replace ()->0 with the actual depth texture id
             samplers.addDynamicSampler(TextureType.TEXTURE_2D, () -> {
                 var pipeData = ((IGetIrisVoxyPipelineData)pipeline).voxy$getPipelineData();
                 if (pipeData == null) {

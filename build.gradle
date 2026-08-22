@@ -1,4 +1,6 @@
 //file:noinspection GroovyAssignabilityCheck
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
@@ -28,19 +30,11 @@ repositories {
 minecraft.accessTransformers.file rootProject.file('src/main/resources/META-INF/accesstransformer.cfg')
 
 jar {
-    // The distributable is the jar-in-jar (full) build produced by the jarJar task. 'jar' rebuilds
-    // that output under the standard file name, so `gradlew jar` yields the complete mod and there
-    // is no separate slim jar to worry about.
-    dependsOn tasks.named('jarJar')
-    inputs.files(tasks.named('jarJar').flatMap { it.archiveFile })
-    doLast {
-        def full = tasks.named('jarJar').get().archiveFile.get().asFile
-        def out = archiveFile.get().asFile
-        if (full.exists() && full != out) {
-            out.delete()
-            full.copyTo(out)
-        }
-    }
+    // jarJar embeds this project's jar, so it always depends on `jar`. Copying the full
+    // jar-in-jar output over the plain jar output must therefore happen *after* jarJar
+    // (as a finalizer); wiring it as a jar -> jarJar dependency creates a circular task
+    // graph and breaks every build.
+    finalizedBy tasks.named('jarJar')
 }
 
 tasks.named('jarJar') {
@@ -178,6 +172,16 @@ tasks.named('jarJar') {
         replaceZipEntries(archiveFile.get().asFile, [
                 'META-INF/jarjar/rocksdbjni-10.2.1.jar' : tasks.named('makePrunedRocksDBJar').get().archiveFile.get().asFile
         ])
+    }
+
+    // Leave the complete (jar-in-jar) mod under the standard file name so the
+    // `gradlew jar` / `gradlew build` outputs are directly usable.
+    doLast {
+        def out = tasks.named('jar').get().archiveFile.get().asFile
+        def full = archiveFile.get().asFile
+        if (full.exists() && full != out) {
+            Files.copy(full.toPath(), out.toPath(), StandardCopyOption.REPLACE_EXISTING)
+        }
     }
 }
 

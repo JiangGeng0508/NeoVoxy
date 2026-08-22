@@ -43,6 +43,18 @@ public class ViewportSelector <T extends Viewport<?>> {
         return viewport;
     }
 
+    //Secondary render targets (camera mods like Vista) render at a different size than the
+    // main window. Handing them the default viewport would resize its depth/HiZ buffers on
+    // every alternation, wiping occlusion data and making the LOD flicker; key extra
+    // viewports by target size instead so each size keeps stable buffers.
+    public T getViewportForSize(int width, int height) {
+        T viewport = this.getViewport();
+        if (viewport.width == width && viewport.height == height) {
+            return viewport;
+        }
+        return this.getOrCreate((long) width << 32 | (height & 0xFFFFFFFFL));
+    }
+
     public void free() {
         this.defaultViewport.delete();
         this.extraViewports.values().forEach(Viewport::delete);

@@ -1,8 +1,11 @@
 package me.cortex.voxy.client.distgen;
 
+import it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import it.unimi.dsi.fastutil.longs.LongArrayFIFOQueue;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
+import it.unimi.dsi.fastutil.longs.LongSet;
+import it.unimi.dsi.fastutil.longs.LongSets;
 import me.cortex.voxy.common.Logger;
 import me.cortex.voxy.common.world.service.VoxelIngestService;
 import me.cortex.voxy.commonImpl.WorldIdentifier;
@@ -51,6 +54,11 @@ public class DistantWorldGenerator {
     //How far (in chunks, chebyshev) the player may drift from the ring center before restarting the rings
     private static final int RECENTER_DISTANCE = 16;
     private static final long NO_CANDIDATE = Long.MIN_VALUE;
+    //A freshly generated chunk has its light computed in batches on the light-engine thread. If we voxelize
+    // it before that finishes, sections with no light data yet get baked as pitch-black voxels which the mip
+    // chain then amplifies into the "black holes" seen in the LOD. Wait a few ticks for the light to appear;
+    // if it never does, the chunk is left unmarked so a later session can try again.
+    private static final int MAX_LIGHT_RETRIES = 20;
 
     private final ServerLevel level;
     private final WorldIdentifier worldId;
@@ -60,6 +68,14 @@ public class DistantWorldGenerator {
     //Chunks that failed generation this session, so they arent immediately retried in a requeue loop
     private final LongOpenHashSet failed = new LongOpenHashSet();
     private final LongArrayFIFOQueue pending = new LongArrayFIFOQueue();
+    //How many ticks each chunk has been waiting for its light data (deferred ingests keep their ticket)
+    private final Long2IntOpenHashMap lightRetries = new Long2IntOpenHashMap();
+    //Chunks whose sections are queued in the ingest service but not yet fully processed. Guards
+    // against re-generating them before the bitmap mark lands (the mark fires on an ingest thread)
+    private final LongSet submitted = LongSets.synchronize(new LongOpenHashSet());
+    //Bumped by reset(); batch callbacks from a previous epoch are discarded so stale marks
+    // cannot resurrect entries after a progress wipe
+    private volatile long epoch;
 
     private int centerX;
     private int centerZ;
@@ -86,9 +102,9 @@ public class DistantWorldGenerator {
                 continue;
             }
             long pos = entry.getLongKey();
-            it.remove();
             int cx = ChunkPos.getX(pos);
             int cz = ChunkPos.getZ(pos);
+            var cp = new ChunkPos(cx, cz);
 
             ChunkAccess chunk = null;
             try {
@@ -100,18 +116,47 @@ public class DistantWorldGenerator {
                 Logger.error("Distant generation future failed for chunk [" + cx + ", " + cz + "]", e);
             }
 
-            if (chunk != null) {
-                this.ingest(chunk);
-                this.doneMap.mark(cx, cz);
-                this.sessionGenerated++;
-            } else {
+            if (chunk == null) {
+                //Generation/load failed this session; dont retry it into a loop
+                it.remove();
                 this.failed.add(pos);
                 this.sessionFailed++;
+                this.releaseTicket(cp);
+                continue;
             }
-            //Release the keepalive ticket; the chunk system will unload and persist the chunk
-            var cp = new ChunkPos(cx, cz);
-            this.chunkSource().distanceManager.removeTicket(TICKET, cp, TICKET_LEVEL, cp);
+
+            if (this.ingest(chunk)) {
+                //Handed off to the ingest service; the bitmap is marked by the batch callback
+                // once every section has actually been processed (see ingest())
+                it.remove();
+                this.lightRetries.remove(pos);
+                this.sessionGenerated++;
+                this.releaseTicket(cp);
+                continue;
+            }
+
+            //The chunk has no light data yet: voxelizing it now would bake it pitch black.
+            // Keep it loaded (ticket stays) and retry on a later tick until its light is ready.
+            int retries = this.lightRetries.get(pos) + 1;
+            if (retries >= MAX_LIGHT_RETRIES) {
+                //Still no (fully successful) ingest after a full second of waiting. Do NOT mark
+                // the bitmap done: that would permanently blacklist this chunk as generated while
+                // its voxels were never stored (a hole in the LOD). Leave it unmarked so a future
+                // session regenerates it; 'failed' keeps it out of this session's generation loop.
+                it.remove();
+                this.lightRetries.remove(pos);
+                this.failed.add(pos);
+                this.sessionFailed++;
+                this.releaseTicket(cp);
+            } else {
+                this.lightRetries.put(pos, retries);
+            }
         }
+    }
+
+    private void releaseTicket(ChunkPos cp) {
+        //Release the keepalive ticket; the chunk system will unload and persist the chunk
+        this.chunkSource().distanceManager.removeTicket(TICKET, cp, TICKET_LEVEL, cp);
     }
 
     /**
@@ -132,6 +177,12 @@ public class DistantWorldGenerator {
         while (this.inFlight.size() < maxInFlight) {
             long pos = this.nextCandidate(maxRadius);
             if (pos == NO_CANDIDATE) {
+                //The sweep is exhausted. Forgive this session's transient failures so they
+                // get another attempt on the next pass instead of staying holed until restart;
+                // the failed set re-fills if they fail again, bounding retry rate to one pass.
+                if (!this.failed.isEmpty() && this.inFlight.isEmpty()) {
+                    this.failed.clear();
+                }
                 return false;
             }
             this.startGeneration(pos);
@@ -157,6 +208,7 @@ public class DistantWorldGenerator {
     private boolean isSkippable(long pos) {
         return this.inFlight.containsKey(pos)
                 || this.failed.contains(pos)
+                || this.submitted.contains(pos)
                 || this.doneMap.contains(ChunkPos.getX(pos), ChunkPos.getZ(pos));
     }
 
@@ -208,8 +260,13 @@ public class DistantWorldGenerator {
         return this.level.getChunkSource();
     }
 
-    /** Feed every section of a generated (or disk-loaded) chunk into Voxy's ingest service. */
-    private void ingest(ChunkAccess chunk) {
+    /**
+     * Feed every section of a generated (or disk-loaded) chunk into Voxy's ingest service.
+     * Returns false when the chunk is not fully ingested yet (its light data hasnt been
+     * computed, or the ingest service refused a section), in which case nothing is marked
+     * so the whole chunk can be retried atomically.
+     */
+    private boolean ingest(ChunkAccess chunk) {
         var lightEngine = this.level.getLightEngine();
         var blockLight = lightEngine.getLayerListener(LightLayer.BLOCK);
         var skyLight = lightEngine.getLayerListener(LightLayer.SKY);
@@ -217,6 +274,56 @@ public class DistantWorldGenerator {
         int cz = chunk.getPos().z;
         int minSectionY = this.level.getMinSection();
         var sections = chunk.getSections();
+
+        //Mirror the vanilla ingest path: only ingest chunks whose lighting exists. A freshly generated
+        // chunk is lit in batches off-thread, so sections can be temporarily light-less; voxelizing them
+        // now would store 0-light voxels that render as black holes (amplified by the mip chain).
+        boolean hasLight = false;
+        boolean anySection = false;
+        for (int i = 0; i < sections.length; i++) {
+            if (sections[i] == null) {
+                continue;
+            }
+            anySection = true;
+            var spos = SectionPos.of(cx, minSectionY + i, cz);
+            if (blockLight.getDataLayerData(spos) != null || skyLight.getDataLayerData(spos) != null) {
+                hasLight = true;
+                break;
+            }
+        }
+        //A chunk with no sections at all has nothing to ingest; marking it done would
+        // store nothing and leave a hole just like the failed-ingest case.
+        if (!anySection || !hasLight) {
+            return false;
+        }
+
+        //Mark the chunk done only after the ingest service has actually processed every section,
+        // not merely enqueued them. Previously a quit/world-unload with a full backlog silently
+        // dropped queued tasks (Service.shutdown drains them) while the bitmap already said done,
+        // permanently holing those chunks. On failure the chunk stays unmarked so a later pass or
+        // session regenerates it.
+        int sectionCount = 0;
+        for (var section : sections) {
+            if (section != null) {
+                sectionCount++;
+            }
+        }
+
+        long ep = this.epoch;
+        long pos = ChunkPos.asLong(cx, cz);
+        var batch = VoxelIngestService.createBatch(b -> {
+            if (ep == this.epoch && b.succeeded()) {
+                this.doneMap.mark(cx, cz);
+            }
+            //Clear the submitted guard only after the mark attempt so a concurrent isSkippable
+            // never observes the chunk as neither submitted nor done
+            synchronized (this.submitted) {
+                this.submitted.remove(pos);
+            }
+        });
+        batch.await(sectionCount);
+
+        boolean allIngested = true;
         for (int i = 0; i < sections.length; i++) {
             var section = sections[i];
             if (section == null) {
@@ -226,9 +333,21 @@ public class DistantWorldGenerator {
             var spos = SectionPos.of(cx, sy, cz);
             var bl = blockLight.getDataLayerData(spos);
             var sl = skyLight.getDataLayerData(spos);
-            VoxelIngestService.rawIngest(this.worldId, section, cx, sy, cz,
-                    bl == null ? null : bl.copy(), sl == null ? null : sl.copy());
+            if (!VoxelIngestService.rawIngest(this.worldId, section, cx, sy, cz,
+                    bl == null ? null : bl.copy(), sl == null ? null : sl.copy(), batch)) {
+                //Partial ingestion would leave the chunk marked done with missing sections,
+                // so require every section to go through before considering it complete.
+                allIngested = false;
+                //The refused task will never run; account for it (and poison the batch) here
+                batch.taskDone(false);
+            }
         }
+        if (allIngested) {
+            synchronized (this.submitted) {
+                this.submitted.add(pos);
+            }
+        }
+        return allIngested;
     }
 
     /** Release all in-flight tickets and persist the bitmap. Called on disable/world shutdown. */
@@ -242,6 +361,10 @@ public class DistantWorldGenerator {
         }
         this.pending.clear();
         this.currentRadius = -1;
+        this.lightRetries.clear();
+        synchronized (this.submitted) {
+            this.submitted.clear();
+        }
         this.doneMap.saveIfDirty();
     }
 
@@ -251,6 +374,7 @@ public class DistantWorldGenerator {
 
     /** Forget all progress (session + persistent) so everything regenerates. */
     public void reset() {
+        this.epoch++;//Invalidate in-flight batch callbacks so they cant write stale marks
         this.shutdown();
         this.failed.clear();
         this.doneMap.reset();

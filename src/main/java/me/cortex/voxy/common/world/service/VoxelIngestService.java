@@ -20,12 +20,55 @@ import net.minecraft.world.level.lighting.LayerLightSectionStorage;
 import org.jetbrains.annotations.NotNull;
 
 import java.util.concurrent.ConcurrentLinkedDeque;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
 
 public class VoxelIngestService {
     private static final ThreadLocal<VoxelizedSection> SECTION_CACHE = ThreadLocal.withInitial(VoxelizedSection::createEmpty);
     private final Service service;
-    private record IngestSection(int cx, int cy, int cz, WorldEngine world, LevelChunkSection section, DataLayer blockLight, DataLayer skyLight){}
+    private record IngestSection(int cx, int cy, int cz, WorldEngine world, LevelChunkSection section, DataLayer blockLight, DataLayer skyLight, IngestBatch batch){}
     private final ConcurrentLinkedDeque<IngestSection> ingestQueue = new ConcurrentLinkedDeque<>();
+
+    /**
+     * Tracks completion of a group of enqueued ingest tasks. The caller declares how many tasks
+     * it will enqueue via {@link #await(int)} BEFORE enqueueing them; every completed (or refused)
+     * task must be reported exactly once via {@link #taskDone}. When the count reaches zero the
+     * callback fires with {@link #succeeded()} reporting whether anything failed. The callback may
+     * run on any thread.
+     */
+    public static final class IngestBatch {
+        private final AtomicInteger remaining = new AtomicInteger();
+        private final AtomicBoolean failed = new AtomicBoolean(false);
+        private final Consumer<IngestBatch> onDone;
+
+        private IngestBatch(Consumer<IngestBatch> onDone) {
+            this.onDone = onDone;
+        }
+
+        /** Declares the number of tasks this batch will track. Must be called before enqueueing. */
+        public void await(int tasks) {
+            this.remaining.addAndGet(tasks);
+        }
+
+        /** Reports one tracked task as finished; a task refused before running reports false. */
+        public void taskDone(boolean success) {
+            if (!success) {
+                this.failed.set(true);
+            }
+            if (this.remaining.decrementAndGet() == 0) {
+                this.onDone.accept(this);
+            }
+        }
+
+        public boolean succeeded() {
+            return !this.failed.get();
+        }
+    }
+
+    public static IngestBatch createBatch(Consumer<IngestBatch> onDone) {
+        return new IngestBatch(onDone);
+    }
 
     public VoxelIngestService(ServiceManager pool) {
         this.service = pool.createServiceNoCleanup(()->this::processJob, 5000, "Ingest service");
@@ -35,6 +78,20 @@ public class VoxelIngestService {
         var task = this.ingestQueue.pop();
         task.world.markActive();
 
+        boolean ok;
+        try {
+            this.processTask(task);
+            ok = true;
+        } catch (Throwable t) {
+            Logger.error("Voxy ingest had an exception while processing section [" + task.cx + ", " + task.cy + ", " + task.cz + "] please check logs and report error", t);
+            ok = false;
+        }
+        if (task.batch != null) {
+            task.batch.taskDone(ok);
+        }
+    }
+
+    private void processTask(IngestSection task) {
         var section = task.section;
         var vs = SECTION_CACHE.get().setPosition(task.cx, task.cy, task.cz);
 
@@ -121,7 +178,7 @@ public class VoxelIngestService {
                 i++;
                 if (section == null || !shouldIngestSection(section, chunk.getPos().x, i, chunk.getPos().z)) continue;
                 engine.markActive();
-                this.ingestQueue.add(new IngestSection(chunk.getPos().x, i, chunk.getPos().z, engine, section, null, null));
+                this.ingestQueue.add(new IngestSection(chunk.getPos().x, i, chunk.getPos().z, engine, section, null, null, null));
                 try {
                     this.service.execute();
                 } catch (Exception e) {
@@ -161,7 +218,7 @@ public class VoxelIngestService {
             //    continue;
             //}
             engine.markActive();
-            this.ingestQueue.add(new IngestSection(chunk.getPos().x, i, chunk.getPos().z, engine, section, bl, sl));//TODO: fixme, this is technically not safe todo on the chunk load ingest, we need to copy the section data so it cant be modified while being read
+            this.ingestQueue.add(new IngestSection(chunk.getPos().x, i, chunk.getPos().z, engine, section, bl, sl, null));//TODO: fixme, this is technically not safe todo on the chunk load ingest, we need to copy the section data so it cant be modified while being read
             try {
                 this.service.execute();
             } catch (Exception e) {
@@ -174,6 +231,23 @@ public class VoxelIngestService {
 
     public int getTaskCount() {
         return this.service.numJobs();
+    }
+
+    /** Waits for the ingest backlog to drain; returns false on timeout or interrupt. */
+    public boolean blockTillEmpty(long timeoutMs) {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (this.service.isLive() && this.service.numJobs() != 0) {
+            if (System.currentTimeMillis() >= deadline) {
+                return false;
+            }
+            try {
+                Thread.sleep(10);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+        return true;
     }
 
     public void shutdown() {
@@ -197,27 +271,40 @@ public class VoxelIngestService {
     }
 
     private boolean rawIngest0(WorldEngine engine, LevelChunkSection section, int x, int y, int z, DataLayer bl, DataLayer sl) {
-        this.ingestQueue.add(new IngestSection(x, y, z, engine, section, bl, sl));
+        return this.rawIngest0(engine, section, x, y, z, bl, sl, null);
+    }
+
+    private boolean rawIngest0(WorldEngine engine, LevelChunkSection section, int x, int y, int z, DataLayer bl, DataLayer sl, IngestBatch batch) {
+        this.ingestQueue.add(new IngestSection(x, y, z, engine, section, bl, sl, batch));
         try {
             this.service.execute();
             return true;
         } catch (Exception e) {
             Logger.error("Executing had an error: assume shutting down, aborting",e);
+            //Batch accounting for the refused task is owned by the caller (it sees the false return)
             return false;
         }
     }
 
     public static boolean rawIngest(WorldIdentifier id, LevelChunkSection section, int x, int y, int z, DataLayer bl, DataLayer sl) {
+        return rawIngest(id, section, x, y, z, bl, sl, null);
+    }
+
+    public static boolean rawIngest(WorldIdentifier id, LevelChunkSection section, int x, int y, int z, DataLayer bl, DataLayer sl, IngestBatch batch) {
         if (id == null) return false;
         var engine = id.getOrCreateEngine();
         if (engine == null) return false;
-        return rawIngest(engine, section, x, y, z, bl, sl);
+        return rawIngest(engine, section, x, y, z, bl, sl, batch);
     }
 
     public static boolean rawIngest(WorldEngine engine, LevelChunkSection section, int x, int y, int z, DataLayer bl, DataLayer sl) {
+        return rawIngest(engine, section, x, y, z, bl, sl, null);
+    }
+
+    public static boolean rawIngest(WorldEngine engine, LevelChunkSection section, int x, int y, int z, DataLayer bl, DataLayer sl, IngestBatch batch) {
         if (!shouldIngestSection(section, x, y, z)) return false;
         if (engine.instanceIn == null) return false;
         if (!engine.instanceIn.isIngestEnabled(null)) return false;//TODO: dont pass in null
-        return engine.instanceIn.getIngestService().rawIngest0(engine, section, x, y, z, bl, sl);
+        return engine.instanceIn.getIngestService().rawIngest0(engine, section, x, y, z, bl, sl, batch);
     }
 }

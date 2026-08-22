@@ -202,11 +202,11 @@ public class VoxyRenderSystem {
 
 
     public Viewport<?> setupViewport(ChunkRenderMatrices matrices, double cameraX, double cameraY, double cameraZ) {
-        var viewport = this.getViewport();
-        if (viewport == null) {
+        //Never set up (or implicitly select the iris shadow viewport via the selector) while
+        // the shadow pass is active; see setupViewportForCurrentPass for why
+        if (IrisUtil.irisShadowActive()) {
             return null;
         }
-
         //Do some very cheeky stuff for MiB
         if (VoxyCommon.IS_MINE_IN_ABYSS) {
             int sector = (((int)Math.floor(cameraX)>>4)+512)>>10;
@@ -217,6 +217,37 @@ public class VoxyRenderSystem {
         //cameraY += 100;
         var voxyProjection = computeProjectionMat(this.properties, matrices.projection());
 
+        int[] size = currentPassViewportSize();
+        if (size == null) {
+            return null;
+        }
+        int width = size[0];
+        int height = size[1];
+
+        var viewport = this.viewportSelector.getViewportForSize(width, height);
+
+        viewport
+                .setVanillaProjection(matrices.projection())
+                .setProjection(voxyProjection)
+                .setModelView(new Matrix4f(matrices.modelView()))
+                .setCamera(cameraX, cameraY, cameraZ)
+                .setScreenSize(width, height)
+                .update();
+
+        if (VoxyClient.getOcclusionDebugState()==0) {
+            viewport.frameId++;
+        }
+
+        return viewport;
+    }
+
+    //Resolve the size of the currently bound render target, applying the pipeline render-scaling
+    // factor. Returns null when it can't be resolved (0-sized). Both setupViewport and
+    // setupViewportForCurrentPass must use this so they always target the same viewport for the
+    // same pass; a mismatch there made the main camera flip between the default viewport and a
+    // size-keyed extra viewport every other frame, corrupting the shared vxDepth depth textures
+    // that water SSR samples from.
+    private int[] currentPassViewportSize() {
         int[] dims = new int[4];
         glGetIntegerv(GL_VIEWPORT, dims);
 
@@ -242,20 +273,64 @@ public class VoxyRenderSystem {
             Logger.error("Viewport width or height was zero, this is bad bad bad");
             return null;
         }
+        return new int[]{width, height};
+    }
 
-        viewport
-                .setVanillaProjection(matrices.projection())
-                .setProjection(voxyProjection)
-                .setModelView(new Matrix4f(matrices.modelView()))
-                .setCamera(cameraX, cameraY, cameraZ)
-                .setScreenSize(width, height)
-                .update();
-
-        if (VoxyClient.getOcclusionDebugState()==0) {
-            viewport.frameId++;
+    //Secondary render passes (camera mods like Vista, freecam, mirrors...) re-render the
+    // level with different matrices. Under Iris the cached viewport belongs to the main
+    // camera, so reusing it blindly draws the LOD transformed for the wrong view. Only
+    // reuse it when it was actually built from the current pass's matrices.
+    public Viewport<?> setupViewportForCurrentPass(ChunkRenderMatrices matrices, double cameraX, double cameraY, double cameraZ) {
+        //Select the viewport exactly as setupViewport does (size-keyed), so this pass and the
+        // iris capture path always share the same viewport for the same target. Using the bare
+        // default viewport here made the main camera alternate between the default and a
+        // size-keyed extra viewport, corrupting the vxDepth depth textures that water SSR reads.
+        int[] size = this.currentPassViewportSize();
+        if (size == null) {
+            return null;
         }
+        var viewport = this.viewportSelector.getViewportForSize(size[0], size[1]);
+        if (viewport == null) {
+            return null;
+        }
+        if (this.viewportMatches(viewport, matrices, cameraX, cameraY, cameraZ)) {
+            return viewport;
+        }
+        return this.setupViewport(matrices, cameraX, cameraY, cameraZ);
+    }
 
-        return viewport;
+    private boolean viewportMatches(Viewport<?> viewport, ChunkRenderMatrices matrices, double cameraX, double cameraY, double cameraZ) {
+        if (viewport.width <= 0 || viewport.height <= 0) {
+            return false;
+        }
+        //The cached viewport must match the currently bound target's size: secondary
+        // passes render into small off-screen canvases, and a stale size would project the
+        // LOD with the wrong dimensions. Use the same size resolution as setupViewport.
+        int[] size = this.currentPassViewportSize();
+        if (size == null) {
+            return false;
+        }
+        if (viewport.width != size[0] || viewport.height != size[1]) {
+            return false;
+        }
+        if (Math.abs(viewport.cameraX - cameraX) > 0.01
+                || Math.abs(viewport.cameraY - cameraY) > 0.01
+                || Math.abs(viewport.cameraZ - cameraZ) > 0.01) {
+            return false;
+        }
+        return matrixMatches(viewport.vanillaProjection, matrices.projection())
+                && matrixMatches(viewport.modelView, matrices.modelView());
+    }
+
+    private static boolean matrixMatches(Matrix4fc a, Matrix4fc b) {
+        for (int c = 0; c < 4; c++) {
+            for (int r = 0; r < 4; r++) {
+                if (Math.abs(a.get(c, r) - b.get(c, r)) > 1.0e-3f) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     public void renderOpaque(Viewport<?> viewport) {

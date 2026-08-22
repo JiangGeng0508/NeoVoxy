@@ -66,7 +66,7 @@ public class VoxyConfig {
     // integrated server (singleplayer/LAN host) and ingest them into the LOD store. Chunks are
     // generated only to the LIGHT status (blocks+biomes+light, no entities/ticking) in expanding
     // rings around the player, throttled by server MSPT and the ingest backlog.
-    public boolean distantGenEnabled = true;
+    public boolean distantGenEnabled = false;
     // Radius in chunks around the player to generate. 96 chunks = 1536 blocks.
     public int distantGenRadius = 96;
     // How many chunks may generate concurrently. Higher = faster but more server load.
