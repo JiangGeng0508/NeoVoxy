@@ -207,10 +207,39 @@ public class ModelFactory {
             blockState = sb.baseState.getBlock().withPropertiesOf(blockState);
         }
 
-        //We do this first so that it is always guarenteed that fluid models are ordered before the block models
+        //We are (probably) going to be baking the block id
+        // check that it is currently not inflight, if it is, return as its already being baked
+        // else add it to the flight as it is going to be baked
+        //NOTE: this MUST happen before the fluid state recursion below: cyclic fluid<->block
+        // mappings (e.g. supplementaries finite fluids, where createLegacyBlock maps right
+        // back to the same block) would otherwise recurse forever and blow the stack.
+        // Being in-flight doubles as the recursion cycle breaker.
+        this.blockStatesInFlightLock.lock();
+        BlockBake bake = null;
+        try {
+            if (this.blockStatesInFlight.add(blockId)) {
+                VarHandle.loadLoadFence();
+
+                //We must do this in here as otherwise there is a race condition, the order in which blocks are added to the
+                // blockStatesInFlight must be the the oder they are added to the bake queue
+
+                //We need to get it twice cause of threading
+                if (this.idMappings[blockId] == -1) {
+                    //Dont enqueue yet, the fluid state (if any) has to be enqueued first
+                    bake = new BlockBake(blockId, blockState);
+                }
+            }
+        } finally {
+            this.blockStatesInFlightLock.unlock();
+        }
+        if (bake == null) {
+            //Block baking is already in-flight
+            return false;
+        }
 
         //Before we enqueue the baking of this blockstate, we must check if it has a fluid state associated with it
         // if it does, we must ensure that it is (effectivly) baked BEFORE we bake this blockstate
+        //We do this first so that it is always guarenteed that fluid models are ordered before the block models
         boolean isFluid = blockState.getBlock() instanceof LiquidBlock;
         if ((!isFluid) && (!blockState.getFluidState().isEmpty())) {
             //Insert into the fluid LUT
@@ -219,34 +248,21 @@ public class ModelFactory {
             int fluidStateId = this.mapper.getIdForBlockState(fluidState);
 
             if (this.idMappings[fluidStateId] == -1) {
-                //Dont have to check for inflight as that is done recursively :p
 
                 //This is a hack but does work :tm: due to how the download stream is setup
                 // it should enforce that the fluid state is processed before our blockstate
-                addEntry(fluidStateId);
+                try {
+                    addEntry(fluidStateId);
+                } catch (Throwable t) {
+                    //Never leave the entry stuck in-flight, otherwise it can never be baked
+                    Logger.error("Failed to register fluid state for block " + blockId, t);
+                }
             }
         }
 
-        //We are (probably) going to be baking the block id
-        // check that it is currently not inflight, if it is, return as its already being baked
-        // else add it to the flight as it is going to be baked
         this.blockStatesInFlightLock.lock();
         try {
-            if (!this.blockStatesInFlight.add(blockId)) {
-                //Block baking is already in-flight
-                return false;
-            }
-
-            VarHandle.loadLoadFence();
-
-            //We must do this in here as otherwise there is a race condition, the order in which blocks are added to the
-            // blockStatesInFlight must be the the oder they are added to the bake queue
-
-            //We need to get it twice cause of threading
-            if (this.idMappings[blockId] != -1) {
-                return false;
-            }
-            this.bakeQueue.add(new BlockBake(blockId, blockState));
+            this.bakeQueue.add(bake);
             return true;
 
         } finally {
@@ -440,6 +456,12 @@ public class ModelFactory {
 
         int clientFluidStateId = -1;
 
+        //Cyclic fluid<->block mappings (e.g. supplementaries finite fluids) can never
+        // satisfy the bake-before ordering, so the fluid state may legitimately not be
+        // baked yet when this block gets processed; fall back to mapping the fluid
+        // variant to this blocks own model instead of crashing.
+        boolean fluidFallback = false;
+
         if ((!isFluid) && (!blockState.getFluidState().isEmpty())) {
             //Insert into the fluid LUT
             var fluidState = blockState.getFluidState().createLegacyBlock();
@@ -448,7 +470,8 @@ public class ModelFactory {
 
             clientFluidStateId = this.idMappings[fluidStateId];
             if (clientFluidStateId == -1) {
-                throw new IllegalStateException("Block has a fluid state but fluid state is not already baked!!!");
+                Logger.warn("Block has a fluid state but the fluid state is not baked yet (cyclic fluid mapping?), falling back to the blocks own model: " + blockState);
+                fluidFallback = true;
             }
         }
 
@@ -506,6 +529,9 @@ public class ModelFactory {
             this.fluidStateLUT[modelId] = modelId;
         } else if (clientFluidStateId != -1) {
             this.fluidStateLUT[modelId] = clientFluidStateId;
+        } else if (fluidFallback) {
+            //Cyclic fluid mapping, render the fluid variant as this blocks own model
+            this.fluidStateLUT[modelId] = modelId;
         }
 
 

@@ -21,6 +21,7 @@ public class ImportManager {
         protected long startTime;
         protected long timer;
         protected long updateEvery = 50;
+        private boolean started;
 
         protected ImportTask(IDataImporter importer) {
             this.importer = importer;
@@ -31,6 +32,7 @@ public class ImportManager {
             if (this.importer.isRunning()) {
                 throw new IllegalStateException();
             }
+            this.started = true;
             this.startTime = System.currentTimeMillis();
             this.importer.runImport(this::onUpdate, this::onCompleted);
         }
@@ -53,6 +55,13 @@ public class ImportManager {
             this.importer.shutdown();
         }
 
+        private boolean isStale() {
+            //A task that was started but whose importer is no longer running either
+            // finished without reporting completion or crashed mid-import; either way it
+            // must not block new imports for this world forever.
+            return this.started && !this.importer.isRunning();
+        }
+
         protected boolean isCompleted() {
             return !this.importer.isRunning();
         }
@@ -65,15 +74,14 @@ public class ImportManager {
     public boolean tryRunImport(IDataImporter importer) {
         ImportTask task;
         synchronized (this) {
-            {
-                var importerTask = this.activeImporters.get(importer.getEngine());
-                if (importerTask != null) {
-                    if (!importerTask.isCompleted()) {
-                        return false;
-                    } else {
-                        throw new IllegalStateException();
-                    }
+            var importerTask = this.activeImporters.get(importer.getEngine());
+            if (importerTask != null) {
+                if (!importerTask.isStale()) {
+                    return false;
                 }
+                //Stale entry (finished/crashed without reporting completion), replace it
+                // instead of throwing so it cant block new imports forever
+                this.activeImporters.remove(importer.getEngine());
             }
             task = this.createImportTask(importer);
             this.activeImporters.put(importer.getEngine(), task);
@@ -86,8 +94,12 @@ public class ImportManager {
         try {
             engine.acquireRef();
             synchronized (this) {
-                if (this.activeImporters.containsKey(engine)) {
-                    return false;
+                var existing = this.activeImporters.get(engine);
+                if (existing != null) {
+                    if (!existing.isStale()) {
+                        return false;
+                    }
+                    this.activeImporters.remove(engine);
                 }
             }
             return this.tryRunImport(factory.get());

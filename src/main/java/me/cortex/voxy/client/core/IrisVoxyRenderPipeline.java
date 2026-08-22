@@ -117,8 +117,15 @@ public class IrisVoxyRenderPipeline extends AbstractRenderPipeline {
 
     @Override
     protected int setup(Viewport<?> viewport, int sourceFramebuffer, int srcWidth, int srcHeight) {
-        this.fb.resize(viewport.width, viewport.height);
-        this.fbTranslucent.resize(viewport.width, viewport.height);
+        //The fb/fbTranslucent depth textures are shared with the main camera for water SSR. Only
+        // the main viewport may resize them: a secondary pass (Vista TV) resizing them every other
+        // frame flips the depth texture size and makes the reflection sample a flickering box.
+        if (viewport.isMainViewport) {
+            this.fb.resize(viewport.width, viewport.height);
+            this.fbTranslucent.resize(viewport.width, viewport.height);
+        }
+        int fbW = this.fb.getDepthTex().getWidth();
+        int fbH = this.fb.getDepthTex().getHeight();
 
         if (false) {//TODO: only do this if shader specifies
             //Clear the colour component
@@ -131,7 +138,7 @@ public class IrisVoxyRenderPipeline extends AbstractRenderPipeline {
             srcWidth = viewport.width;
             srcHeight = viewport.height;
         }
-        this.initDepthStencil(sourceFramebuffer, this.fb.framebuffer.id, srcWidth, srcHeight, viewport.width, viewport.height);
+        this.initDepthStencil(sourceFramebuffer, this.fb.framebuffer.id, srcWidth, srcHeight, fbW, fbH);
         return this.fb.getDepthTex().id;
     }
 
@@ -161,7 +168,9 @@ public class IrisVoxyRenderPipeline extends AbstractRenderPipeline {
         } else {
             msk |= GL_COLOR_BUFFER_BIT;
         }
-        glBlitNamedFramebuffer(this.fb.framebuffer.id, this.fbTranslucent.framebuffer.id, 0,0, viewport.width, viewport.height, 0,0, viewport.width, viewport.height, msk, GL_NEAREST);
+        int bw = this.fb.getDepthTex().getWidth();
+        int bh = this.fb.getDepthTex().getHeight();
+        glBlitNamedFramebuffer(this.fb.framebuffer.id, this.fbTranslucent.framebuffer.id, 0,0, bw, bh, 0,0, bw, bh, msk, GL_NEAREST);
     }
 
     @Override

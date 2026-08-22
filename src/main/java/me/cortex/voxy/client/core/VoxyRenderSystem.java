@@ -202,11 +202,11 @@ public class VoxyRenderSystem {
 
 
     public Viewport<?> setupViewport(ChunkRenderMatrices matrices, double cameraX, double cameraY, double cameraZ) {
-        var viewport = this.getViewport();
-        if (viewport == null) {
+        //Never set up (or implicitly select the iris shadow viewport via the selector) while
+        // the shadow pass is active; see setupViewportForCurrentPass for why
+        if (IrisUtil.irisShadowActive()) {
             return null;
         }
-
         //Do some very cheeky stuff for MiB
         if (VoxyCommon.IS_MINE_IN_ABYSS) {
             int sector = (((int)Math.floor(cameraX)>>4)+512)>>10;
@@ -217,6 +217,39 @@ public class VoxyRenderSystem {
         //cameraY += 100;
         var voxyProjection = computeProjectionMat(this.properties, matrices.projection());
 
+        int[] size = currentPassViewportSize();
+        if (size == null) {
+            return null;
+        }
+
+        //Always use the default (main) viewport here and resize it to the current target. Using a
+        // size-keyed extra viewport means the main camera, after a windowed->fullscreen switch,
+        // lands on a non-main viewport (stale windowed size) and its LOD pipeline gets skipped.
+        return this.configureViewport(this.viewportSelector.getViewport(), matrices, voxyProjection, cameraX, cameraY, cameraZ, size[0], size[1]);
+    }
+
+    private Viewport<?> configureViewport(Viewport<?> viewport, ChunkRenderMatrices matrices, Matrix4f voxyProjection, double cameraX, double cameraY, double cameraZ, int width, int height) {
+        viewport
+                .setVanillaProjection(matrices.projection())
+                .setProjection(voxyProjection)
+                .setModelView(new Matrix4f(matrices.modelView()))
+                .setCamera(cameraX, cameraY, cameraZ)
+                .setScreenSize(width, height)
+                .update();
+
+        if (VoxyClient.getOcclusionDebugState()==0) {
+            viewport.frameId++;
+        }
+
+        return viewport;
+    }
+
+    //Resolve the size of the currently bound render target, applying the pipeline render-scaling
+    // factor. Returns null when it can't be resolved (0-sized). Both setupViewport and
+    // setupViewportForCurrentPass use this so they always target the same viewport for the same
+    // pass; mixing the bare default viewport with the size-keyed extra viewports here made the
+    // main camera flip between viewports every other frame.
+    private int[] currentPassViewportSize() {
         int[] dims = new int[4];
         glGetIntegerv(GL_VIEWPORT, dims);
 
@@ -242,20 +275,72 @@ public class VoxyRenderSystem {
             Logger.error("Viewport width or height was zero, this is bad bad bad");
             return null;
         }
+        return new int[]{width, height};
+    }
 
-        viewport
-                .setVanillaProjection(matrices.projection())
-                .setProjection(voxyProjection)
-                .setModelView(new Matrix4f(matrices.modelView()))
-                .setCamera(cameraX, cameraY, cameraZ)
-                .setScreenSize(width, height)
-                .update();
-
-        if (VoxyClient.getOcclusionDebugState()==0) {
-            viewport.frameId++;
+    //Secondary render passes (camera mods like Vista, freecam, mirrors...) re-render the
+    // level with different matrices. Under Iris the cached viewport belongs to the main
+    // camera, so reusing it blindly draws the LOD transformed for the wrong view. Only
+    // reuse it when it was actually built from the current pass's matrices.
+public Viewport<?> setupViewportForCurrentPass(ChunkRenderMatrices matrices, double cameraX, double cameraY, double cameraZ) {
+        //Null while the iris shadow pass is active: voxy must never render there. Running the
+        // pipeline against the shadow viewport would resize the shared vxDepth textures to the
+        // shadow map every frame and leave ortho shadow-projected LOD depth in them, which the
+        // pack then samples for depth-dependent effects (water SSR) -> ghosting/smearing.
+        if (IrisUtil.irisShadowActive()) {
+            return null;
         }
+        //Main camera: reuse the viewport the iris capture path already configured (setupViewport /
+        // CAPTURED_VIEWPORT_PARAMETERS). Its size is taken at capture time (the real main-window
+        // size), not from whatever GL viewport sodium happens to have bound mid-chunk-render --
+        // in fullscreen the latter is a scaled internal target, so reading it here sized the
+        // main viewport wrong and left LOD/shaders only in a corner.
+        var viewport = this.getViewport();
+        if (viewport == null) {
+            return null;
+        }
+        if (this.viewportMatches(viewport, matrices, cameraX, cameraY, cameraZ)) {
+            return viewport;
+        }
+        //A different pass (Vista TV / secondary camera). Give it its own size-keyed viewport rather
+        // than reusing the main one: configuring the main viewport with the TV's matrices/size would
+        // corrupt the shared vxDepth depth textures the main camera's water SSR samples.
+        int[] size = this.currentPassViewportSize();
+        if (size == null) {
+            return null;
+        }
+        var secondary = this.viewportSelector.getViewportForSize(size[0], size[1]);
+        if (secondary == null) {
+            return null;
+        }
+        return this.configureViewport(secondary, matrices, this.computeProjectionMat(this.properties, matrices.projection()), cameraX, cameraY, cameraZ, size[0], size[1]);
+    }
 
-        return viewport;
+    private boolean viewportMatches(Viewport<?> viewport, ChunkRenderMatrices matrices, double cameraX, double cameraY, double cameraZ) {
+        if (viewport.width <= 0 || viewport.height <= 0) {
+            return false;
+        }
+        //Compare only camera + matrices. The GL viewport is not a reliable size signal here:
+        // during chunk rendering sodium/iris may have a scaled internal viewport bound even on
+        // the main pass (fullscreen), so a size check would spuriously rebuild the main viewport.
+        if (Math.abs(viewport.cameraX - cameraX) > 0.01
+                || Math.abs(viewport.cameraY - cameraY) > 0.01
+                || Math.abs(viewport.cameraZ - cameraZ) > 0.01) {
+            return false;
+        }
+        return matrixMatches(viewport.vanillaProjection, matrices.projection())
+                && matrixMatches(viewport.modelView, matrices.modelView());
+    }
+
+    private static boolean matrixMatches(Matrix4fc a, Matrix4fc b) {
+        for (int c = 0; c < 4; c++) {
+            for (int r = 0; r < 4; r++) {
+                if (Math.abs(a.get(c, r) - b.get(c, r)) > 1.0e-3f) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     public void renderOpaque(Viewport<?> viewport) {
@@ -316,27 +401,36 @@ public class VoxyRenderSystem {
 
 
         GPUTiming.INSTANCE.marker();
-        //The entire rendering pipeline (excluding the chunkbound thing)
-        int[] sourceSize = getFramebufferDepthSize(boundFB, dims[2], dims[3]);
-        this.pipeline.runPipeline(viewport, boundFB, sourceSize[0], sourceSize[1]);
-        GPUTiming.INSTANCE.marker();
-
+        if (viewport.isMainViewport) {
+            //The entire rendering pipeline (excluding the chunkbound thing). This writes the
+            // shared iris depth framebuffer (fb/HiZ) and moves the render distance tracker /
+            // model service. Secondary passes (Vista TVs) render into their own off-screen
+            // target, so they must NOT run this: it would resize the shared fb to the TV size
+            // every other frame (corrupting main-camera water SSR) and relocate the main
+            // render-distance center to the TV camera. They only need their LOD mesh, which
+            // chunkBoundRenderer.render already drew into their own target above.
+            int[] sourceSize = getFramebufferDepthSize(boundFB, dims[2], dims[3]);
+            this.pipeline.runPipeline(viewport, boundFB, sourceSize[0], sourceSize[1]);
+            GPUTiming.INSTANCE.marker();
+        }
 
         TimingStatistics.main.stop();
         TimingStatistics.postDynamic.start();
 
-        PrintfDebugUtil.tick();
+        if (viewport.isMainViewport) {
+            PrintfDebugUtil.tick();
 
-        //As much dynamic runtime stuff here
-        {
-            //Tick upload stream (this is ok to do here as upload ticking is just memory management)
-            UploadStream.INSTANCE.tick();
+            //As much dynamic runtime stuff here
+            {
+                //Tick upload stream (this is ok to do here as upload ticking is just memory management)
+                UploadStream.INSTANCE.tick();
 
-            while (this.renderDistanceTracker.setCenterAndProcess(viewport.cameraX, viewport.cameraZ) && VoxyClient.isFrexActive());//While FF is active, run until everything is processed
-            TimingStatistics.H.start();
-            //Done here as is allows less gl state resetup
-            do { this.modelService.tick(900_000); } while (VoxyClient.isFrexActive() && !this.modelService.areQueuesEmpty());
-            TimingStatistics.H.stop();
+                while (this.renderDistanceTracker.setCenterAndProcess(viewport.cameraX, viewport.cameraZ) && VoxyClient.isFrexActive());//While FF is active, run until everything is processed
+                TimingStatistics.H.start();
+                //Done here as is allows less gl state resetup
+                do { this.modelService.tick(900_000); } while (VoxyClient.isFrexActive() && !this.modelService.areQueuesEmpty());
+                TimingStatistics.H.stop();
+            }
         }
         GPUTiming.INSTANCE.marker();
         TimingStatistics.postDynamic.stop();

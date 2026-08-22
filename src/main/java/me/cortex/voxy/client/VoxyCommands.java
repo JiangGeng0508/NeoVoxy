@@ -216,35 +216,51 @@ public class VoxyCommands {
         }
         var dbFile = new File(ctx.getArgument("sqlDbPath", String.class));
         if (!dbFile.exists()) {
+            ctx.getSource().sendFailure(Component.literal("Database not found: " + dbFile));
             return 1;
         }
         if (dbFile.isDirectory()) {
             dbFile = dbFile.toPath().resolve("DistantHorizons.sqlite").toFile();
             if (!dbFile.exists()) {
+                ctx.getSource().sendFailure(Component.literal("Database not found: " + dbFile));
                 return 1;
             }
         }
 
         File dbFile_ = dbFile;
         var engine = WorldIdentifier.ofEngine(Minecraft.getInstance().level);
-        if (engine==null)return 1;
-        return instance.getImportManager().makeAndRunIfNone(engine, ()->
-                new DHImporter(dbFile_, engine, Minecraft.getInstance().level, instance.getServiceManager(), instance.savingServiceRateLimiter))?0:1;
+        if (engine==null) {
+            ctx.getSource().sendFailure(Component.literal("Unable to resolve a voxy engine for the current world"));
+            return 1;
+        }
+        var ok = instance.getImportManager().makeAndRunIfNone(engine, ()->
+                new DHImporter(dbFile_, engine, Minecraft.getInstance().level, instance.getServiceManager(), instance.savingServiceRateLimiter));
+        if (!ok) {
+            ctx.getSource().sendFailure(Component.literal("An import is already running for this world (use /voxy import cancel to cancel it)"));
+        }
+        return ok?0:1;
     }
 
-    private static boolean fileBasedImporter(File directory) {
+    private static boolean fileBasedImporter(CommandSourceStack src, File directory) {
         var instance = (VoxyClientInstance)VoxyCommon.getInstance();
         if (instance == null) {
             return false;
         }
 
         var engine = WorldIdentifier.ofEngine(Minecraft.getInstance().level);
-        if (engine==null) return false;
-        return instance.getImportManager().makeAndRunIfNone(engine, ()->{
+        if (engine==null) {
+            src.sendFailure(Component.literal("Unable to resolve a voxy engine for the current world"));
+            return false;
+        }
+        var ok = instance.getImportManager().makeAndRunIfNone(engine, ()->{
             var importer = new WorldImporter(engine, Minecraft.getInstance().level, instance.getServiceManager(), instance.savingServiceRateLimiter);
             importer.importRegionDirectoryAsync(directory);
             return importer;
         });
+        if (!ok) {
+            src.sendFailure(Component.literal("An import is already running for this world (use /voxy import cancel to cancel it)"));
+        }
+        return ok;
     }
 
     private static int importRaw(CommandContext<CommandSourceStack> ctx) {
@@ -253,7 +269,7 @@ public class VoxyCommands {
             return 1;
         }
 
-        return fileBasedImporter(new File(ctx.getArgument("path", String.class)))?0:1;
+        return fileBasedImporter(ctx.getSource(), new File(ctx.getArgument("path", String.class)))?0:1;
     }
 
     private static int importBobby(CommandContext<CommandSourceStack> ctx) {
@@ -263,7 +279,7 @@ public class VoxyCommands {
         }
 
         var file = new File(".bobby").toPath().resolve(ctx.getArgument("world_name", String.class)).toFile();
-        return fileBasedImporter(file)?0:1;
+        return fileBasedImporter(ctx.getSource(), file)?0:1;
     }
 
     private static CompletableFuture<Suggestions> importWorldSuggester(CommandContext<CommandSourceStack> ctx, SuggestionsBuilder sb) {
@@ -332,7 +348,7 @@ public class VoxyCommands {
             ctx.getSource().sendFailure(Component.translatable("Cannot find region folder for current dimension"));
             return 1;
         }
-        return fileBasedImporter(regionPath.toFile())?0:1;
+        return fileBasedImporter(ctx.getSource(), regionPath.toFile())?0:1;
     }
 
     private static int importWorld(CommandContext<CommandSourceStack> ctx) {
@@ -351,8 +367,11 @@ public class VoxyCommands {
             var dimFile = DimensionType.getStorageFolder(Minecraft.getInstance().level.dimension(), file)
                     .resolve("region")
                     .toFile();
-            if (!dimFile.isDirectory()) return 1;
-            return fileBasedImporter(dimFile)?0:1;
+            if (!dimFile.isDirectory()) {
+                ctx.getSource().sendFailure(Component.literal("Region folder not found for world '" + name + "': " + dimFile));
+                return 1;
+            }
+            return fileBasedImporter(ctx.getSource(), dimFile)?0:1;
             //We are in a world directory, so import the current dimension we are in
             /*
             for (var dim : new String[]{"overworld", "the_nether", "the_end"}) {//This is so annoying that you cant loop through all the dimensions
@@ -370,7 +389,11 @@ public class VoxyCommands {
             if (!(name.endsWith("region"))) {
                 file = file.resolve("region");
             }
-            return fileBasedImporter(file.toFile()) ? 0 : 1;
+            if (!file.toFile().isDirectory()) {
+                ctx.getSource().sendFailure(Component.literal("Region folder not found: " + file));
+                return 1;
+            }
+            return fileBasedImporter(ctx.getSource(), file.toFile()) ? 0 : 1;
         }
     }
 
@@ -390,11 +413,15 @@ public class VoxyCommands {
 
         var engine = WorldIdentifier.ofEngine(Minecraft.getInstance().level);
         if (engine != null) {
-            return instance.getImportManager().makeAndRunIfNone(engine, () -> {
+            var ok = instance.getImportManager().makeAndRunIfNone(engine, () -> {
                 var importer = new WorldImporter(engine, Minecraft.getInstance().level, instance.getServiceManager(), instance.savingServiceRateLimiter);
                 importer.importZippedRegionDirectoryAsync(zip, finalInnerDir);
                 return importer;
-            }) ? 0 : 1;
+            });
+            if (!ok) {
+                ctx.getSource().sendFailure(Component.literal("An import is already running for this world (use /voxy import cancel to cancel it)"));
+            }
+            return ok ? 0 : 1;
         }
         return 1;
     }

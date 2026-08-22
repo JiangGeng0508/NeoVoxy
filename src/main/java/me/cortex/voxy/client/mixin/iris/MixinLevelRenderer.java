@@ -20,6 +20,8 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
+import static org.lwjgl.opengl.GL11C.GL_VIEWPORT;
+import static org.lwjgl.opengl.GL11C.glGetIntegerv;
 import static org.lwjgl.opengl.GL11C.glViewport;
 
 @Mixin(LevelRenderer.class)
@@ -39,8 +41,16 @@ public class MixinLevelRenderer {
         if (IrisUtil.irisShaderPackEnabled()) {
             var renderer = ((IGetVoxyRenderSystem) this).voxy$getRenderSystem();
             if (renderer != null) {
-                //Fixthe fucking viewport dims, fuck iris
-                glViewport(0,0,Minecraft.getInstance().getMainRenderTarget().width, Minecraft.getInstance().getMainRenderTarget().height);
+                //Fix the fucking viewport dims, fuck iris. Iris can leave a 0-sized viewport at
+                // capture time on the main pass. Only repair that broken case: secondary level
+                // renders (Vista TVs/mirrors, freecam...) deliberately run with a small viewport
+                // matching their own off-screen target, and stomping it here renders everything
+                // with the wrong projection size.
+                int[] dims = new int[4];
+                glGetIntegerv(GL_VIEWPORT, dims);
+                if (dims[2] <= 0 || dims[3] <= 0) {
+                    glViewport(0, 0, Minecraft.getInstance().getMainRenderTarget().width, Minecraft.getInstance().getMainRenderTarget().height);
+                }
 
                 var pos = camera.getPosition();
                 IrisUtil.CAPTURED_VIEWPORT_PARAMETERS = new IrisUtil.CapturedViewportParameters(new ChunkRenderMatrices(projectionMatrix, positionMatrix), pos.x, pos.y, pos.z);

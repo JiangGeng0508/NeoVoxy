@@ -27,6 +27,11 @@ public abstract class Viewport <A extends Viewport<A>> {
     public int width;
     public int height;
     public int frameId;
+    //True for the default/main-camera viewport. Secondary passes (Vista TVs...) get their own
+    // size-keyed viewport with this false. The shared iris depth framebuffer (fb) may only be
+    // resized from the main viewport, otherwise the main camera and a secondary pass flip its
+    // size every other frame and the water SSR samples a flickering depth texture.
+    public boolean isMainViewport;
     public Matrix4f vanillaProjection = new Matrix4f();
     public Matrix4f projection = new Matrix4f();
     public Matrix4f modelView = new Matrix4f();

@@ -232,6 +232,15 @@ public abstract class VoxyInstance {
             this.activeWorldLock.unlockRead(stamp);
         }
 
+        //Drain the ingest backlog BEFORE killing the service: Service.shutdown discards queued
+        // tasks, and anything dropped here was already handed off by producers (e.g. distant gen
+        // harvest) that expect the data to actually land. The saving service shutdown below then
+        // persists whatever sections these final ingests mark dirty.
+        try {
+            if (!this.ingestService.blockTillEmpty(30_000)) {
+                Logger.error("Voxy ingest backlog did not drain within 30s, remaining sections will be lost");
+            }
+        } catch (Exception e) {Logger.error(e);}
         try {this.ingestService.shutdown();} catch (Exception e) {Logger.error(e);}
         try {this.savingService.shutdown();} catch (Exception e) {Logger.error(e);}
 
