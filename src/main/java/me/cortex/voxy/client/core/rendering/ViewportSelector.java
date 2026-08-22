@@ -16,6 +16,7 @@ public class ViewportSelector <T extends Viewport<?>> {
     public ViewportSelector(Supplier<T> viewportCreator) {
         this.creator = viewportCreator;
         this.defaultViewport = viewportCreator.get();
+        this.defaultViewport.isMainViewport = true;
     }
 
     private T getOrCreate(Object holder) {
@@ -49,7 +50,11 @@ public class ViewportSelector <T extends Viewport<?>> {
     // viewports by target size instead so each size keeps stable buffers.
     public T getViewportForSize(int width, int height) {
         T viewport = this.getViewport();
-        if (viewport.width == width && viewport.height == height) {
+        //An uninitialised (0-sized) default viewport must still be the main viewport; the main
+        // camera is the only pass allowed to touch the shared iris depth framebuffer. If the
+        // first setupViewport call created a size-keyed extra viewport here, the main camera
+        // would run on a non-main viewport and skip its LOD pipeline entirely.
+        if (viewport.width <= 0 || (viewport.width == width && viewport.height == height)) {
             return viewport;
         }
         return this.getOrCreate((long) width << 32 | (height & 0xFFFFFFFFL));
