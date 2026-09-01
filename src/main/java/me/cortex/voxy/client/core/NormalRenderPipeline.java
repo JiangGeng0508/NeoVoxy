@@ -136,6 +136,12 @@ public class NormalRenderPipeline extends AbstractRenderPipeline {
 
     @Override
     public void setupAndBindOpaque(Viewport<?> viewport) {
+        if (!viewport.isMainViewport) {
+            //Secondary pass (Vista TV): draw into the caller's already-bound off-screen target
+            // rather than our shared fb. The plain terrain shader + MDICSectionRenderer's own
+            // buffer bindings provide everything it needs, so don't bind the shared fb here.
+            return;
+        }
         this.fb.bind();
     }
 

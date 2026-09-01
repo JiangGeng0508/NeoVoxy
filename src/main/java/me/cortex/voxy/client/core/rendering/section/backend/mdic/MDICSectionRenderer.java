@@ -56,6 +56,10 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
     private static final int TEMPORAL_OFFSET = TRANSLUCENT_OFFSET+TRANSLUCENT_DRAW_COUNT;//in draw calls
     private static final int STATISTICS_BUFFER_BINDING = 8;
     private final Shader terrainShader;
+    //Unpatched (PATCHED_SHADER not defined) variant of the terrain shader. Secondary passes
+    // (Vista TVs) render into a plain target with no iris shaderpack, so they must use this to
+    // produce a plain shaded LOD picture instead of emitting fragments into the iris gbuffer.
+    private final Shader unpatchedTerrainShader;
     private final Shader translucentTerrainShader;
 
     private final Shader commandGenShader = Shader.make()
@@ -130,6 +134,11 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
 
         //TODO: find a more robust/nicer way todo this
         this.terrainShader = tryCompilePatchedOrNormal(builder, opaqueFrag, frag);
+
+        //Compile the plain (non-patched) variant explicitly: under an iris shaderpack
+        // opaqueFrag != frag so terrainShader is the patched one, but secondary passes have no
+        // iris pipeline and need the raw shader.
+        this.unpatchedTerrainShader = tryCompilePatchedOrNormal(builder.clone(), frag, frag);
 
         String translucentFrag = pipeline.patchTranslucentShader(this, frag);
         translucentFrag = translucentFrag==null?frag:translucentFrag;
@@ -233,7 +242,9 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         glDisable(GL_BLEND);
         glEnable(GL_DEPTH_TEST);
         glDepthFunc(this.properties.closerEqualDepthCompare());
-        this.terrainShader.bind();
+        //Secondary passes (Vista TVs) have no iris pipeline: draw with the plain shader so they
+        // get a normal shaded LOD picture rather than emitting into the iris gbuffer.
+        (viewport.isMainViewport ? this.terrainShader : this.unpatchedTerrainShader).bind();
         glBindVertexArray(GlVertexArray.STATIC_VAO);//Needs to be before binding
         this.pipeline.setupAndBindOpaque(viewport);
         this.bindRenderingBuffers(viewport);
@@ -429,6 +440,7 @@ public class MDICSectionRenderer extends AbstractSectionRenderer<MDICViewport, B
         this.distanceCountBuffer.free();
         this.translucentTerrainShader.free();
         this.terrainShader.free();
+        this.unpatchedTerrainShader.free();
         this.commandGenShader.free();
         this.cullShader.free();
         this.prepShader.free();

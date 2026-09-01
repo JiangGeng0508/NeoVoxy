@@ -50,7 +50,7 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
 
     private final AsyncNodeManager nodeManager;
     private final NodeCleaner nodeCleaner;
-    private final HierarchicalOcclusionTraverser traversal;
+    protected final HierarchicalOcclusionTraverser traversal;
 
     protected AbstractSectionRenderer<?,?> sectionRenderer;
 
@@ -131,6 +131,34 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
 
         this.finish(viewport, sourceFrameBuffer, srcWidth, srcHeight);
         glBindFramebuffer(GL_FRAMEBUFFER, sourceFrameBuffer);
+    }
+
+    //Renders the LOD for a secondary pass (Vista TV) into its own already-bound off-screen target.
+    // Unlike runPipeline this does NOT initialise/resize the shared depth framebuffer, write depth
+    // back to the source gbuffer, or run the main-camera model/render-distance servicing -- none of
+    // that applies to a secondary target and it would corrupt the main camera's SSR. It DOES build
+    // the secondary viewport's own HiZ (from the secondary target's depth), traverse to fill its
+    // render list, generate its draw calls and draw them, all in one frame so there is no delay.
+    public void renderSecondary(Viewport<?> viewport, int sourceFramebuffer) {
+        var rs = ((AbstractSectionRenderer)this.sectionRenderer);
+        if (rs == null) {
+            return;
+        }
+
+        //Build this viewport's HiZ from the secondary target's own depth for occlusion culling.
+        // Touches only the secondary viewport's HiZ buffer, never the shared main fb.
+        int depthTex = glGetNamedFramebufferAttachmentParameteri(
+                sourceFramebuffer,
+                getDepthAttachment(sourceFramebuffer),
+                GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME
+        );
+        viewport.hiZBuffer.buildMipChain(depthTex, viewport.width, viewport.height);
+
+        //Traverse to fill this viewport's render list, then build draw calls and draw into the
+        // caller's already-bound target. Drawn the same frame so there's no one-frame blank.
+        this.traversal.doTraversal(viewport);
+        rs.buildDrawCalls(viewport);
+        rs.renderOpaque(viewport);
     }
 
     protected void initDepthStencil(int sourceFrameBuffer, int targetFb, int srcWidth, int srcHeight, int width, int height) {

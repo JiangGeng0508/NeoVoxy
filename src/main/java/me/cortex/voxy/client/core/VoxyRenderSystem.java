@@ -217,7 +217,12 @@ public class VoxyRenderSystem {
         //cameraY += 100;
         var voxyProjection = computeProjectionMat(this.properties, matrices.projection());
 
-        int[] size = currentPassViewportSize();
+        //The main camera's viewport is always the main window (with render scaling applied),
+        // never whatever GL viewport is bound mid-frame. This capture path runs at iris
+        // beginLevelRendering, where the GL viewport can already be a scaled internal target
+        // (224x224 in fullscreen), which would size the main viewport wrong and leave the LOD
+        // squeezed into a corner while secondary passes end up with the correct 2560x1440.
+        int[] size = this.mainViewportSize();
         if (size == null) {
             return null;
         }
@@ -226,6 +231,26 @@ public class VoxyRenderSystem {
         // size-keyed extra viewport means the main camera, after a windowed->fullscreen switch,
         // lands on a non-main viewport (stale windowed size) and its LOD pipeline gets skipped.
         return this.configureViewport(this.viewportSelector.getViewport(), matrices, voxyProjection, cameraX, cameraY, cameraZ, size[0], size[1]);
+    }
+
+    //Size of the main window's render target, applying the pipeline render-scaling factor.
+    // Deliberately ignores the GL viewport: for the main camera the window size is authoritative,
+    // whereas the GL viewport is unreliable under iris (0 at capture, or a scaled internal size).
+    private int[] mainViewportSize() {
+        var window = Minecraft.getInstance().getWindow();
+        int width = window.getWidth();
+        int height = window.getHeight();
+
+        var factor = this.pipeline.getRenderScalingFactor();
+        if (factor != null) {
+            width = (int) (width * factor[0]);
+            height = (int) (height * factor[1]);
+        }
+        if (width == 0 || height == 0) {
+            Logger.error("Viewport width or height was zero, this is bad bad bad");
+            return null;
+        }
+        return new int[]{width, height};
     }
 
     private Viewport<?> configureViewport(Viewport<?> viewport, ChunkRenderMatrices matrices, Matrix4f voxyProjection, double cameraX, double cameraY, double cameraZ, int width, int height) {
@@ -291,10 +316,9 @@ public Viewport<?> setupViewportForCurrentPass(ChunkRenderMatrices matrices, dou
             return null;
         }
         //Main camera: reuse the viewport the iris capture path already configured (setupViewport /
-        // CAPTURED_VIEWPORT_PARAMETERS). Its size is taken at capture time (the real main-window
-        // size), not from whatever GL viewport sodium happens to have bound mid-chunk-render --
-        // in fullscreen the latter is a scaled internal target, so reading it here sized the
-        // main viewport wrong and left LOD/shaders only in a corner.
+        // CAPTURED_VIEWPORT_PARAMETERS). Its size comes from the main window (setupViewport uses
+        // mainViewportSize, not the GL viewport -- in fullscreen the latter is a scaled internal
+        // target that would size the main viewport wrong and leave LOD/shaders only in a corner).
         var viewport = this.getViewport();
         if (viewport == null) {
             return null;
@@ -302,18 +326,32 @@ public Viewport<?> setupViewportForCurrentPass(ChunkRenderMatrices matrices, dou
         if (this.viewportMatches(viewport, matrices, cameraX, cameraY, cameraZ)) {
             return viewport;
         }
-        //A different pass (Vista TV / secondary camera). Give it its own size-keyed viewport rather
-        // than reusing the main one: configuring the main viewport with the TV's matrices/size would
-        // corrupt the shared vxDepth depth textures the main camera's water SSR samples.
-        int[] size = this.currentPassViewportSize();
-        if (size == null) {
+        //A different pass (Vista TV / secondary camera) -- or the main camera right after a
+        // /voxy reload, when the default viewport is still 0-sized and the camera/matrix match
+        // above fails for every pass. Give the main camera back its default viewport (sized to
+        // the main window) and let genuine secondary passes keep their own size-keyed viewport.
+        // Distinguish them by render target size: the main pass targets the main window, while a
+        // secondary pass (Vista TV) targets its own off-screen FBO that never equals the window.
+        int[] main = this.mainViewportSize();
+        int[] cur = this.currentPassViewportSize();
+        if (main == null || cur == null) {
             return null;
         }
-        var secondary = this.viewportSelector.getViewportForSize(size[0], size[1]);
+        if (main[0] == cur[0] && main[1] == cur[1]) {
+            //This is the main window pass. (Re)configure the default main viewport; don't let a
+            // stale 0-sized viewport linger and get claimed by a later pass.
+            return this.configureViewport(this.viewportSelector.getViewport(), matrices,
+                    this.computeProjectionMat(this.properties, matrices.projection()), cameraX, cameraY, cameraZ,
+                    main[0], main[1]);
+        }
+        //Genuine secondary pass: give it its own size-keyed viewport rather than reusing the main
+        // one -- configuring the main viewport with the TV's matrices/size would corrupt the shared
+        // vxDepth depth textures the main camera's water SSR samples.
+        var secondary = this.viewportSelector.getViewportForSize(cur[0], cur[1]);
         if (secondary == null) {
             return null;
         }
-        return this.configureViewport(secondary, matrices, this.computeProjectionMat(this.properties, matrices.projection()), cameraX, cameraY, cameraZ, size[0], size[1]);
+        return this.configureViewport(secondary, matrices, this.computeProjectionMat(this.properties, matrices.projection()), cameraX, cameraY, cameraZ, cur[0], cur[1]);
     }
 
     private boolean viewportMatches(Viewport<?> viewport, ChunkRenderMatrices matrices, double cameraX, double cameraY, double cameraZ) {
@@ -407,12 +445,17 @@ public Viewport<?> setupViewportForCurrentPass(ChunkRenderMatrices matrices, dou
             // model service. Secondary passes (Vista TVs) render into their own off-screen
             // target, so they must NOT run this: it would resize the shared fb to the TV size
             // every other frame (corrupting main-camera water SSR) and relocate the main
-            // render-distance center to the TV camera. They only need their LOD mesh, which
-            // chunkBoundRenderer.render already drew into their own target above.
+            // render-distance center to the TV camera.
             int[] sourceSize = getFramebufferDepthSize(boundFB, dims[2], dims[3]);
             this.pipeline.runPipeline(viewport, boundFB, sourceSize[0], sourceSize[1]);
-            GPUTiming.INSTANCE.marker();
+        } else {
+            //Secondary pass (Vista TV): draw the LOD into its own already-bound target. Re-bind
+            // the caller's draw target first: chunkBoundRenderer.render above bound the viewport's
+            // depthBoundingBuffer, which would otherwise swallow the LOD geometry.
+            glBindFramebuffer(GL_FRAMEBUFFER, boundFB);
+            this.pipeline.renderSecondary(viewport, boundFB);
         }
+        GPUTiming.INSTANCE.marker();
 
         TimingStatistics.main.stop();
         TimingStatistics.postDynamic.start();

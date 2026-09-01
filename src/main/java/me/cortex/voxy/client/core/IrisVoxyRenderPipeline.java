@@ -237,6 +237,12 @@ public class IrisVoxyRenderPipeline extends AbstractRenderPipeline {
     }
     @Override
     public void setupAndBindOpaque(Viewport<?> viewport) {
+        if (!viewport.isMainViewport) {
+            //Secondary pass (Vista TV): draw into the caller's already-bound target rather than
+            // our shared iris fb. The plain terrain shader + MDICSectionRenderer's own buffer
+            // bindings provide everything it needs, so don't bind the iris fb / uniforms here.
+            return;
+        }
         this.fb.bind();
         this.doBindings();
     }
