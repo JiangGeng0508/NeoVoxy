@@ -2,6 +2,7 @@ package me.cortex.voxy.commonImpl;
 
 import me.cortex.voxy.common.Logger;
 import me.cortex.voxy.common.config.Serialization;
+import me.cortex.voxy.commonImpl.network.VoxyNetwork;
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.fml.ModContainer;
 import net.neoforged.fml.common.Mod;
@@ -17,6 +18,8 @@ public class VoxyCommon {
     public VoxyCommon(ModContainer modContainer) {
         MOD_VERSION = modContainer.getModInfo().getVersion().toString();
         Serialization.init();
+        modContainer.getEventBus().addListener((net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent event) ->
+                VoxyNetwork.register(event.registrar("1")));
     }
 
     //This is hardcoded like this because people do not understand what they are doing

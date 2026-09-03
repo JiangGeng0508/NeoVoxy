@@ -64,6 +64,7 @@ public class VoxyClient {
             SharedIndexBuffer.INSTANCE.id();
 
             VoxyCommon.setInstanceFactory(VoxyClientInstance::new);
+            VoxyClientNetwork.init();
 
             if (!Capabilities.INSTANCE.subgroup) {
                 Logger.warn("GPU does not support subgroup operations, expect some performance degradation");

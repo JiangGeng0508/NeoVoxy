@@ -1,6 +1,7 @@
 package me.cortex.voxy.client.mixin.minecraft;
 
 import me.cortex.voxy.client.ICheekyClientChunkCache;
+import me.cortex.voxy.client.VoxyClientNetwork;
 import me.cortex.voxy.client.config.VoxyConfig;
 import me.cortex.voxy.common.world.service.VoxelIngestService;
 import net.neoforged.fml.ModList;
@@ -42,7 +43,7 @@ public class MixinClientChunkCache implements ICheekyClientChunkCache {
 
     @Inject(method = "drop", at = @At("HEAD"))
     public void voxy$captureChunkBeforeUnload(ChunkPos pos, CallbackInfo ci) {
-        if (VoxyConfig.CONFIG.ingestEnabled && BOBBY_INSTALLED) {
+        if (VoxyConfig.CONFIG.ingestEnabled && BOBBY_INSTALLED && !VoxyClientNetwork.isServerAuthoritative()) {
             var chunk = this.voxy$cheekyGetChunk(pos.x, pos.z);
             if (chunk != null) {
                 VoxelIngestService.tryAutoIngestChunk(chunk);

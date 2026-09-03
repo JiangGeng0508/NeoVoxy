@@ -7,6 +7,8 @@ modId="${mod_id}"
 version="${mod_version}"
 displayName="${mod_name}"
 authors="Cortex"
+# Server streams LOD data only to clients that have the mod; the mod is optional on both sides.
+displayTest="IGNORE_ALL_VERSION"
 description='''
 Far distance rendering mod utilising LoDs.
 '''

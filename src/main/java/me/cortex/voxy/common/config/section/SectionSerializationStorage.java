@@ -19,6 +19,10 @@ public class SectionSerializationStorage extends SectionStorage {
     public static final int BIGGEST_SERIALIZED_SECTION_SIZE = 32 * 32 * 32 * 8 * 2 + 8;
     private static final int MISS_CACHE_SIZE = Integer.getInteger("voxy.storageMissCacheSize", 1 << 16);
 
+    /** Hook for remote fetching: invoked (any thread) on a store miss. Set by client netcode, null on servers. */
+    public interface ISectionMissListener { void onMissing(long sectionKey); }
+    public static volatile ISectionMissListener MISS_LISTENER;
+
     private final StorageBackend backend;
     private final LongLinkedOpenHashSet missingSections = new LongLinkedOpenHashSet();
     public SectionSerializationStorage(StorageBackend storageBackend) {
@@ -49,6 +53,14 @@ public class SectionSerializationStorage extends SectionStorage {
             //TODO: if we need to fetch an lod from a server, send the request here and block until the request is finished
             // the response should be put into the local db so that future data can just use that
             // the server can also send arbitrary updates to the client for arbitrary lods
+            var listener = MISS_LISTENER;
+            if (listener != null) {
+                try {
+                    listener.onMissing(into.key);
+                } catch (Exception e) {
+                    Logger.error("Voxy section miss listener failed", e);
+                }
+            }
             this.rememberMissing(into.key);
             return 1;
         }
@@ -83,6 +95,11 @@ public class SectionSerializationStorage extends SectionStorage {
         synchronized (this.missingSections) {
             this.missingSections.remove(key);
         }
+    }
+
+    /** Clears the negative cache for a section supplied from elsewhere (e.g. server sync). */
+    public void forgetMissingSection(long key) {
+        this.forgetMissing(key);
     }
 
     @Override

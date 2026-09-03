@@ -268,11 +268,20 @@ public class Mapper {
 
     public int getIdForBiome(Holder<Biome> biome) {
         String biomeId = biome.unwrapKey().get().location().toString();
+        return this.getOrCreateBiomeId(biomeId);
+    }
+
+    /** String-keyed variant used by server->client mapping sync (no registry lookup). */
+    public int getOrCreateBiomeId(String biomeId) {
         var entry = this.biome2biomeEntry.get(biomeId);
         if (entry == null) {
             entry = this.registerNewBiome(biomeId);
         }
         return entry.id;
+    }
+
+    public int getBiomeCount() {
+        return this.biomeId2biomeEntry.size();
     }
 
     public static long composeMappingId(byte light, int blockId, int biomeId) {

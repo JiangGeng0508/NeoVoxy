@@ -74,7 +74,9 @@ public class VoxyClientInstance extends VoxyInstance {
 
     @Override
     public boolean isIngestEnabled(WorldIdentifier worldId) {
-        return (!this.noIngestOverride) && VoxyConfig.CONFIG.ingestEnabled;
+        //When a voxy server streams LOD data, local ingest is suspended to avoid
+        // clobbering authoritative data and wasting CPU on duplicate voxelization
+        return (!this.noIngestOverride) && !VoxyClientNetwork.isServerAuthoritative() && VoxyConfig.CONFIG.ingestEnabled;
     }
 
     @Override

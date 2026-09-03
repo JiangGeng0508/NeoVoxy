@@ -1,5 +1,6 @@
 package me.cortex.voxy.client.mixin.minecraft;
 
+import me.cortex.voxy.client.VoxyClientNetwork;
 import me.cortex.voxy.client.config.VoxyConfig;
 import me.cortex.voxy.common.world.service.VoxelIngestService;
 import me.cortex.voxy.commonImpl.VoxyCommon;
@@ -65,6 +66,7 @@ public abstract class MixinClientLevel {
         if (!updated.isAir()) return;
         if (VoxyCommon.getInstance()==null) return;
         if (!VoxyConfig.CONFIG.ingestEnabled) return;//Only ingest if setting enabled
+        if (VoxyClientNetwork.isServerAuthoritative()) return;//Server streams LOD data, dont ingest locally
 
         var self = (Level)(Object)this;
         var wi = WorldIdentifier.of(self);
