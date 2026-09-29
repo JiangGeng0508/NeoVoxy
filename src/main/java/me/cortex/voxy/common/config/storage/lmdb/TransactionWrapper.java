@@ -39,22 +39,8 @@ public class TransactionWrapper {
         }
     }
 
-    /*
-    public TransactionWrapper put(long keyPtr, long keyLen, long valPtr, int valLen, int flags) {
-        //TODO: instead give TransactionWrapper its own scratch buffer that it can use
-        try (var stack = stackPush()) {
-            long ptr = stack.nmalloc(4*8);
-            MemoryUtil.memPutLong(ptr, keyPtr);
-            MemoryUtil.memPutLong(ptr+8, keyLen);
-            MemoryUtil.memPutLong(ptr+16, valPtr);
-            MemoryUtil.memPutLong(ptr+24, valLen);
-            E(nmdb_put(this.transaction, this.dbi, ptr, ptr + 16, flags));
-            return this;
-        }
-    }*/
 
     public ByteBuffer get(ByteBuffer key) {
-        //TODO: instead give TransactionWrapper its own scratch buffer that it can use
         try (var stack = stackPush()) {
             var ret = MDBVal.malloc(stack);
             int retVal = mdb_get(this.transaction, this.dbi, MDBVal.calloc(stack).mv_data(key), ret);

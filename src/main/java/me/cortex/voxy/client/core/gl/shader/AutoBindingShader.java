@@ -16,7 +16,6 @@ import static org.lwjgl.opengl.GL33.glBindSampler;
 import static org.lwjgl.opengl.GL43.GL_SHADER_STORAGE_BUFFER;
 
 
-//TODO: rewrite the entire shader builder system
 public class AutoBindingShader extends Shader {
 
     private record BufferBinding(int target, int index, GlBuffer buffer, long offset, long size) {}
@@ -83,7 +82,6 @@ public class AutoBindingShader extends Shader {
             }
         }
 
-        //Else add the new binding
         this.bindings.add(binding);
     }
 
@@ -113,13 +111,6 @@ public class AutoBindingShader extends Shader {
     @Override
     public void bind() {
         super.bind();
-        //TODO: replace with multibind and use the invalidate flag
-        /*
-        glBindSamplers();
-        glBindTextures();
-        glBindBuffersBase();
-        glBindBuffersRange();
-         */
         if (!this.bindings.isEmpty()) {
             for (var binding : this.bindings) {
                 binding.buffer.assertNotFreed();

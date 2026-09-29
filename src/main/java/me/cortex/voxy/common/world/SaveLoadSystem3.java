@@ -34,10 +34,9 @@ public class SaveLoadSystem3 {
 
     private static final ThreadLocal<SerializationCache> CACHE = ThreadLocal.withInitial(SerializationCache::new);
 
-    //TODO: Cache like long2short and the short and other data to stop allocs
     public static MemoryBuffer serialize(WorldSection section) {
         var cache = CACHE.get();
-        var data = section.data;
+        var data = section._rawOrNull();
 
         Long2ShortOpenHashMap LUT = cache.lutMapCache; LUT.clear();
 
@@ -46,6 +45,21 @@ public class SaveLoadSystem3 {
 
         MemoryUtil.memPutLong(ptr, section.key); ptr += 8;
         long metadataPtr = ptr; ptr += 8;
+
+        if (data == null) {
+            //Uniform: a single LUT entry and an all-zero index region. Byte-for-byte the same output the
+            //dense path would produce, so this is not a format change - it just skips materialising.
+            long value = section.getUniformValue();
+            long blockIdxPtr = ptr; ptr += WorldSection.SECTION_VOLUME*2;
+            MemoryUtil.memSet(blockIdxPtr, 0, WorldSection.SECTION_VOLUME*2);
+            MemoryUtil.memPutLong(ptr, value); ptr += 8;
+
+            long uniformMetadata = 0;
+            uniformMetadata |= 1L;//LUT size
+            uniformMetadata |= Byte.toUnsignedLong(section.getNonEmptyChildren())<<16;
+            MemoryUtil.memPutLong(metadataPtr, uniformMetadata);
+            return buffer.subSize(ptr-buffer.address);
+        }
 
         long blockPtr = ptr; ptr += WorldSection.SECTION_VOLUME*2;
         long prev = data[0]; MemoryUtil.memPutLong(ptr, prev); ptr+=8; LUT.put(prev, (short) 0);
@@ -65,14 +79,12 @@ public class SaveLoadSystem3 {
             throw new IllegalStateException();
         }
 
-        //TODO: note! can actually have the first (last?) byte of metadata be the storage version!
         long metadata = 0;
         metadata |= Integer.toUnsignedLong(LUT.size());//Bottom 2 bytes
         metadata |= Byte.toUnsignedLong(section.getNonEmptyChildren())<<16;//Next byte
         //5 bytes free
 
         MemoryUtil.memPutLong(metadataPtr, metadata);
-        //TODO: do hash
 
         return buffer.subSize(ptr-buffer.address);//Does not get freed
     }
@@ -82,7 +94,6 @@ public class SaveLoadSystem3 {
         long key = MemoryUtil.memGetLong(ptr); ptr += 8;
 
         if (section.key != key) {
-            //throw new IllegalStateException("Decompressed section not the same as requested. got: " + key + " expected: " + section.key);
             Logger.error("Decompressed section not the same as requested. got: " + key + " expected: " + section.key);
             return false;
         }
@@ -91,17 +102,28 @@ public class SaveLoadSystem3 {
         section.nonEmptyChildren = (byte) ((metadata>>>16)&0xFF);
         final long lutBasePtr = ptr + WorldSection.SECTION_VOLUME * 2;
 
-        final var blockData = section.data;
+        final int lutSize = (int) (metadata & 0xFFFF);
+        if (lutSize == 1) {
+            long value = MemoryUtil.memGetLong(lutBasePtr);
+            section.setUniform(value);
+            if (section.lvl == 0) {
+                section.nonEmptyBlockCount = Mapper.isAir(value) ? 0 : WorldSection.SECTION_VOLUME;
+            }
+            me.cortex.voxy.commonImpl.PerfStats.sectionUniformKept.increment();
+            return true;
+        }
+
+        final var blockData = section.materialize();
         for (int i = 0; i < WorldSection.SECTION_VOLUME; i++) {
             blockData[i] = MemoryUtil.memGetLong(lutBasePtr + Short.toUnsignedLong(MemoryUtil.memGetShort(ptr)) * 8L);ptr += 2;
         }
 
         if (section.lvl == 0) {
-            int emptyBlockCount = 0;
+            int nonEmptyBlockCount = 0;
             for (long block : blockData) {
-                emptyBlockCount += Mapper.isAir(block) ? 1 : 0;
+                nonEmptyBlockCount += Mapper.isNotAirInt(block);
             }
-            section.nonEmptyBlockCount = WorldSection.SECTION_VOLUME-emptyBlockCount;
+            section.nonEmptyBlockCount = nonEmptyBlockCount;
         }
 
         ptr = lutBasePtr + (metadata & 0xFFFF) * 8L;

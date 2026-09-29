@@ -43,22 +43,18 @@ vec4 getFaceSize(uint faceData) {
     return faceOffsetsSizes;
 }
 
-//TODO: make branchless by using ternaries i think
 vec3 swizzelDataAxis(uint axis, vec3 data) {
     if (axis == 0) { //Up/down
         data = data.xzy;
     }
     //Not needed, here for readability
-    //if (axis == 1) {//north/south
     //    offset = offset.xyz;
-    //}
     if (axis == 2) { //west/east
         data = data.zxy;
     }
     return data;
 }
 
-//TODO: add a mechanism so that some quads can ignore backface culling
 // this would help alot with stuff like crops as they would look kinda weird i think,
 // same with flowers etc
 void main() {

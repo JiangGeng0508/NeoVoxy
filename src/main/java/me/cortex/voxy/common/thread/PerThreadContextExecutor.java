@@ -40,7 +40,7 @@ public class PerThreadContextExecutor extends TrackedObject {
     }
 
     private static final ThreadLocal<ThreadObj> THREAD_CTX = ThreadLocal.withInitial(ThreadObj::new);
-    private final WeakConcurrentCleanableHashMap<ThreadObj, ThreadContext> contexts = new WeakConcurrentCleanableHashMap<>(this::ctxCleaner); //TODO: a custom weak concurrent hashmap that can enqueue values when the value is purged
+    private final WeakConcurrentCleanableHashMap<ThreadObj, ThreadContext> contexts = new WeakConcurrentCleanableHashMap<>(this::ctxCleaner);
     private final Supplier<ThreadContext> contextFactory;
     private final Consumer<Exception> exceptionHandler;
 
@@ -88,7 +88,7 @@ public class PerThreadContextExecutor extends TrackedObject {
         }
         this.isLive = false;
         while (this.currentRunning.get() != 0) {
-            Thread.onSpinWait();//TODO: maybe add a sleep or something
+            Thread.onSpinWait();
         }
         for (var ctx : this.contexts.clear()) {
             ctx.cleanup.run();

@@ -8,11 +8,6 @@ import java.util.Map;
 import java.util.function.Supplier;
 
 public class ImportManager {
-    //TODO:
-    //Taskbar.INSTANCE.setProgress(0,10000);
-    //Taskbar.INSTANCE.setIsProgression();
-    //Taskbar.INSTANCE.setProgress(a, Math.max(1, b));
-    //Taskbar.INSTANCE.setIsNone();
 
     private final Map<WorldEngine, ImportTask> activeImporters = new HashMap<>();
 
@@ -42,7 +37,6 @@ public class ImportManager {
                 return false;
             this.timer = System.currentTimeMillis();
 
-            //TODO: THING
 
             return true;
         }
@@ -56,9 +50,9 @@ public class ImportManager {
         }
 
         private boolean isStale() {
-            //A task that was started but whose importer is no longer running either
-            // finished without reporting completion or crashed mid-import; either way it
-            // must not block new imports for this world forever.
+            //A task whose importer is no longer running either finished without reporting
+            //completion or crashed mid-import; either way it must not block new imports for this
+            //world forever.
             return this.started && !this.importer.isRunning();
         }
 
@@ -74,14 +68,16 @@ public class ImportManager {
     public boolean tryRunImport(IDataImporter importer) {
         ImportTask task;
         synchronized (this) {
-            var importerTask = this.activeImporters.get(importer.getEngine());
-            if (importerTask != null) {
-                if (!importerTask.isStale()) {
-                    return false;
+            {
+                var importerTask = this.activeImporters.get(importer.getEngine());
+                if (importerTask != null) {
+                    if (!importerTask.isStale()) {
+                        return false;
+                    }
+                    //Stale entry (finished/crashed without reporting completion), replace it instead
+                    //of throwing so it cant block new imports forever
+                    this.activeImporters.remove(importer.getEngine());
                 }
-                //Stale entry (finished/crashed without reporting completion), replace it
-                // instead of throwing so it cant block new imports forever
-                this.activeImporters.remove(importer.getEngine());
             }
             task = this.createImportTask(importer);
             this.activeImporters.put(importer.getEngine(), task);
@@ -124,9 +120,6 @@ public class ImportManager {
     }
 
     private synchronized void jobFinished(ImportTask task) {
-        //if (!task.isCompleted()) {
-        //    throw new IllegalStateException();
-        //}
 
         var remTask = this.activeImporters.remove(task.importer.getEngine());
         if (remTask != null) {

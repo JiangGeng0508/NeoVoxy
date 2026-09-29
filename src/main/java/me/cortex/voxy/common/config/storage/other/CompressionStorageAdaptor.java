@@ -15,7 +15,6 @@ public class CompressionStorageAdaptor extends DelegatingStorageAdaptor {
     }
 
 
-    //TODO: figure out a nicer way w.r.t scratch buffer shit
     @Override
     public MemoryBuffer getSectionData(long key, MemoryBuffer scratch) {
         var data = this.delegate.getSectionData(key, scratch);
@@ -30,6 +29,23 @@ public class CompressionStorageAdaptor extends DelegatingStorageAdaptor {
         var cdata = this.compressor.compress(data);
         this.delegate.setSectionData(key, cdata);
         //Note that the data isnt freed (data cache in the compressors are used)
+    }
+
+    //Must override: inheriting the base pass-through would hand raw sections to the delegate and
+    //silently stop compressing them. Compression happens per entry, exactly as in setSectionData.
+    @Override
+    public SectionWriteBatch createSectionWriteBatch() {
+        var inner = this.delegate.createSectionWriteBatch();
+        return new SectionWriteBatch() {
+            @Override
+            public void put(long key, MemoryBuffer data) {
+                inner.put(key, CompressionStorageAdaptor.this.compressor.compress(data));
+            }
+
+            @Override public long dataSize() { return inner.dataSize(); }
+            @Override public void commit() { inner.commit(); }
+            @Override public void close() { inner.close(); }
+        };
     }
 
     @Override

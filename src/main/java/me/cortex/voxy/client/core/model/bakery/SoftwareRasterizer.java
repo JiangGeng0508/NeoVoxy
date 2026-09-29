@@ -1,8 +1,5 @@
 package me.cortex.voxy.client.core.model.bakery;
 
-import me.cortex.voxy.client.core.model.ModelFactory;
-import net.caffeinemc.mods.sodium.api.util.ColorABGR;
-import net.caffeinemc.mods.sodium.api.util.ColorARGB;
 import net.caffeinemc.mods.sodium.api.util.ColorMixer;
 import org.joml.Matrix4f;
 import org.joml.Vector3f;
@@ -10,7 +7,6 @@ import org.joml.Vector4f;
 import org.lwjgl.system.MemoryUtil;
 
 import java.util.Arrays;
-import java.util.Random;
 
 public class SoftwareRasterizer {
     private final Vector4f scratch = new Vector4f();
@@ -19,7 +15,6 @@ public class SoftwareRasterizer {
     private final Vector3f scratch2 = new Vector3f();
     private final Vector3f scratch3 = new Vector3f();
     private final Vector3f scratch4 = new Vector3f();
-    //quad meta uv
     private final Vector3f qmuv1 = new Vector3f();
     private final Vector3f qmuv2 = new Vector3f();
     private final Vector3f qmuv3 = new Vector3f();
@@ -29,19 +24,20 @@ public class SoftwareRasterizer {
     private final Vector3f scratchR1 = new Vector3f();
     private final Vector3f scratchR2 = new Vector3f();
     private final Vector3f scratchR3 = new Vector3f();
-    //Attributes (meta, u, v)
     private final Vector3f a1 = new Vector3f();
     private final Vector3f a2 = new Vector3f();
     private final Vector3f a3 = new Vector3f();
+    private int quadColour;
 
     private static final long DEPTH_MASK = ((1L<<24)-1)<<(64-24);
-    private static final long CLEAR_VALUE = DEPTH_MASK;//set the depth to max value and rest of bits to 0
+    private static final long CLEAR_VALUE = DEPTH_MASK;
 
     private final int targetSize;
     private final long[] framebuffer;
 
     private boolean cullBackFace;
     private boolean doTheBlending;
+    private boolean replaceTranslucentColour;
 
     private int samplerWidth;
     private int samplerHeight;
@@ -57,11 +53,18 @@ public class SoftwareRasterizer {
     }
 
     public void setBlending(boolean blending) {
+        this.setBlending(blending, false);
+    }
+
+    public void setBlending(boolean blending, boolean replaceTranslucentColour) {
         this.doTheBlending = blending;
+        this.replaceTranslucentColour = replaceTranslucentColour;
     }
 
     public void setSamplerTexture(int[] texture, int width, int height) {
-        if (texture.length != width*height) throw new IllegalArgumentException();
+        if (texture.length != width * height) {
+            throw new IllegalArgumentException("Texture dimensions do not match pixel count");
+        }
         this.samplerTexture = texture;
         this.samplerWidth = width;
         this.samplerHeight = height;
@@ -85,7 +88,6 @@ public class SoftwareRasterizer {
         for (int i = 0; i < quadCount; i++) {
             this.rasterQuad(mvp, verticesAddr+ReuseVertexConsumer.VERTEX_FORMAT_SIZE*4L*i);
         }
-        //Arrays.fill(this.framebuffer, -1);
     }
 
     private void rasterQuad(Matrix4f transform, long addr) {
@@ -93,9 +95,10 @@ public class SoftwareRasterizer {
         loadTransformPos(transform, addr, 1, this.scratch2, this.qmuv2);
         loadTransformPos(transform, addr, 2, this.scratch3, this.qmuv3);
         loadTransformPos(transform, addr, 3, this.scratch4, this.qmuv4);
+        this.quadColour = MemoryUtil.memGetInt(addr + 24);
 
 
-        //0,1,2 | 2,3,0
+        // Split the quad into triangles 0-1-2 and 2-3-0.
         this.scratchR1.set(this.scratch1);
         this.scratchR2.set(this.scratch2);
         this.scratchR3.set(this.scratch3);
@@ -120,23 +123,16 @@ public class SoftwareRasterizer {
 
         float area = edge(v1, v2, v3);
 
-        //Pretty sure this is how you check for winding order aswell (if area is negative its counterclockwise)
-        if (area<0 == this.cullBackFace) {
+        // Cutout cards and explicitly marked complex models are two-sided during offline baking.
+        int meta = Float.floatToRawIntBits(this.a1.x);
+        if ((meta & (ReuseVertexConsumer.META_ALPHA_DISCARD | ReuseVertexConsumer.META_NO_FACE_CULL)) == 0
+                && (area < 0) == this.cullBackFace) {
             return;
         }
 
         if (Math.abs(area)<0.001) {
             return;//Degenerate triangle
         }
-
-        //TODO: check this is right?
-        /*
-        if (area < 0) {
-            var t = v1;
-            v1 = v2;
-            v2 = t;
-            area = -area;
-        }*/
 
         int minX = Math.max((int) Math.floor(Math.min(Math.min(v1.x, v2.x), v3.x)), 0);
         int maxX = Math.min((int) Math.ceil(Math.max(Math.max(v1.x, v2.x), v3.x)), this.targetSize-1);
@@ -152,69 +148,66 @@ public class SoftwareRasterizer {
                 float w2 = edge(v3, v1, cx, cy)*invArea;
                 float w3 = 1.0f-w1-w2;
                 if (w1>=0.0f&&w2>=0.0f&&w3>=0.0f) {
-                    //Dont need to worry about perspective correction afak as it should already be all correct
-
-                    //pixel is inside the triangle
                     this.rasterPixel(px+py*this.targetSize, w1, w2, w3);
                 }
             }
         }
     }
 
-    private void rasterPixel(int index, float b1, float b2, float b3) {//Barry coords
+    private void rasterPixel(int index, float b1, float b2, float b3) {
         float z = Math.fma(b1, this.scratchR1.z, Math.fma(b2, this.scratchR2.z, b3 * this.scratchR3.z));
         z = Math.fma(z,0.5f,0.5f);
-        if (z<0.0f && -0.000001f<=z) z = 0;//Clamp to 0 if its really small negative
-        if (z<0.0f||z>1.0f)
-            return;//TODO: check this
-
+        if (z < 0.0f && -0.000001f <= z) {
+            z = 0;
+        }
+        if (z < 0.0f || z > 1.0f) {
+            return;
+        }
 
 
         int meta = Float.floatToRawIntBits(this.a1.x);
         float u = Math.fma(b1, this.a1.y, Math.fma(b2, this.a2.y, b3 * this.a3.y));
         float v = Math.fma(b1, this.a1.z, Math.fma(b2, this.a2.z, b3 * this.a3.z));
 
-        int colour = this.sampleTexture(u,v);//The ABGR colour of this pixel
+        int colour = this.sampleTexture(u, v);
+        if (this.quadColour != 0xFFFFFFFF) {
+            colour = multiplyAbgr(colour, this.quadColour);
+        }
 
 
         final int ALPHA_CUTOFF_THRESHOLD = 0;
-        //TODO: meta&1 OR if we are blending
-        if ((meta&1)!=0 && (colour>>>24)<=ALPHA_CUTOFF_THRESHOLD) {//Discard on small alpha
+        if ((meta & ReuseVertexConsumer.META_ALPHA_DISCARD) != 0
+                && (colour >>> 24) <= ALPHA_CUTOFF_THRESHOLD) {
             return;
         }
 
-        //Stencil increment first
         this.framebuffer[index] += (1L<<32);
 
-        //Funny jank depth test
         long depthVal = ((long) (((double)z)*((1<<24)-1)))<<(64-24);
-        if (depthVal == DEPTH_MASK) depthVal--;//We wanto render _something_ at least
-        if (Long.compareUnsigned(this.framebuffer[index],depthVal)<=0) {
-            return;//Depth test failed, (using a strictly LESS_THAN comparison)
+        if (depthVal == DEPTH_MASK) {
+            depthVal--;
         }
-        //Set the pixels depth value
+        if (Long.compareUnsigned(this.framebuffer[index],depthVal)<=0) {
+            return;
+        }
         this.framebuffer[index] &= ~DEPTH_MASK;
         this.framebuffer[index] |= depthVal;
 
-        //set the metadata bit
         this.framebuffer[index] &= ~(1L<<39);
         this.framebuffer[index] |= ((long)(meta&4))<<37;
 
         int srcColour = (int) this.framebuffer[index];
         this.framebuffer[index] &= ~Integer.toUnsignedLong(-1);
 
-        if (this.doTheBlending) {//Blending
-            //mutate colour var
+        if (this.doTheBlending && !this.replaceTranslucentColour) {
             colour = doBlending(srcColour, colour);
         }
 
 
-        //Remember ABGR FORMAT
         this.framebuffer[index] |= Integer.toUnsignedLong(colour);
     }
 
 
-    // ARBDrawBuffersBlend.glBlendFuncSeparateiARB(0, GL_ONE_MINUS_DST_ALPHA, GL_DST_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
     private static int doBlending(int scr, int dst) {
         int srcAlpha = (scr>>>24)&0xFF;
         if (srcAlpha == 0) {
@@ -224,16 +217,16 @@ public class SoftwareRasterizer {
         scr &= ~(0xFF<<24);
         dst &= ~(0xFF<<24);
         int blendAlpha = Math.min(0xFF,srcAlpha+((dstAlpha*(255-srcAlpha))>>8));
-        //how much did we actually get
-
-        int blend = ColorMixer.mix(dst, scr, dstAlpha);//addRGB(ColorABGR.mulRGB(scr, 255-dstAlpha),ColorABGR.mulRGB(dst, dstAlpha));
+        int blend = ColorMixer.mix(dst, scr, dstAlpha);
         return blend|(blendAlpha<<24);
     }
 
-    private static int addRGB(int a, int b) {
-        return Math.min(0xFF,(a&0xFF)+(b&0xFF))|
-                Math.min((0xFF<<8),(a&(0xFF<<8))+(b&(0xFF<<8)))|
-                Math.min((0xFF<<16),(a&(0xFF<<16))+(b&(0xFF<<16)));
+    private static int multiplyAbgr(int base, int tint) {
+        int a = (((base >>> 24) & 0xFF) * ((tint >>> 24) & 0xFF)) / 255;
+        int b = (((base >>> 16) & 0xFF) * ((tint >>> 16) & 0xFF)) / 255;
+        int g = (((base >>> 8) & 0xFF) * ((tint >>> 8) & 0xFF)) / 255;
+        int r = ((base & 0xFF) * (tint & 0xFF)) / 255;
+        return (a << 24) | (b << 16) | (g << 8) | r;
     }
 
     private static float edge(Vector3f a, Vector3f b, Vector3f c) {
@@ -252,14 +245,12 @@ public class SoftwareRasterizer {
         var vec = transform.transformProject(this.scratch);
         if (Math.abs(this.scratch.w-1.0f)>0.000001f)
             throw new IllegalStateException();
-        out.set(maintainPrecision(Math.fma(vec.x, 0.5f, 0.5f)*this.targetSize), maintainPrecision(Math.fma(vec.y, 0.5f, 0.5f)*this.targetSize), vec.z);//TODO: dont know if z transform is correct
+        out.set(
+                Math.fma(vec.x, 0.5f, 0.5f) * this.targetSize,
+                Math.fma(vec.y, 0.5f, 0.5f) * this.targetSize,
+                vec.z
+        );
     }
-
-
-    private static float maintainPrecision(float x) {
-        return x;//TODO: value snapping in screenspace if needed
-    }
-
 
     public long[] getRawFramebuffer() {
         return this.framebuffer;

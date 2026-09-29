@@ -28,7 +28,6 @@ public class GlVertexArray extends TrackedObject {
     }
 
     public GlVertexArray bindBuffer(int buffer) {
-        //TODO: optimization, use glVertexArrayVertexBuffers
         for (int index : this.indices) {
             glVertexArrayVertexBuffer(this.id, index, buffer, 0, this.stride);
         }

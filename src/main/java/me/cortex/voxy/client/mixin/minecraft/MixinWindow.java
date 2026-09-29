@@ -17,7 +17,6 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 public class MixinWindow {
     @Inject(method = "<init>", at = @At(value = "INVOKE", target = "Lcom/mojang/blaze3d/platform/Window;setBootErrorCallback()V"))
     private void voxy$injectInitWindow(WindowEventHandler eventHandler, ScreenManager screenManager, DisplayData displayData, String fullscreenVideoModeString, String title, CallbackInfo ci) {
-        //System.load("C:\\Program Files\\RenderDoc\\renderdoc.dll");
         var prop = System.getProperty("voxy.forceGpuSelectionIndex", "NO");
         if (!prop.equals("NO")) {
             GPUSelectorWindows2.doSelector(Integer.parseInt(prop));

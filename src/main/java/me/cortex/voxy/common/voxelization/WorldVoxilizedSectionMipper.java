@@ -20,6 +20,28 @@ public class WorldVoxilizedSectionMipper {
         return ((y<<2)|(z<<1)|x) + 4*4*4 + 8*8*8 + 16*16*16;
     }
 
+    private static void resolveSurfaceCarriers(long[] data, int base, int size) {
+        int layer = size * size;
+        for (int y = 0; y < size; y++) {
+            for (int z = 0; z < size; z++) {
+                for (int x = 0; x < size; x++) {
+                    int index = base + y * layer + z * size + x;
+                    long carrier = data[index];
+                    if (!Mapper.isSurfaceCarrier(carrier)) continue;
+                    if (y == 0) continue;
+                    int belowIndex = index - layer;
+                    long below = data[belowIndex];
+                    if (!Mapper.isAir(below)) {
+                        data[belowIndex] = Mapper.applySurfaceCarrier(below, carrier);
+                        data[index] = Mapper.clearSurfaceCarrier(carrier);
+                        continue;
+                    }
+                    data[index] = Mapper.restoreSurfaceCarrier(carrier);
+                }
+            }
+        }
+    }
+
     public static void mipSection(VoxelizedSection section, Mapper mapper) {
         var data = section.section;
 
@@ -38,6 +60,7 @@ public class WorldVoxilizedSectionMipper {
                 break;
             q = (q+iMSK1)&MSK;
         }
+        resolveSurfaceCarriers(data, 16*16*16, 8);
 
         //Mip L2
         i = 0;
@@ -52,6 +75,7 @@ public class WorldVoxilizedSectionMipper {
                 }
             }
         }
+        resolveSurfaceCarriers(data, 16*16*16 + 8*8*8, 4);
 
         //Mip L3
         i = 0;
@@ -66,6 +90,7 @@ public class WorldVoxilizedSectionMipper {
                 }
             }
         }
+        resolveSurfaceCarriers(data, 16*16*16 + 8*8*8 + 4*4*4, 2);
 
         //Mip L4
         data[16*16*16 + 8*8*8 + 4*4*4 + 2*2*2] =

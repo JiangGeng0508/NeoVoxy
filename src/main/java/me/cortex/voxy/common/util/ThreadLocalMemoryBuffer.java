@@ -10,7 +10,6 @@ public class ThreadLocalMemoryBuffer {
         return ref;
     }
 
-    //TODO: make this much better
     private final ThreadLocal<MemoryBuffer> threadLocal;
 
     public ThreadLocalMemoryBuffer(long size) {

@@ -5,7 +5,6 @@ import me.cortex.voxy.commonImpl.VoxyCommon;
 
 import java.util.Arrays;
 
-//TODO: also have an AABB size stored
 public final class BuiltSection {
     public static final boolean VERIFY_BUILT_SECTION_OFFSETS = VoxyCommon.isVerificationFlagOn("verifyBuiltSectionOffsets");
     public final long position;

@@ -11,11 +11,16 @@ import net.irisshaders.iris.Iris;
 import java.util.function.BooleanSupplier;
 
 public class RenderPipelineFactory {
-    public static AbstractRenderPipeline createPipeline(RenderProperties properties, AsyncNodeManager nodeManager, NodeCleaner nodeCleaner, HierarchicalOcclusionTraverser traversal, BooleanSupplier frexSupplier) {
-        if (IrisUtil.IRIS_INSTALLED && IrisUtil.SHADER_SUPPORT) {
-            var pipeline = createIrisPipeline(properties, nodeManager, nodeCleaner, traversal, frexSupplier);
-            if (pipeline != null) {
-                return pipeline;
+    public static AbstractRenderPipeline createPipeline(RenderProperties properties,
+                                                        AsyncNodeManager nodeManager,
+                                                        NodeCleaner nodeCleaner,
+                                                        HierarchicalOcclusionTraverser traversal,
+                                                        BooleanSupplier frexSupplier) {
+        // Shader 管线创建失败时必须回退到原版路径，保证进入世界不会因为 Iris 状态中断。
+        if (IrisUtil.SHADER_SUPPORT && IrisUtil.irisShaderPackEnabled()) {
+            var irisPipeline = createIrisPipeline(properties, nodeManager, nodeCleaner, traversal, frexSupplier);
+            if (irisPipeline != null) {
+                return irisPipeline;
             }
         }
         return new NormalRenderPipeline(properties, nodeManager, nodeCleaner, traversal, frexSupplier);
@@ -26,23 +31,24 @@ public class RenderPipelineFactory {
                                                              NodeCleaner nodeCleaner,
                                                              HierarchicalOcclusionTraverser traversal,
                                                              BooleanSupplier frexSupplier) {
-        var irisPipeline = Iris.getPipelineManager().getPipelineNullable();
-        if (!(irisPipeline instanceof IGetIrisVoxyPipelineData voxyPipeline)) {
+        var irisPipe = Iris.getPipelineManager().getPipelineNullable();
+        if (irisPipe == null) {
             return null;
         }
-
-        var pipelineData = voxyPipeline.voxy$getPipelineData();
-        if (pipelineData == null) {
-            return null;
+        if (irisPipe instanceof IGetIrisVoxyPipelineData getVoxyPipeData) {
+            var pipeData = getVoxyPipeData.voxy$getPipelineData();
+            if (pipeData == null) {
+                return null;
+            }
+            Logger.info("Creating voxy iris render pipeline");
+            try {
+                return new IrisVoxyRenderPipeline(properties, pipeData, nodeManager, nodeCleaner, traversal, frexSupplier);
+            } catch (Exception e) {
+                Logger.error("Failed to create iris render pipeline", e);
+                IrisUtil.disableIrisShaders();
+                return null;
+            }
         }
-
-        Logger.info("Creating Voxy Iris render pipeline");
-        try {
-            return new IrisVoxyRenderPipeline(properties, pipelineData, nodeManager, nodeCleaner, traversal, frexSupplier);
-        } catch (RuntimeException e) {
-            Logger.error("Failed to create Voxy Iris render pipeline", e);
-            IrisUtil.disableIrisShaders();
-            return null;
-        }
+        return null;
     }
 }

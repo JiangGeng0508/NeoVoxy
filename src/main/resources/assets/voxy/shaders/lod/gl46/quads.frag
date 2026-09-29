@@ -12,16 +12,14 @@
 layout(binding = 0) uniform sampler2D blockModelAtlas;
 layout(binding = 2) uniform sampler2D depthTex;
 
-//#define DEBUG_RENDER
 
-//TODO: need to fix when merged quads have discardAlpha set to false but they span multiple tiles
 // however they are not a full block
 
 layout(location = 0) in flat uvec4 interData;
 #ifndef USE_NV_BARRY
 layout(location = 1) in vec2 uv;
 #endif
-in float vViewDist;
+layout(location = 2) in float boundaryDistanceSquared;
 
 #ifdef DEBUG_RENDER
 layout(location = 7) in flat uint quadDebug;
@@ -49,9 +47,19 @@ vec4 uint2vec4RGBA(uint colour) {
     return vec4((uvec4(colour)>>uvec4(24,16,8,0))&uvec4(0xFF))/255.0;
 }
 
-//bool useMipmaps() {
-//    return (interData.x&2u)==0u;
-//}
+uint unpackAlpha8(float alpha) {
+    return uint(round(clamp(alpha, 0.0, 1.0) * 255.0));
+}
+
+bool sampleTintMask(vec2 texturePos) {
+    return (unpackAlpha8(textureLod(blockModelAtlas, texturePos, 0).a) & 1u) != 0u;
+}
+
+vec4 clearTintMaskFromColour(vec4 colour) {
+    float alpha = float(unpackAlpha8(colour.a) & 0xFEu);
+    colour.a = alpha / 255.0;
+    return colour;
+}
 
 uint tintingState() {
     return (interData.x>>2)&3u;
@@ -59,6 +67,54 @@ uint tintingState() {
 
 bool useDiscard() {
     return (interData.x&1u)==1u;
+}
+
+bool useBalancedLeafCutout() {
+    return ((interData.x >> 1u) & 1u) == 1u;
+}
+
+bool useLavaBoundary() {
+    return ((interData.x >> 7u) & 1u) == 1u;
+}
+
+bool useIndependentWaterBoundary() {
+    return ((interData.w >> 11u) & 1u) == 1u;
+}
+
+bool useOriginalLeafHandoff() {
+    // Keep the long-standing balanced-leaf marker as a compatibility fallback for a model buffer
+    // produced immediately before a renderer/resource reload, while bit 12 covers every leaf mode.
+    return useBalancedLeafCutout() || ((interData.w >> 12u) & 1u) == 1u;
+}
+
+bool useCoarseFluidProxy() {
+    return ((interData.w >> 13u) & 1u) == 1u;
+}
+
+bool useFramedBlocksDistance() {
+    return ((interData.w >> 14u) & 1u) == 1u;
+}
+
+bool useDistantTrackReplacement() {
+    return ((interData.w >> 15u) & 1u) == 1u;
+}
+
+vec2 varyBalancedLeafUV(vec2 localUV, vec2 tile, out uint transform) {
+    uvec2 tilePos = uvec2(max(tile, vec2(0.0f)));
+    uint hash = interData.w >> 16u;
+    hash ^= tilePos.x * 0x9e3779b9u;
+    hash ^= tilePos.y * 0x85ebca6bu;
+    hash ^= hash >> 16u;
+    hash *= 0x7feb352du;
+    hash ^= hash >> 15u;
+    transform = hash & 7u;
+
+    // Eight stable rotations/reflections preserve the resource-pack alpha
+    // pattern while avoiding mirrored pairs and repeated symmetric canopies.
+    if ((transform & 1u) != 0u) localUV = localUV.yx;
+    if ((transform & 2u) != 0u) localUV.x = 1.0f - localUV.x;
+    if ((transform & 4u) != 0u) localUV.y = 1.0f - localUV.y;
+    return localUV;
 }
 
 uint getFace() {
@@ -80,7 +136,6 @@ vec2 getBaseUV() {
 
 #ifdef PATCHED_SHADER
 struct VoxyFragmentParameters {
-    //TODO: pass in derivative data
     vec4 sampledColour;
     vec2 tile;
     vec2 uv;
@@ -95,37 +150,41 @@ void voxy_emitFragment(VoxyFragmentParameters parameters);
 #else
 
 vec4 computeColour(vec2 texturePos, vec4 colour) {
-    //Conditional tinting, TODO: FIXME: this is better but still not great, try encode data into the top bit of alpha so its per pixel
+    // Partial tint faces carry an exact per-pixel tint marker in the low bit of
+    // the base-level alpha channel. That avoids guessing from grayscale colour.
 
     uint tintingFunction = tintingState();
     bool doTint = tintingFunction==2;//Always tint if function == 2
     if (tintingFunction == 1) {//partial tint
-        vec4 tintTest = textureLod(blockModelAtlas, texturePos, 0);
-        if (abs(tintTest.r-tintTest.g) < 0.02f && abs(tintTest.g-tintTest.b) < 0.02f) {
-            doTint = true;
-        }
+        doTint = sampleTintMask(texturePos);
     }
     if (doTint) {
         colour *= uint2vec4RGBA(interData.z).yzwx;
     }
-    // uColorFix toggles the brightness fix: 1.0 => 0.955 (fix on), 0.0 => 1.0 (raw). Toggle via /voxy colorfix.
-    float b = mix(1.0, 0.955, uColorFix);
-    return (colour * uint2vec4RGBA(interData.y)) * vec4(b, b, b, 1.0) + vec4(0,0,0,float(interData.w&0xFFu)/255);
+    return (colour * uint2vec4RGBA(interData.y)) + vec4(0,0,0,float(interData.w&0xFFu)/255);
 }
 
 #endif
 
 
-//Fades the far LOD edge into the fog colour so the hard mesh edge at the horizon doesn't show
-// as a black line on distant water/terrain.
-vec3 applyFarFade(vec3 col) {
-    float farFade = 1.0 - smoothstep(uFadeStart, uFadeEnd, vViewDist);
-    return mix(uFogColor.rgb, col, farFade);
-}
-
-
 void main() {
-    //vec2 uv = vec2(0);
+    if (distantTracksEnabled > 0.5
+            && useDistantTrackReplacement()
+            && boundaryDistanceSquared >= lodBoundaryFadeStart * lodBoundaryFadeStart) {
+        discard;
+        return;
+    }
+    if (useFramedBlocksDistance() && boundaryDistanceSquared > framedBlocksMaxDistanceSquared) {
+        discard;
+        return;
+    }
+    if (circularLodBoundaryEnabled > 0.5
+            && !useIndependentWaterBoundary()
+            && !useOriginalLeafHandoff()
+            && boundaryDistanceSquared < lodBoundaryFadeStart * lodBoundaryFadeStart) {
+        discard;
+        return;
+    }
     //Tile is the tile we are in
     vec2 tile;
     #ifdef USE_NV_BARRY
@@ -137,53 +196,87 @@ void main() {
     #endif
     #endif
 
-    vec2 uv2 = modf(uv, tile)*(1.0/(vec2(3.0,2.0)*256.0));
+    uint leafTransform = 0u;
+    vec2 localUV = modf(uv, tile);
+    if (useBalancedLeafCutout()) {
+        localUV = varyBalancedLeafUV(localUV, tile, leafTransform);
+    }
+    vec2 uv2 = localUV*(1.0/(vec2(3.0,2.0)*256.0));
     vec4 colour;
     vec2 texPos = uv2 + getBaseUV();
-//This is deprecated, TODO: remove the non mip code path
-    //if (useMipmaps())
     {
         vec2 uvSmol = uv*(1.0/(vec2(3.0,2.0)*256.0));
         vec2 dx = dFdx(uvSmol);//vec2(lDx, dDx);
         vec2 dy = dFdy(uvSmol);//vec2(lDy, dDy);
+        if ((leafTransform & 1u) != 0u) {
+            dx = dx.yx;
+            dy = dy.yx;
+        }
+        if ((leafTransform & 2u) != 0u) {
+            dx.x = -dx.x;
+            dy.x = -dy.x;
+        }
+        if ((leafTransform & 4u) != 0u) {
+            dx.y = -dx.y;
+            dy.y = -dy.y;
+        }
         colour = textureGrad(blockModelAtlas, texPos, dx, dy);
+        colour = clearTintMaskFromColour(colour);
+        if (useCoarseFluidProxy() && colour.a == 0.0f) {
+            vec2 faceCentre = getBaseUV() + vec2(0.5f) / (vec2(3.0f, 2.0f) * 256.0f);
+            colour = clearTintMaskFromColour(textureLod(blockModelAtlas, faceCentre, 0));
+        }
     }// else {
     //    colour = textureLod(blockModelAtlas, texPos, 0);
-    //}
 
     //If we are in shaders and are a helper invocation, just exit, as it enables extra performance gains for small sized
     // fragments, we do this here after derivative computation
     //Trying it with all shaders
-    //#ifdef PATCHED_SHADER
     #ifndef PATCHED_SHADER_ALLOW_DERIVATIVES
     if (gl_HelperInvocation) {
         return;
     }
     #endif
-    //#endif
 
     if (any(notEqual(clamp(tile, vec2(0), vec2((interData.x>>8)&0xFu, (interData.x>>12)&0xFu)), tile))) {
         discard;
         return;
     }
 
-    //Check the minimum bounding texture and ensure we are greater than it
-    if (DEPTH_SCALAR_COMPARE(gl_FragCoord.z, texelFetch(depthTex, ivec2(gl_FragCoord.xy), 0).r)) {
-        discard;
-        return;
+    // Opaque terrain follows the exact circular stencil handoff. Translucent
+    // terrain intentionally retains Sodium's section mask so water does not
+    // gain a second circular boundary on top of its vanilla square edge.
+    #ifdef TRANSLUCENT
+    const bool useChunkBounds = true;
+    #else
+    bool useChunkBounds = circularLodBoundaryEnabled < 0.5;
+    #endif
+    if (useChunkBounds) {
+        #ifdef CHUNK_MASK_HALF_RES
+        ivec2 maskCoord = ivec2(gl_FragCoord.xy) >> 1;
+        #else
+        ivec2 maskCoord = ivec2(gl_FragCoord.xy);
+        #endif
+        if (DEPTH_SCALAR_COMPARE(gl_FragCoord.z, texelFetch(depthTex, maskCoord, 0).r)) {
+            discard;
+            return;
+        }
     }
 
 
     //Also, small quad is really fking over the mipping level somehow
     #ifndef TRANSLUCENT
+    float cutoutAlpha = useBalancedLeafCutout()
+            ? colour.a
+            : textureLod(blockModelAtlas, texPos, 0).a;
+    // Mip-filtered leaf alpha loses coverage much faster than the base texture. A lower balanced
+    // threshold keeps the canopy density stable as the circular ownership mask moves over it.
+    float cutoutThreshold = useBalancedLeafCutout() ? 0.18f : 0.1f;
     colour.a = 1.0f;
-    if (useDiscard() && (textureLod(blockModelAtlas, texPos, 0).a <= 0.1f)) {
-    //if (useDiscard() && (colour.a <= 0.1f)) {
+    if (useDiscard() && cutoutAlpha <= cutoutThreshold) {
     #else
     if (textureLod(blockModelAtlas, texPos, 0).a == 0.0f) {
     #endif
-        //This is stupidly stupidly bad for divergence
-        //TODO: FIXME, basicly what this do is sample the exact pixel (no lod) for discarding, this stops mipmapping fucking it over
         #ifndef DEBUG_RENDER
         discard;
         return;
@@ -198,7 +291,7 @@ void main() {
 
     #ifndef PATCHED_SHADER
     colour = computeColour(texPos, colour);
-    outColour = vec4(applyFarFade(colour.rgb), colour.a);
+    outColour = colour;
 
     #ifdef DEBUG_RENDER
     uint hash = quadDebug*1231421+123141;
@@ -215,10 +308,7 @@ void main() {
     uint tintingFunction = tintingState();
     bool doTint = tintingFunction==2;//Always tint if function == 2
     if (tintingFunction==1) {//Partial tint
-        vec4 tintTest = texture(blockModelAtlas, texPos, -2);
-        if (abs(tintTest.r-tintTest.g) < 0.02f && abs(tintTest.g-tintTest.b) < 0.02f) {
-            doTint = true;
-        }
+        doTint = sampleTintMask(texPos);
     }
     vec4 tint = vec4(1);
     if (doTint) {
@@ -227,42 +317,14 @@ void main() {
 
     uint face = getFace();
     face ^= uint((face&1u)!=uint(gl_FrontFacing!=((face>>1)!=0u)));
-    // Under shaderpacks the pack lights LOD from the lightmap + face normal only, without the smooth AO /
-    // ambient data full chunks provide, so LOD reads a little dark. Lift the albedo we hand the pack to
-    // compensate. Tune LOD_SHADER_BRIGHTNESS to taste (1.0 = no lift, matches raw block colour).
-    float LOD_SHADER_BRIGHTNESS = mix(1.0, 1.025, uColorFix);
-    vec4 emitColour = vec4(applyFarFade(colour.rgb) * LOD_SHADER_BRIGHTNESS, colour.a);
-    voxy_emitFragment(VoxyFragmentParameters(emitColour, tile, texPos, face, modelId, getLightmapUv(interData.y), tint, model.customId));
+    voxy_emitFragment(VoxyFragmentParameters(colour, tile, texPos, face, modelId, getLightmapUv(interData.y), tint, model.customId));
 
     #endif
 }
 
 
 
-//#ifdef GL_KHR_shader_subgroup_quad
-/*
-uint hash = (uint(tile.x)*(1<<16))^uint(tile.y);
-uint horiz = subgroupQuadSwapHorizontal(hash);
-bool sameTile = horiz==hash;
-uint sv = mix(uint(-1), hash, sameTile);
-uint vert = subgroupQuadSwapVertical(sv);
-sameTile = sameTile&&vert==hash;
-mipBias = sameTile?0:-5.0;
-*/
-/*
-vec2 uvSmol = uv*(1.0/(vec2(3.0,2.0)*256.0));
-float lDx = subgroupQuadSwapHorizontal(uvSmol.x)-uvSmol.x;
-float lDy = subgroupQuadSwapVertical(uvSmol.y)-uvSmol.y;
-float dDx = subgroupQuadSwapDiagonal(lDx);
-float dDy = subgroupQuadSwapDiagonal(lDy);
-vec2 dx = vec2(lDx, dDx);
-vec2 dy = vec2(lDy, dDy);
-colour = textureGrad(blockModelAtlas, texPos, dx, dy);
-*/
-//#else
 //colour = texture(blockModelAtlas, texPos);
-//#endif
 
 //Undefine the depth stuff
 #import <voxy:util/depthutils.glsl>
-

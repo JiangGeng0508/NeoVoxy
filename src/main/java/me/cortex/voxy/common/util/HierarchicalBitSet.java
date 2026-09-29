@@ -43,9 +43,6 @@ public class HierarchicalBitSet {
         idx =  Long.numberOfTrailingZeros(~dp) + 64*idx;
         int ret = idx;
 
-        //if (this.isSet(ret)) {
-        //    throw new IllegalStateException();
-        //}
 
         dp |= 1L<<(idx&0x3f);
         this.D[idx>>6] = dp;
@@ -69,9 +66,6 @@ public class HierarchicalBitSet {
     }
 
     private void set(int idx) {
-        //if (this.isSet(idx)) {
-        //    throw new IllegalStateException();
-        //}
 
         this.endId += idx==(this.endId+1)?1:0;
         long dp = this.D[idx>>6] |= 1L<<(idx&0x3f);
@@ -108,12 +102,10 @@ public class HierarchicalBitSet {
             pos = Long.numberOfTrailingZeros(((~this.D[idx >> 6]) & -(1L << (idx & 0x3F))));
             idx = Math.max(pos + ((idx >> 6) << 6), idx);
         } while (pos == 64);
-        //TODO: fixme: this is due to the fact of the acceleration structure
         return idx;
     }
 
 
-    //TODO: FIXME: THIS IS SLOW AS SHIT
     public int allocateNextConsecutiveCounted(int count) {
         if (count > 64) {
             throw new IllegalStateException("Count to large for current implementation which has fastpath");
@@ -140,8 +132,6 @@ public class HierarchicalBitSet {
                 continue;
             }
 
-            //TODO: optimize this laziness
-            // (can  do it by first setting/updating the lower D index and propagating, then the upper D index (if it has/needs one))
             for (int j = 0; j < count; j++) {
                 this.set(j + i);
             }
@@ -158,7 +148,6 @@ public class HierarchicalBitSet {
         if (wasSet && idx == this.endId) {
             //Need to go back until we find the endIdx bit
             for (this.endId--; this.endId>=0 && !this.isSet(this.endId); this.endId--);
-            //this.endId++;
         }
 
         this.D[idx>>6] = v&~(1L<<(idx&0x3f));

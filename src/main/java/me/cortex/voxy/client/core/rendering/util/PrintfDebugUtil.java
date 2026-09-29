@@ -28,11 +28,9 @@ public final class PrintfDebugUtil {
             PRINTF_processor = PRINTF_object;
         } else {
             PRINTF_object = null;
-            //Todo add a dummy processor that just removes all the printf calls
             PRINTF_processor = new IShaderProcessor() {
                 @Override
                 public String process(ShaderType type, String src) {
-                    //TODO: replace with https://stackoverflow.com/questions/47162098/is-it-possible-to-match-nested-brackets-with-a-regex-without-using-recursion-or/47162099#47162099
                     // to match on printf with balanced bracing
                     return src.replace("printf", "//printf");
                 }

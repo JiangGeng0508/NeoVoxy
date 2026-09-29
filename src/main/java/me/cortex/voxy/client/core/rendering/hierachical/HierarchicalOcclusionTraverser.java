@@ -10,7 +10,6 @@ import me.cortex.voxy.client.core.gl.shader.Shader;
 import me.cortex.voxy.client.core.gl.shader.ShaderLoader;
 import me.cortex.voxy.client.core.gl.shader.ShaderType;
 import me.cortex.voxy.client.core.rendering.Viewport;
-import me.cortex.voxy.client.core.rendering.ChunkBoundRenderer;
 import me.cortex.voxy.client.core.rendering.building.RenderGenerationService;
 import me.cortex.voxy.client.core.rendering.util.DownloadStream;
 import me.cortex.voxy.client.core.rendering.util.PrintfDebugUtil;
@@ -33,7 +32,6 @@ import static org.lwjgl.opengl.GL42.glMemoryBarrier;
 import static org.lwjgl.opengl.GL43.GL_SHADER_STORAGE_BARRIER_BIT;
 import static org.lwjgl.opengl.GL45.*;
 
-// TODO: swap to persistent gpu threads instead of dispatching MAX_ITERATIONS of compute layers
 public class HierarchicalOcclusionTraverser {
     public static final boolean HIERARCHICAL_SHADER_DEBUG = System.getProperty("voxy.hierarchicalShaderDebug", "false").equals("true");
 
@@ -150,7 +148,6 @@ public class HierarchicalOcclusionTraverser {
             throw new IllegalStateException("Top level node count greater than capacity");
         }
 
-        //Use clear buffer, yes know is a bad idea, TODO: replace
         //Add the new top level node to the queue
         MemoryUtil.memPutInt(SCRATCH, id);
         nglClearNamedBufferSubData(this.topNodeIds.id, GL_R32UI, aid * 4L, 4, GL_RED_INTEGER, GL_UNSIGNED_INT, SCRATCH);
@@ -201,12 +198,10 @@ public class HierarchicalOcclusionTraverser {
 
         viewport.section.getToAddress(ptr); ptr += 4*3;
 
-        //MemoryUtil.memPutFloat(ptr, viewport.width); ptr += 4;
         MemoryUtil.memPutInt(ptr, viewport.hiZBuffer.getPackedLevels()); ptr += 4;
 
         viewport.innerTranslation.getToAddress(ptr); ptr += 4*3;
 
-        //MemoryUtil.memPutFloat(ptr, viewport.height); ptr += 4;
 
         final float screenspaceAreaDecreasingSize = VoxyConfig.CONFIG.subDivisionSize*VoxyConfig.CONFIG.subDivisionSize;
         //Screen space size for descending
@@ -220,26 +215,44 @@ public class HierarchicalOcclusionTraverser {
         MemoryUtil.memPutInt(ptr, this.nodeCleaner.visibilityId); ptr += 4;
 
         {
-            final double TARGET_COUNT = 4000;//TODO: make this configurable, or at least dynamically computed based on throughput rate of mesh gen
+            final double TARGET_COUNT = 4000;
             double iFillness = Math.max(0, (TARGET_COUNT - this.meshGen.getTaskCount()) / TARGET_COUNT);
             iFillness = Math.pow(iFillness, 2);
             final int requestSize = (int) Math.ceil(iFillness * MAX_REQUEST_QUEUE_SIZE);
             MemoryUtil.memPutInt(ptr, Math.max(0, Math.min(MAX_REQUEST_QUEUE_SIZE, requestSize)));ptr += 4;
         }
 
-        //Put the render distance here so that it can generate a correct circle, TODO: make it not top level section sized
         MemoryUtil.memPutFloat(ptr, (float) Math.pow(VoxyConfig.CONFIG.sectionRenderDistance*16*32,2));ptr += 4;
 
-        //World-curvature parameters, so the occlusion culling can expand nodes downward and stop
-        // wrongly culling the curved LOD that drops below the flat vanilla chunks (black holes).
-        int earthCurveRatio = VoxyConfig.CONFIG.earthCurveRatio;
-        float earthRadius = earthCurveRatio >= 50 ? 6371000.0f / earthCurveRatio : 0.0f;
-        MemoryUtil.memPutFloat(ptr, earthRadius); ptr += 4;
-        MemoryUtil.memPutFloat(ptr, ChunkBoundRenderer.VANILLA_CULL_DISTANCE >= 0.0f
-                ? ChunkBoundRenderer.VANILLA_CULL_DISTANCE
-                : Math.max(Minecraft.getInstance().options.getEffectiveRenderDistance()*16 - 16.0f, 16.0f)); ptr += 4;
+        //Nodes inside vanilla render distance (+2 chunks) always subdivide to lvl0 so the seam ring
+        //geometry matches vanilla. Kept narrow, widening it costs real section counts.
+        float fullDetailDist = (net.minecraft.client.Minecraft.getInstance().options.renderDistance().get() + 2) * 16f;
+        MemoryUtil.memPutFloat(ptr, fullDetailDist*fullDetailDist);ptr += 4;
 
+        float p00 = Math.max(0.0001f, viewport.vanillaProjection.m00());
+        float p11 = Math.max(0.0001f, viewport.vanillaProjection.m11());
+        float invP00 = 1.0f / p00;
+        float invP11 = 1.0f / p11;
+        MemoryUtil.memPutFloat(ptr, invP00);ptr += 4;
+        MemoryUtil.memPutFloat(ptr, invP11);ptr += 4;
+        //stretchMax = stretch() evaluated at the screen edge (tan = 1/P00,1/P11): a frame constant the
+        //shader divided into every node's stretch. Precompute it here so shouldDecend drops a per-node
+        //pow() and just reads this uniform.
+        MemoryUtil.memPutFloat(ptr, (float) Math.pow(1.0 + (double) invP00 * invP00 + (double) invP11 * invP11, 1.5));ptr += 4;
+        MemoryUtil.memPutInt(ptr, this.requestClock); ptr += 4;
+
+        //World-curvature parameters: the HiZ traversal and raster culling expand nodes downward by the
+        //drop at their farthest corner, otherwise the curved LOD that dips below the flat vanilla
+        //chunks is wrongly culled as occluded and leaves black holes in the void beneath them.
+        int earthCurveRatio = VoxyConfig.CONFIG.earthCurveRatio;
+        MemoryUtil.memPutFloat(ptr, earthCurveRatio >= 50 ? 6371000.0f / earthCurveRatio : 0.0f); ptr += 4;
+        MemoryUtil.memPutFloat(ptr, Math.max(
+                Minecraft.getInstance().options.getEffectiveRenderDistance() * 16.0f - 16.0f,
+                16.0f)); ptr += 4;
     }
+
+    private int requestClock;
+    public void tickRequestClock() { this.requestClock++; }
 
     private void bindings(Viewport<?> viewport) {
         glBindBuffer(GL_DISPATCH_INDIRECT_BUFFER, this.queueMetaBuffer.id);
@@ -252,7 +265,6 @@ public class HierarchicalOcclusionTraverser {
 
     public void doTraversal(Viewport<?> viewport) {
         this.uploadUniform(viewport);
-        //UploadStream.INSTANCE.commit(); //Done inside traversal
 
         this.traversal.bind();
         this.bindings(viewport);
@@ -302,14 +314,7 @@ public class HierarchicalOcclusionTraverser {
         }
 
         int firstDispatchSize = (this.topNodeCount+(1<<LOCAL_WORK_SIZE_BITS)-1)>>LOCAL_WORK_SIZE_BITS;
-        /*
-        //prime the queue Todo: maybe move after the traversal? cause then it is more efficient work since it doesnt need to wait for this before starting?
-        glClearNamedBufferData(this.queueMetaBuffer.id, GL_RGBA32UI, GL_RGBA, GL_UNSIGNED_INT, new int[]{0,1,1,0});//Prime the metadata buffer, which also contains
-
-        //Set the first entry
-        glClearNamedBufferSubData(this.queueMetaBuffer.id, GL_RGBA32UI, 0, 16, GL_RGBA, GL_UNSIGNED_INT, new int[]{firstDispatchSize,1,1,initialQueueSize});
-         */
-        {//TODO:FIXME: THIS IS BULLSHIT BY INTEL need to fix the clearing
+        {
             long ptr = UploadStream.INSTANCE.upload(this.queueMetaBuffer, 0, 16*MAX_ITERATIONS);
             MemoryUtil.memPutInt(ptr +  0, firstDispatchSize);
             MemoryUtil.memPutInt(ptr +  4, 1);
@@ -334,7 +339,6 @@ public class HierarchicalOcclusionTraverser {
         //Dont need to use indirect to dispatch the first iteration
         glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT|GL_COMMAND_BARRIER_BIT|GL_BUFFER_UPDATE_BARRIER_BIT);
         if (firstDispatchSize!=0) {
-            //for some reason amd driver loves spitting out errors when its 0 (even tho it should just ignore it afak) so we do it ourselves
             glDispatchCompute(firstDispatchSize, 1,1);
         }
         glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT|GL_COMMAND_BARRIER_BIT);
@@ -373,18 +377,16 @@ public class HierarchicalOcclusionTraverser {
             //This should not break the synchonization between gpu and cpu as in the traversal shader is
             // `if (atomRes < REQUEST_QUEUE_SIZE) {` which forcefully clamps to the request size
 
-            //Logger.warn("Count over max buffer size, clamping, got count: " + count + ".");
 
             count = (int) ((this.requestBuffer.size()>>3)-1);
 
-            //Write back the clamped count
-            MemoryUtil.memPutInt(ptr-8, count);
         }
-        //if (count > REQUEST_QUEUE_SIZE) {
-        //    Logger.warn("Count larger than 'maxRequestCount', overflow captured. Overflowed by " + (count-REQUEST_QUEUE_SIZE));
-        //}
         if (count != 0) {
-            this.nodeManager.submitRequestBatch(new MemoryBuffer(count*8L+8).cpyFrom(ptr-8));// the -8 is because we incremented it by 8
+            var buffer = new MemoryBuffer(count*8L+8).cpyFrom(ptr-8);
+            // Never mutate the mapped download stream: it can still be owned by the GPU. Put the
+            // clamped count in the independent request batch instead.
+            MemoryUtil.memPutInt(buffer.address, count);
+            this.nodeManager.submitRequestBatch(buffer);// the -8 is because we incremented it by 8
         }
     }
 

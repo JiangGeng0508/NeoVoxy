@@ -8,7 +8,6 @@ import me.cortex.voxy.client.TimingStatistics;
 import me.cortex.voxy.client.core.gl.GlBuffer;
 import me.cortex.voxy.client.core.gl.shader.Shader;
 import me.cortex.voxy.client.core.gl.shader.ShaderType;
-import me.cortex.voxy.client.core.rendering.GeometryCache;
 import me.cortex.voxy.client.core.rendering.SectionUpdateRouter;
 import me.cortex.voxy.client.core.rendering.building.BuiltSection;
 import me.cortex.voxy.client.core.rendering.building.RenderGenerationService;
@@ -39,12 +38,9 @@ import static org.lwjgl.opengl.GL42C.GL_UNIFORM_BARRIER_BIT;
 import static org.lwjgl.opengl.GL42C.glMemoryBarrier;
 import static org.lwjgl.opengl.GL43C.*;
 
-//TODO: create an "async upload stream", that is, the upload stream is a raw mapped buffer pointer that can be written to
 // which is then synced to the gpu on "render thread sync",
 
 
-//An "async host" for a NodeManager, has specific synchonius entry and exit points
-// this is done off thread to reduce the amount of work done on the render thread, improving frame stability and reducing runtime overhead
 public class AsyncNodeManager {
     private static final boolean VERIFY_NODE_MANAGER = VoxyCommon.isVerificationFlagOn("verifyNodeManager");
     private static final VarHandle RESULT_HANDLE;
@@ -71,8 +67,6 @@ public class AsyncNodeManager {
     private final IGeometryData geometryData;
     private final SectionUpdateRouter router;
 
-    private final GeometryCache geometryCache = new GeometryCache(1L<<32);
-
     private final AtomicInteger workCounter = new AtomicInteger();
 
     @SuppressWarnings("FieldMayBeFinal")
@@ -87,10 +81,6 @@ public class AsyncNodeManager {
     private boolean needsWaitForSync = false;
 
     public AsyncNodeManager(int maxNodeCount, IGeometryData geometryData, RenderGenerationService renderService) {
-        //Note the current implmentation of ISectionWatcher is threadsafe
-        //Note: geometry data is the data store/source, not the management, it is just a raw store of data
-        // it MUST ONLY be accessed on the render thread
-        // AsyncNodeManager will use an AsyncGeometryManager as the manager for the data store, and sync the results on the render thread
         this.geometryData = geometryData;
         this.geometryCapacity = ((BasicSectionGeometryData)geometryData).getGeometryCapacityBytes();
 
@@ -118,14 +108,7 @@ public class AsyncNodeManager {
         this.geometryManager = new BasicAsyncGeometryManager(((BasicSectionGeometryData)geometryData).getMaxSectionCount(), this.geometryCapacity);
 
         this.router = new SectionUpdateRouter();
-        this.router.setCallbacks(pos->{//On initial render gen, try get from geometry cache
-            var cachedGeometry = this.geometryCache.remove(pos);
-            if (cachedGeometry != null) {//Use the cached geometry
-                this.submitGeometryResult(cachedGeometry);
-            } else {//Else we need to request it
-                renderService.enqueueTask(pos);
-            }
-        }, renderService::enqueueTask, this::submitChildChange);
+        this.router.setCallbacks(renderService::enqueueTask, renderService::enqueueTask, this::submitChildChange);
         renderService.setResultConsumer(this::submitGeometryResult);
 
         this.manager = new NodeManager(maxNodeCount, this.geometryManager, this.router);
@@ -193,12 +176,10 @@ public class AsyncNodeManager {
 
     private void run() {
         if (this.workCounter.get() <= 0) {
-            //TODO: here, instead of parking, we can do more work on other sub-tasks such as filtering the mesh build queue
             LockSupport.park();
             if (this.workCounter.get() <= 0 || !this.running) {//No work
                 return;
             }
-            //This is a funny thing, wait a bit, this allows for better batching, but this thread is independent of everything else so waiting a bit should be mostly ok
             try {
                 Thread.sleep(10);
             } catch (InterruptedException e) {
@@ -306,7 +287,6 @@ public class AsyncNodeManager {
                 pos |= Integer.toUnsignedLong(MemoryUtil.memGetInt(ptr)); ptr += 4;
 
                 if (pos == -1) {
-                    //TODO: investigate how or what this happens
                     continue;
                 }
 
@@ -329,7 +309,6 @@ public class AsyncNodeManager {
             //Due to synchronization "issues", wait a millis (give up this time slice)
             if (this.workCounter.get() < 0) {
                 Logger.error("Work counter less than zero, hope it fixes itself...");
-                //return;
             }
         }
 
@@ -341,44 +320,24 @@ public class AsyncNodeManager {
         //process output events and atomically sync to results
 
         //Events into manager
-        //manager.insertTopLevelNode();
-        //manager.removeTopLevelNode();
 
-        //manager.removeNodeGeometry();
 
-        //manager.processRequest();
-        //manager.processChildChange();
-        //manager.processGeometryResult();
 
 
         //Outputs from manager
-        //manager.setClear();
-        //manager.setTLNCallbacks();
 
         //manager.writeChanges()
 
 
-        //Run in a loop, process all the input events, collect the output events merge with previous and publish
-        // note: inner event processing is a loop, is.. should be synced to attomic/volatile variable that is being watched
-        // when frametime comes around, want to exit out as quick as possible, or make the event publishing
-        // "effectivly immediately", that is, atomicly swap out the render side event updates
 
         //like
-        // var current = <new events>
-        // var old = getAndSet(this.events, null);
-        // if (old != null) {current = merge(old, current);}
-        // getAndSet(this.events, current);
-        // if (old == null) {cleanAllEventsUpToThisPoint();}//(i.e. clear any buffers or maps containing data revolving around uncommited render thread data events)
 
         // this creates a lock free event update loop, allowing the render thread to never stall on waiting
 
-        //TODO: NOTE: THIS MUST BE A SINGLE OBJECT THAT IS EXCHANGED
         // for it to be effectivly synchonized all outgoing events/effects _MUST_ happen at the same time
         // for this to be lock free an entire object containing ALL the events that must be synced must be exchanged
 
 
-        //TODO: also note! this can be done for the processing of rendered out block models!!
-        // (it might be able to also be put in this thread, maybe? but is proabably worth putting in own thread for latency reasons)
         if (this.needsWaitForSync) {
             while (RESULT_HANDLE.get(this) != null && this.running) {
                 try {
@@ -466,7 +425,6 @@ public class AsyncNodeManager {
                     int val = iter.nextInt();
                     int scatterAddr = (val<<1)|(1<<31);//Since we write to the second buffer
 
-                    //Geometry buffer is index of 1, so mutate to put it in that location, it is also 32 bytes, so needs to be split into 2 separate scatter writes
                     long ptrA = results.getScatterWritePtr(scatterAddr+0, 1);
                     long ptrB = results.getScatterWritePtr(scatterAddr+1, 0);
 
@@ -511,13 +469,13 @@ public class AsyncNodeManager {
 
     private IntConsumer tlnAddCallback; private IntConsumer tlnRemoveCallback;
     //Render thread synchronization
-    public void tick(GlBuffer nodeBuffer, NodeCleaner cleaner) {//TODO: dont pass nodeBuffer here??, do something else thats better
+    public boolean tick(GlBuffer nodeBuffer, NodeCleaner cleaner) {
         if (this.uncaughtException != null) {
             throw new RuntimeException(this.uncaughtException);//Propagate internal exception
         }
         var results = (SyncResults)RESULT_HANDLE.getAndSet(this, null);//Acquire the results
         if (results == null) {//There are no new results to process, return
-            return;
+            return false;
         }
 
         //top level node add/remove
@@ -606,6 +564,7 @@ public class AsyncNodeManager {
                 throw new IllegalStateException("Could not insert result into cache");
             }
         }
+        return true;
     }
 
 
@@ -632,7 +591,6 @@ public class AsyncNodeManager {
     //==================================================================================================================
     //Incoming events
 
-    //TODO: add atomic counters for each event type probably
     private final ConcurrentLinkedDeque<MemoryBuffer> requestBatchQueue = new ConcurrentLinkedDeque<>();
     private final ConcurrentLinkedDeque<WorldSection> childUpdateQueue = new ConcurrentLinkedDeque<>();
     private final ConcurrentLinkedDeque<BuiltSection> geometryUpdateQueue = new ConcurrentLinkedDeque<>();
@@ -782,12 +740,10 @@ public class AsyncNodeManager {
 
         this.scatterWrite.free();
         this.multiMemcpy.free();
-        this.geometryCache.free();
     }
 
     public void addDebug(List<String> debug) {
         debug.add("UC/GC,#N: " + (this.getUsedGeometryCapacity()/(1<<20))+"/"+(this.getGeometryCapacity()/(1<<20)) + "," + (this.geometryData.getSectionCount()));
-        //debug.add("GUQ/NRC: " + this.geometryUpdateQueue.size()+"/"+this.removeBatchQueue.size());
     }
 
     public boolean hasWork() {
@@ -795,9 +751,6 @@ public class AsyncNodeManager {
     }
 
     public void worldEvent(WorldSection section, int flags, int neighborMask) {
-        //If there is any change, we need to clear the geometry cache before emitting update
-        this.geometryCache.clear(section.key);
-
         this.router.forwardEvent(section, flags);
 
         if (neighborMask != 0) {//trigger rebuilds for neighbors
@@ -925,7 +878,6 @@ public class AsyncNodeManager {
                 return;
             }
 
-            //Else: we need to move the ending upload header from the end to where the freed point was
             int endingPoint = MemoryUtil.memGetInt(this.scratchHeaderBuffer.address + this.dataUploadPoints.size()*16L + 4);
             if (this.dataUploadPoints.get(endingPoint) != this.dataUploadPoints.size()) {
                 throw new IllegalStateException("ending header not pointing at end point");

@@ -16,16 +16,20 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.function.LongConsumer;
 
 public class RocksDBStorageBackend extends StorageBackend {
-    private static final long DEFAULT_BLOCK_CACHE_SIZE = 128L * 1024L * 1024L;
-    private static final long BLOCK_CACHE_SIZE = Long.getLong("voxy.rocksdb.blockCacheMb", DEFAULT_BLOCK_CACHE_SIZE >> 20) << 20;
+    private static final String WORLD_SECTIONS_CF = "world_sections";
+    private static final String ID_MAPPINGS_CF = "id_mappings";
 
     private final RocksDB db;
     private final ColumnFamilyHandle worldSections;
     private final ColumnFamilyHandle idMappings;
+    //Aux families by cf name, opened from what the store already held and extended on first write
+    private final Map<String, ColumnFamilyHandle> auxHandles = new HashMap<>();
     private final ReadOptions sectionReadOps;
     private final WriteOptions sectionWriteOps;
 
@@ -33,31 +37,8 @@ public class RocksDBStorageBackend extends StorageBackend {
     private final List<AbstractImmutableNativeReference> closeList = new ArrayList<>();
 
     public RocksDBStorageBackend(String path) {
-        /*
-        var lockPath = new File(path).toPath().resolve("LOCK");
-        if (Files.exists(lockPath)) {
-            System.err.println("WARNING, deleting rocksdb LOCK file");
-            int attempts = 10;
-            while (attempts-- != 0) {
-                try {
-                    Files.delete(lockPath);
-                    break;
-                } catch (IOException e) {
-                    try {
-                        Thread.sleep(1000);
-                    } catch (InterruptedException ex) {
-                        throw new RuntimeException(ex);
-                    }
-                }
-            }
-            if (Files.exists(lockPath)) {
-                throw new RuntimeException("Unable to delete rocksdb lock file");
-            }
-        }
-         */
         RocksDB.loadLibrary();
 
-        //TODO: FIXME: DONT USE THE SAME options PER COLUMN FAMILY
         final ColumnFamilyOptions cfOpts = new ColumnFamilyOptions()
                 .setCompressionType(CompressionType.ZSTD_COMPRESSION)
                 .optimizeForSmallDb();
@@ -68,7 +49,7 @@ public class RocksDBStorageBackend extends StorageBackend {
                 .setLevelCompactionDynamicLevelBytes(true)
                 .optimizeForPointLookup(128);
 
-        var bCache = new HyperClockCache(BLOCK_CACHE_SIZE, 0, 4, false);
+        var bCache = new HyperClockCache(128*1024L*1024L,0, 4, false);
         var filter = new BloomFilter(10);
         cfWorldSecOpts.setTableFormatConfig(new BlockBasedTableConfig()
                 .setCacheIndexAndFilterBlocksWithHighPriority(true)
@@ -79,11 +60,13 @@ public class RocksDBStorageBackend extends StorageBackend {
                 .setFilterPolicy(filter)
         );
 
-        final List<ColumnFamilyDescriptor> cfDescriptors = Arrays.asList(
-            new ColumnFamilyDescriptor(RocksDB.DEFAULT_COLUMN_FAMILY, cfOpts),
-            new ColumnFamilyDescriptor("world_sections".getBytes(), cfWorldSecOpts),
-            new ColumnFamilyDescriptor("id_mappings".getBytes(), cfOpts)
-        );
+        final List<ColumnFamilyDescriptor> cfDescriptors = new ArrayList<>();
+        cfDescriptors.add(new ColumnFamilyDescriptor(RocksDB.DEFAULT_COLUMN_FAMILY, cfOpts));
+        cfDescriptors.add(new ColumnFamilyDescriptor(WORLD_SECTIONS_CF.getBytes(), cfWorldSecOpts));
+        cfDescriptors.add(new ColumnFamilyDescriptor(ID_MAPPINGS_CF.getBytes(), cfOpts));
+        for (String extra : listExtraColumnFamilies(path)) {
+            cfDescriptors.add(new ColumnFamilyDescriptor(extra.getBytes(), cfOpts));
+        }
 
         final DBOptions options = new DBOptions()
                 //.setUnorderedWrite(true)
@@ -103,6 +86,7 @@ public class RocksDBStorageBackend extends StorageBackend {
 
             this.sectionReadOps = new ReadOptions();
             this.sectionWriteOps = new WriteOptions();
+            this.sectionWriteOps.setDisableWAL(true);
 
             this.closeList.add(options);
             this.closeList.add(cfOpts);
@@ -113,8 +97,17 @@ public class RocksDBStorageBackend extends StorageBackend {
             this.closeList.add(bCache);
             this.closeList.addAll(handles);
 
+            //Handles come back positionally against cfDescriptors, and the two we use are added there
+            //before any discovered family, so these indices hold whatever else the store contains.
             this.worldSections = handles.get(1);
             this.idMappings = handles.get(2);
+
+            //Discovered families past the known three, in the order they were appended above. Aux tables
+            //the store already carries have to land here or a reopen would create a second family under
+            //a name that already exists.
+            for (int i = 3; i < cfDescriptors.size(); i++) {
+                this.auxHandles.put(new String(cfDescriptors.get(i).getName()), handles.get(i));
+            }
 
             this.db.flushWal(true);
         } catch (RocksDBException e) {
@@ -122,13 +115,132 @@ public class RocksDBStorageBackend extends StorageBackend {
         }
     }
 
+    //Aux tables are column families named "aux_<table>". They are created on open when the store already
+    //has them and on demand when it does not, so a world gains one the first time something writes to it
+    //rather than on every open.
+    private static String auxCfName(String table) {
+        return "aux_" + table;
+    }
+
+    private ColumnFamilyHandle auxHandle(String table, boolean createIfAbsent) {
+        String name = auxCfName(table);
+        synchronized (this.auxHandles) {
+            ColumnFamilyHandle existing = this.auxHandles.get(name);
+            if (existing != null || !createIfAbsent) {
+                return existing;
+            }
+            try {
+                var handle = this.db.createColumnFamily(
+                        new ColumnFamilyDescriptor(name.getBytes(), new ColumnFamilyOptions()
+                                .setCompressionType(CompressionType.ZSTD_COMPRESSION)
+                                .optimizeForSmallDb()));
+                this.auxHandles.put(name, handle);
+                this.closeList.add(handle);
+                return handle;
+            } catch (RocksDBException e) {
+                throw new RuntimeException("Creating aux column family " + name, e);
+            }
+        }
+    }
+
+    @Override
+    public boolean supportsAuxTable(String table) {
+        return true;
+    }
+
+    @Override
+    public void putAux(String table, long key, byte[] value) {
+        long t = me.cortex.voxy.commonImpl.VoxyProfile.begin();
+        try {
+            //Aux entries are derived data and regenerate on re-ingest like sections do, but they are far
+            //rarer than section writes, so they take the WAL rather than a shutdown-time flush.
+            this.db.put(this.auxHandle(table, true), longKey(key), value);
+        } catch (RocksDBException e) {
+            throw new RuntimeException("Writing aux entry", e);
+        } finally {
+            me.cortex.voxy.commonImpl.VoxyProfile.end("storage/putAux", t);
+        }
+    }
+
+    @Override
+    public byte[] getAux(String table, long key) {
+        var handle = this.auxHandle(table, false);
+        if (handle == null) {
+            return null;
+        }
+        try {
+            return this.db.get(handle, longKey(key));
+        } catch (RocksDBException e) {
+            throw new RuntimeException("Reading aux entry", e);
+        }
+    }
+
+    @Override
+    public void deleteAux(String table, long key) {
+        var handle = this.auxHandle(table, false);
+        if (handle == null) {
+            return;
+        }
+        try {
+            this.db.delete(handle, longKey(key));
+        } catch (RocksDBException e) {
+            throw new RuntimeException("Deleting aux entry", e);
+        }
+    }
+
+    @Override
+    public void forEachAux(String table, AuxEntryConsumer consumer) {
+        var handle = this.auxHandle(table, false);
+        if (handle == null) {
+            return;
+        }
+        try (var iter = this.db.newIterator(handle)) {
+            for (iter.seekToFirst(); iter.isValid(); iter.next()) {
+                byte[] key = iter.key();
+                if (key.length != 8) {
+                    continue;
+                }
+                consumer.accept(ByteBuffer.wrap(key).getLong(0), iter.value());
+            }
+        }
+    }
+
+    private static byte[] longKey(long key) {
+        return ByteBuffer.allocate(8).putLong(0, key).array();
+    }
+
+    //Families the store holds beyond the ones this build uses. A store that does not exist yet, or that
+    //cannot be read here, yields nothing: open() is then creating it, and createMissingColumnFamilies
+    //puts the known set in place.
+    private static List<String> listExtraColumnFamilies(String path) {
+        if (!new File(path).exists()) {
+            return List.of();
+        }
+        try (var probeOpts = new Options()) {
+            List<String> extras = new ArrayList<>();
+            for (byte[] name : RocksDB.listColumnFamilies(probeOpts, path)) {
+                String cf = new String(name);
+                if (cf.equals(new String(RocksDB.DEFAULT_COLUMN_FAMILY))
+                        || cf.equals(WORLD_SECTIONS_CF) || cf.equals(ID_MAPPINGS_CF)) {
+                    continue;
+                }
+                extras.add(cf);
+            }
+            return extras;
+        } catch (RocksDBException e) {
+            //Not a readable store - let open() produce the real error instead of masking it here
+            return List.of();
+        }
+    }
+
     @Override
     public void iteratePositions(int level, LongConsumer consumer) {
-        try (var stack = MemoryStack.stackPush()) {
-            try (var iter = this.db.newIterator(this.worldSections, this.sectionReadOps)) {
+        // This is a one-shot full walk; do not evict useful data by admitting every scanned block.
+        try (var stack = MemoryStack.stackPush();
+             var scanOps = new ReadOptions().setFillCache(false)) {
+            try (var iter = this.db.newIterator(this.worldSections, scanOps)) {
                 ByteBuffer keyBuff = stack.calloc(8);
                 long keyBuffPtr = MemoryUtil.memAddress(keyBuff);
-                //TODO: this can be optimized if needed by useing a prefix-seek https://github.com/facebook/rocksdb/wiki/Prefix-Seek
 
                 if (level != -1) {//-1 means iterate all
                     var seekBuff = stack.calloc(8);
@@ -186,6 +298,59 @@ public class RocksDBStorageBackend extends StorageBackend {
         }
     }
 
+    //One db.write for a group of sections instead of one JNI put + write-group + memtable lock each.
+    //Most valuable on the shutdown flush and on imports, where sections arrive in the thousands.
+    private final class RocksSectionWriteBatch implements SectionWriteBatch {
+        private final WriteBatch batch = new WriteBatch();
+        private int count;
+        private long bytes;
+
+        @Override
+        public void put(long key, MemoryBuffer data) {
+            try (var stack = MemoryStack.stackPush()) {
+                var keyBuff = stack.calloc(8);
+                MemoryUtil.memPutLong(MemoryUtil.memAddress(keyBuff), Long.reverseBytes(swizzlePos(key)));
+                //WriteBatch copies the value here, so the caller's scratch buffer is free after this
+                this.batch.put(RocksDBStorageBackend.this.worldSections, keyBuff, data.asByteBuffer());
+            } catch (RocksDBException e) {
+                throw new RuntimeException(e);
+            }
+            this.count++;
+            this.bytes += data.size;
+        }
+
+        @Override public long dataSize() { return this.bytes; }
+
+        @Override
+        public void commit() {
+            if (this.count == 0) {
+                return;
+            }
+            try {
+                //MUST be sectionWriteOps: it carries setDisableWAL(true). A fresh WriteOptions here
+                //would silently push every section write back through the WAL.
+                RocksDBStorageBackend.this.db.write(RocksDBStorageBackend.this.sectionWriteOps, this.batch);
+            } catch (RocksDBException e) {
+                throw new RuntimeException(e);
+            } finally {
+                //Drop the contents even on failure so a retry cannot double-write
+                this.batch.clear();
+                this.count = 0;
+                this.bytes = 0;
+            }
+        }
+
+        @Override
+        public void close() {
+            this.batch.close();
+        }
+    }
+
+    @Override
+    public SectionWriteBatch createSectionWriteBatch() {
+        return new RocksSectionWriteBatch();
+    }
+
     @Override
     public void deleteSectionData(long key) {
         try {
@@ -223,6 +388,9 @@ public class RocksDBStorageBackend extends StorageBackend {
     public void flush() {
         try {
             this.db.flushWal(true);
+            try (var flushOpts = new FlushOptions().setWaitForFlush(true)) {
+                this.db.flush(flushOpts, this.worldSections);
+            }
         } catch (RocksDBException e) {
             throw new RuntimeException(e);
         }
@@ -231,7 +399,6 @@ public class RocksDBStorageBackend extends StorageBackend {
     @Override
     public void close() {
         this.flush();
-        //this.db.cancelAllBackgroundWork(true);//Rocksdb does this automatically (afak)
         this.closeList.forEach(AbstractImmutableNativeReference::close);
         try {
             this.db.closeE();
@@ -280,7 +447,9 @@ public class RocksDBStorageBackend extends StorageBackend {
         if (true) {
             return key;
         }
-        if (WorldEngine.POS_FORMAT_VERSION != 1) throw new IllegalStateException("TODO: UPDATE THIS");
+        if (WorldEngine.POS_FORMAT_VERSION != 1) {
+            throw new IllegalStateException("Unsupported world position format");
+        }
         return  (key&(0xFL<<60)) |
                 Long.expand((key>>> 4)&((1L<<24)-1), 0b01010101010101010101010101010101_001001001001001001001001L) |
                 Long.expand((key>>>52)&0xFF,         0b00000000000000000000000000000000_100100100100100100100100L) |

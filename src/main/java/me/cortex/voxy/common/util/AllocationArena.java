@@ -2,11 +2,8 @@ package me.cortex.voxy.common.util;
 
 import it.unimi.dsi.fastutil.longs.LongRBTreeSet;
 
-//FIXME: NOTE: if there is a free block of size > 2^30 EVERYTHING BREAKS, need to either increase size
-// or automatically split and manage multiple blocks which is very painful
 //OR instead of addr, defer to a long[] and use indicies
 
-//TODO: replace the LongAVLTreeSet with a custom implementation that doesnt cause allocations when searching
 // and see if something like a RBTree is any better
 public class AllocationArena {
     public static final long SIZE_LIMIT = -1;
@@ -54,14 +51,9 @@ public class AllocationArena {
         return (int) (slot>>ADDR_BITS);
     }
 
-    /*
-    public long allocFromLargest(int size) {//Allocates from the largest avalible block, this is useful for expanding later on
 
-    }*/
-
-    public long alloc(int size) {//TODO: add alignment support
+    public long alloc(int size) {
         if (size == 0) throw new IllegalArgumentException();
-        //This is stupid, iterator is not inclusive
         var iter = this.FREE.iterator(((long) size << ADDR_BITS)-1);
         if (!iter.hasNext()) {//No free space for allocation
             //Create new allocation
@@ -82,13 +74,12 @@ public class AllocationArena {
                 this.TAKEN.add(((slot&ADDR_MSK)<<SIZE_BITS)|size);
                 this.FREE.add((((slot >>> ADDR_BITS)-size)<<ADDR_BITS)|((slot&ADDR_MSK)+size));
             }
-            //this.resized = false;
             return slot&ADDR_MSK;
         }
     }
 
     public int free(long addr) {//Returns size of freed memory
-        addr &= ADDR_MSK;//encase addr stores shit in its upper bits
+        addr &= ADDR_MSK;
         var iter = this.TAKEN.iterator(addr<<SIZE_BITS);//Dont need to include -1 as size != 0
         long slot = iter.nextLong();
         if (slot>>SIZE_BITS != addr) {
@@ -111,8 +102,7 @@ public class AllocationArena {
             iter.nextLong();//Need to reset the iter into its state
         }//If there is no previous it means were at the start of the buffer, we might need to merge with block 0 if we are not block 0
         else if (!this.FREE.isEmpty()) {// if free is not empty it means we must merge with block of free starting at 0
-            //if (addr != 0)//FIXME: this is very dodgy solution, if addr == 0 it means its impossible for there to be a previous element
-            if (this.FREE.remove(addr<<ADDR_BITS)) {//Attempt to remove block 0, this is very dodgy as it assumes block zero is 0 addr n size
+            if (this.FREE.remove(addr<<ADDR_BITS)) {
                 slot = addr + size;//slot at address 0 and size of 0 block + new block
             }
         }
@@ -134,8 +124,6 @@ public class AllocationArena {
             return (int) size;
         }
 
-        //this.resized = false;
-        //Need to swap around the slot to be in FREE format
         slot = (slot>>>SIZE_BITS) | (slot<<ADDR_BITS);
         this.FREE.add(slot);//Add the free slot into segments
         return (int) size;
@@ -145,7 +133,7 @@ public class AllocationArena {
 
     //Attempts to expand an allocation, returns true on success
     public boolean expand(long addr, int extra) {
-        addr &= ADDR_MSK;//encase addr stores shit in its upper bits
+        addr &= ADDR_MSK;
         var iter = this.TAKEN.iterator(addr<<SIZE_BITS);
         if (!iter.hasNext()) {
             return false;
@@ -155,7 +143,6 @@ public class AllocationArena {
             throw new IllegalStateException();
         }
         long updatedSlot = (slot & (ADDR_MSK << SIZE_BITS)) | ((slot & SIZE_MSK) + extra);
-        //this.resized = false;
         if (iter.hasNext()) {
             long next = iter.nextLong();
             long endAddr = (slot>>>SIZE_BITS)+(slot&SIZE_MSK);
@@ -169,7 +156,6 @@ public class AllocationArena {
                 if (extra != delta) {//More space than needed, need to add a new FREE block
                     this.FREE.add(((delta-extra)<<ADDR_BITS)|(endAddr+extra));
                 }
-                //else There is exactly enough free space, so removing the free block and updating the allocation is enough
                 return true;
             } else {
                 return false;//Not enough room to expand
@@ -180,7 +166,6 @@ public class AllocationArena {
             iter.remove();
             this.TAKEN.add(updatedSlot);
             this.totalSize += extra;
-            //this.resized = true;
             return true;
         }
     }

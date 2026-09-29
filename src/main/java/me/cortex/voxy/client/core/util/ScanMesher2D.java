@@ -16,8 +16,6 @@ public abstract class ScanMesher2D {
     private int currentSum = 0;
     private long currentData = 0;
 
-    //Two different ways to do it, scanline then only merge on change, or try to merge with previous row at every step
-    // or even can also attempt to merge previous but if the lengths are different split the current one and merge to previous
     public final void putNext(long data) {
         this.putNext0(data);
     }
@@ -99,16 +97,6 @@ public abstract class ScanMesher2D {
     }
 
     public final void skip(int count) {
-        /*
-        if (count == 0) return;
-        if (this.currentData != 0) {
-            this.putNext0(0); count--;
-        }
-        if (count != 0) {
-            this.emitRanged(((1 << Math.min(count, 31)) - 1) << (this.currentIndex & 31));
-        }
-        this.currentIndex += count;
-         */
         if (count == 0) return;
         if (this.currentData!=0) {
             this.putNext0(0);
@@ -136,18 +124,6 @@ public abstract class ScanMesher2D {
     }
 
     public final void finish() {
-        /*
-        if ((this.currentIndex&31)!=0) {
-            this.skip(32-(this.currentIndex&31));
-        } else {
-            this.putNext0(0);
-            this.currentIndex--;//HACK to reset currentIndex&31 to 0
-        }
-        this.currentIndex++;
-        for (int i = 0; i < 32; i++) {
-            this.putNext0(0);
-        }*/
-        //TODO: check this is correct
         if (this.currentIndex != 0) {
             this.skip(32 - (this.currentIndex & 31));
             this.emitRanged(-1);

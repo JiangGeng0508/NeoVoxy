@@ -12,17 +12,26 @@ layout(location = 5) uniform vec4 fogColor;
 layout(location = 6) uniform int fogShape;
 layout(location = 7) uniform float fogIntensity;
 layout(location = 8) uniform float fogDensity;
+layout(location = 9) uniform int linearFog;
 #endif
 #endif
 
 #import <voxy:util/depthutils.glsl>
-#import <sodium:include/fog.glsl>
+#import <voxy:util/fog.glsl>
+
+#ifdef WINDOW_HALF_NDC
+#define SRC_WINDOW2NDC_DEPTH(d) ((d)*2.0f-1.0f)
+#define DST_NDC2WINDOW_DEPTH(z) ((z)*0.5f+0.5f)
+#else
+#define SRC_WINDOW2NDC_DEPTH(d) (d)
+#define DST_NDC2WINDOW_DEPTH(z) (z)
+#endif
 
 out vec4 colour;
 in vec2 UV;
 
 vec3 rev3d(vec3 clip) {
-    vec4 view = invProjMat * vec4(SCREEN2NDC(clip),1.0f);
+    vec4 view = invProjMat * vec4(clip.xy*2.0f-1.0f, SRC_WINDOW2NDC_DEPTH(clip.z), 1.0f);
     return view.xyz/view.w;
 }
 
@@ -38,12 +47,12 @@ void main() {
     }
 
     vec3 point = rev3d(vec3(UV.xy, depth));
-    depth = projDepth(point);
-    //TODO: HERE make an option/define to emit the output depth as something other then the input (i.e. if voxy is reverse z and vanilla isnt, transform and emit as not reverrse z)
+    depth = DST_NDC2WINDOW_DEPTH(projDepth(point));
+    //Clamp in window space: stay one step inside FAR so the exact-1.0 "untouched" semantics of
+    //the destination never collide with legitimately-far geometry
     depth = REDUCTION2(FAR+CLOSER_SIGN*(2.0f/((1<<24)-1)), depth);
-    depth = NDC2SCREEN_DEPTH(depth);
 
-    depth = gl_DepthRange.diff * depth + gl_DepthRange.near;//TODO: dont think this is right at all so should fix this
+    depth = gl_DepthRange.diff * depth + gl_DepthRange.near;
 
     gl_FragDepth = depth;
 
@@ -55,7 +64,10 @@ void main() {
     #ifdef USE_ENV_FOG
     if (fogIntensity > 0.0){
         float dist = getFragDistance(fogShape, point.xyz);
-        float fogLerp = smoothstep(fogParams.x, fogParams.y, dist);
+        float linearAmount = clamp((dist - fogParams.x) / max(fogParams.y - fogParams.x, 0.0001), 0.0, 1.0);
+        //smoothstep(a,b,d) is by definition smoothstep(0,1,clamp((d-a)/(b-a))), so the ambient branch is
+        //unchanged bit for bit.
+        float fogLerp = linearFog != 0 ? linearAmount : smoothstep(0.0, 1.0, linearAmount);
         if (fogDensity > 0.0) fogLerp = (exp(fogDensity * fogLerp) - 1.0) / (exp(fogDensity) - 1.0);
         colour.rgb = mix(colour.rgb, fogColor.rgb, clamp(fogLerp * fogIntensity, 0.0, 1.0));
     }

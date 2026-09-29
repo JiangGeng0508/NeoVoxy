@@ -1,15 +1,11 @@
 #import <voxy:lod/pos_util.glsl>
 layout(binding = NODE_DATA_BINDING, std430) restrict buffer NodeData {
-//Needs to be read and writeable for marking data,
-//(could do an evil violation, make this readonly, then have a writeonly varient, which means that writing might not be visible but will show up by the next frame)
-//Nodes are 16 bytes big (or 32 cant decide, 16 might _just_ be enough)
     uvec4[] nodes;
 };
 
 //First 2 are joined to be the position
 
 //All node access and setup into global variables
-//TODO: maybe make it global vars
 struct UnpackedNode {
     uint nodeId;
 
@@ -58,12 +54,12 @@ bool childListIsEmpty(in UnpackedNode node) {
     return node.childPtr == EMPTY_QUEUE_ID;
 }
 
-//bool isEmpty(in UnpackedNode node) {
-//    return (node.flags&2u) != 0;
-//}
-
 bool hasRequested(in UnpackedNode node) {
     return (node.flags&1u) != 0u;
+}
+
+uint getRequestFrame(in UnpackedNode node) {
+    return (node.flags >> 8u) & 0xFFu;
 }
 
 uint getMesh(in UnpackedNode node) {
@@ -86,16 +82,18 @@ uvec2 getRawPos(in UnpackedNode node) {
     return node.rawPos;
 }
 
-/*
-uint getTransformIndex(in UnpackedNode node) {
-    return (node.flags >> 5)&31u;
-}*/
 
 //-----------------------------------
 
-void markRequested(inout UnpackedNode node) {
-    node.flags |= 1u;
-    nodes[node.nodeId].z |= 1u<<24;
+void markRequested(inout UnpackedNode node, uint requestFrame) {
+    uint compactFrame = requestFrame & 0xFFu;
+    node.flags = (node.flags & 0xFFu) | (compactFrame << 8u) | 1u;
+    atomicOr(nodes[node.nodeId].z, 1u << 24u);
+    // The high byte of W is currently unused by CPU node metadata. Keeping a
+    // tiny submission timestamp here lets a lost GPU->CPU request self-heal
+    // without scanning the hierarchy or allocating another per-node buffer.
+    atomicAnd(nodes[node.nodeId].w, 0x00FFFFFFu);
+    atomicOr(nodes[node.nodeId].w, compactFrame << 24u);
 }
 
 void debugDumpNode(in UnpackedNode node) {

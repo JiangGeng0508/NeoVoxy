@@ -22,9 +22,6 @@ void main() {
         uint subgroupId = gl_SubgroupID;
         #endif
 
-        //todo
-        //assert(gl_SubgroupSize == 32);
-        //assert(gl_NumSubgroups == (WORK_SIZE>>5));
 
         uint gid = gl_GlobalInvocationID.x;
         uvec4 count = uvec4(0);
@@ -67,9 +64,6 @@ void main() {
         uint subgroupId = gl_SubgroupID;
         #endif
 
-        //todo
-        //assert(gl_SubgroupSize == 32);
-        //assert(gl_NumSubgroups == (WORK_SIZE>>5));
 
         uint gid = gl_GlobalInvocationID.x;
         uvec4 count = uvec4(0);

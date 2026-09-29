@@ -4,7 +4,6 @@
 #define Eu32(data, amountBits, shift) (uint((data)>>(shift))&((1u<<(amountBits))-1))
 
 vec3 extractPos(uint64_t quad) {
-    //TODO: pull out the majic constants into #defines (specifically the shift amount)
     return vec3(Eu32(quad, 5, 21), Eu32(quad, 5, 16), Eu32(quad, 5, 11));
 }
 
@@ -28,16 +27,34 @@ uint extractLightId(uint64_t quad) {
     return Eu32(quad, 8, 55);
 }
 
+uint quadUsesBlendPalette(uint64_t quad) {
+    return Eu32(quad, 1, 63);
+}
+
+uint extractBlendIdx(uint64_t quad) {
+    return Eu32(quad, 9, 46) | (Eu32(quad, 4, 42) << 9);
+}
+
+uint extractFluidLowerHeight(uint64_t quad) {
+    return quadUsesBlendPalette(quad) == 0u ? Eu32(quad, 4, 42) : 0u;
+}
+
+uint extractFluidShapePayload(uint64_t quad) {
+    return Eu32(quad, 8, 3) | (Eu32(quad, 4, 42) << 8);
+}
+
+bool quadHasFluidShape(uint64_t quad) {
+    return quadUsesBlendPalette(quad) == 0u && Eu32(quad, 4, 42) != 0u;
+}
+
 bool isQuadEmpty(uint64_t quad) {
     return quad == uint64_t(0);
 }
 
 #else
-//TODO: FIXME, ivec2 swaps around the data of the x and y cause its written in little endian
 
 #define Quad ivec2
 
-//#define Eu32(data, amountBits, shift) (uint((data)>>(shift))&((1u<<(amountBits))-1))
 
 uint Eu32v(ivec2 data, int amount, int shift) {
     if (shift > 31) {
@@ -61,7 +78,6 @@ uint extractFace(ivec2 quad) {
 }
 
 uint extractStateId(ivec2 quad) {
-    //Eu32(quad, 20, 26);
     return Eu32v(quad, 6, 26)|(Eu32v(quad, 14, 32)<<6);
 }
 
@@ -71,6 +87,26 @@ uint extractBiomeId(ivec2 quad) {
 
 uint extractLightId(ivec2 quad) {
     return Eu32v(quad, 8, 55);
+}
+
+uint quadUsesBlendPalette(ivec2 quad) {
+    return Eu32v(quad, 1, 63);
+}
+
+uint extractBlendIdx(ivec2 quad) {
+    return Eu32v(quad, 9, 46) | (Eu32v(quad, 4, 42) << 9);
+}
+
+uint extractFluidLowerHeight(ivec2 quad) {
+    return quadUsesBlendPalette(quad) == 0u ? Eu32v(quad, 4, 42) : 0u;
+}
+
+uint extractFluidShapePayload(ivec2 quad) {
+    return Eu32v(quad, 8, 3) | (Eu32v(quad, 4, 42) << 8);
+}
+
+bool quadHasFluidShape(ivec2 quad) {
+    return quadUsesBlendPalette(quad) == 0u && Eu32v(quad, 4, 42) != 0u;
 }
 
 bool isQuadEmpty(ivec2 quad) {

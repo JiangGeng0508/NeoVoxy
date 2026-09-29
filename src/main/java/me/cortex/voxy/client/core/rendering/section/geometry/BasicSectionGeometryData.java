@@ -47,9 +47,8 @@ public class BasicSectionGeometryData implements IGeometryData {
         Logger.info("if your game crashes/exits here without any other log message, try manually decreasing the geometry capacity");
         glGetError();//Clear any errors
         GlBuffer buffer = null;
-        if (!(Capabilities.INSTANCE.isNvidia&&ThreadUtils.isWindows&&Capabilities.INSTANCE.sparseBuffer)) {//This hack makes it so it doesnt crash on renderdoc
+        if (!(Capabilities.INSTANCE.isNvidia&&ThreadUtils.isWindows&&Capabilities.INSTANCE.sparseBuffer)) {
             buffer = new GlBuffer(geometryCapacity, false);//Only do this if we are not on nvidia
-            //TODO: FIXME: TEST, see if the issue is that we are trying to zero the entire buffer, try only zeroing increments
             // or dont zero it at all
         } else {
             Logger.info("Running on nvidia, using workaround sparse buffer allocation");
@@ -62,7 +61,6 @@ public class BasicSectionGeometryData implements IGeometryData {
                     buffer.free();
                 }
                 buffer = new GlBuffer(geometryCapacity, GL_SPARSE_STORAGE_BIT_ARB);
-                //buffer.zero();
                 error = glGetError();
                 if (error != GL_NO_ERROR) {
                     buffer.free();
@@ -87,7 +85,6 @@ public class BasicSectionGeometryData implements IGeometryData {
                 size += 65536L*1024;//increase size by 64mb to prevent driver allocation thrashing
                 glBufferPageCommitmentARB(GL_ARRAY_BUFFER, this.sparseCommitment, size-this.sparseCommitment, true);
                 glBindBuffer(GL_ARRAY_BUFFER, 0);
-                //Logger.info("Resizing sparse: " + this.sparseCommitment + ", " + (size-this.sparseCommitment));
                 this.sparseCommitment = size;
             }
         }

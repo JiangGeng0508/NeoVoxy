@@ -6,7 +6,6 @@ struct BlockModel {
     uint _pad[7];
 };
 
-//TODO: FIXME: this isnt actually correct cause depending on the face (i think) it could be 1/64 th of a position off
 // but im going to assume that since we are dealing with huge render distances, this shouldent matter that much
 float extractFaceIndentation(uint faceData) {
     uint enc = (faceData>>16)&63u;
@@ -22,7 +21,6 @@ uint faceHasAlphaCuttout(uint faceData) {
     return (faceData>>22)&1u;
 }
 
-//TODO: try and get rid of
 uint faceHasAlphaCuttoutOverride(uint faceData) {
     return (faceData>>23)&1u;
 }
@@ -41,4 +39,36 @@ bool modelIsTranslucent(BlockModel model) {
 
 bool modelIsShaded(BlockModel model) {
     return ((model.flagsA)&8u) != 0;
+}
+
+bool modelUsesFluidDatum(BlockModel model) {
+    return ((model.flagsA)&16u) != 0;
+}
+
+bool modelUsesBalancedLeafCutout(BlockModel model) {
+    return ((model.flagsA)&32u) != 0;
+}
+
+bool modelIsLava(BlockModel model) {
+    return ((model.flagsA)&64u) != 0;
+}
+
+bool modelIsLeaf(BlockModel model) {
+    return ((model.flagsA)&128u) != 0;
+}
+
+bool modelIsFluid(BlockModel model) {
+    return ((model.flagsA)&4096u) != 0;
+}
+
+bool modelIsFramedBlocks(BlockModel model) {
+    return ((model.flagsA)&8192u) != 0;
+}
+
+bool modelIsCreateTrack(BlockModel model) {
+    return ((model.flagsA)&16384u) != 0;
+}
+
+float modelFluidHeight(BlockModel model) {
+    return float((model.flagsA >> 8u) & 31u) / 9.0;
 }

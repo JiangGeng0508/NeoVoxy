@@ -212,7 +212,6 @@ public class DHImporter implements IDataImporter {
         return b.toString();
     }
 
-    //TODO: add global mapping cache (with thread local secondary cache)
     private long[] readMappings(InputStream in, WorkCTX ctx) throws IOException {
         final String BLOCK_STATE_SEPARATOR_STRING = "_DH-BSW_";
         final String STATE_STRING_SEPARATOR = "_STATE_";
@@ -333,9 +332,7 @@ public class DHImporter implements IDataImporter {
         }
     }
 
-    //TODO: create VoxelizedSection of 32*32*32
     private void readColumnData(int X, int Z, InputStream in, WorkCTX ctx, long[] mapping) throws IOException {
-        //TODO: add datacache betweein XZ input stream
         var stream = new DataInputStream(in);
         long[] storage = ctx.storageCache;
         VoxelizedSection section = ctx.section;
@@ -355,9 +352,6 @@ public class DHImporter implements IDataImporter {
                     int startY = getMinHeight(entry);
                     int tall = getHeight(entry);
                     int endY = Math.min(startY+tall, this.worldHeightSections*16);
-                    //if (endY < startY+tall && ((this.worldHeightSections*16)+1 != startY+tall)) {
-                    //    int a = 0;
-                    //}
                     //Insert all entries into data cache
                     startY = Integer.expand(startY, 0b11111111_00_1111_0000_0000);
                     endY = Integer.expand(endY, 0b11111111_00_1111_0000_0000);
@@ -407,8 +401,6 @@ public class DHImporter implements IDataImporter {
             dataFetchStmt.setInt(2, task.z);
             try (var rs = dataFetchStmt.executeQuery()) {
                 var mapping = readMappings(createDecompressedStream(task.compression, rs.getBinaryStream(3), ctx), ctx);
-                //var columnGenStep = new byte[64*64];
-                //readStream(rs.getBinaryStream(2), cache, columnGenStep);
                 readColumnData(task.x, task.z, createDecompressedStream(task.compression, rs.getBinaryStream(1), ctx), ctx, mapping);
             };
         } catch (SQLException | IOException e) {
@@ -465,7 +457,6 @@ public class DHImporter implements IDataImporter {
             Class.forName("org.tukaani.xz.XZInputStream");
             hasJDBC = true;
         } catch (ClassNotFoundException | NoClassDefFoundError e) {
-            //throw new RuntimeException(e);
             Logger.warn("Unable to load sqlite JDBC or lzma decompressor, DHImporting wont be available");
         }
         HasRequiredLibraries = hasJDBC;

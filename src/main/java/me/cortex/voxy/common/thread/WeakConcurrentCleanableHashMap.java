@@ -16,7 +16,6 @@ import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 
 public class WeakConcurrentCleanableHashMap<K extends LongSupplier, V> {
-    //TODO could move to a Cleanable style system possibly?
 
     private final Consumer<V> valueCleaner;
     private final ReferenceQueue<K> cleanupQueue = new ReferenceQueue<>();

@@ -17,31 +17,15 @@ import static org.lwjgl.opengl.GL30C.glBindBufferRange;
 import static org.lwjgl.opengl.GL42C.glMemoryBarrier;
 import static org.lwjgl.opengl.GL43C.*;
 
-//Uses compute shaders to compute the last 256 rendered section (64x64 workgroup size maybe)
-// done via warp level sort, then workgroup sort (shared memory), (/w sorting network)
-// then use bubble sort (/w fast path going to middle or 2 subdivisions deep) the bubble it up
-// can do incremental sorting pass aswell, so only scan and sort a rolling sector of sections
-// (over a few frames to not cause lag, maybe)
 
 
-//TODO : USE THIS IN HierarchicalOcclusionTraverser instead of other shit
 public class NodeCleaner {
-    //TODO: use batch_visibility_set to clear visibility data when nodes are removed!! (TODO: nodeManager will need to forward info to this)
 
 
     private static final int SORTING_WORKER_SIZE = 64;
     private static final int WORK_PER_THREAD = 8;
     static final int OUTPUT_COUNT = 256;
 
-
-    //Sections rendered within this many frames are never eviction candidates: evicting the visible
-    // working set just forces an immediate rebuild and makes lods flicker between detail levels
-    private static final int MIN_EVICT_AGE = 180;
-    //Fallback age used once uploads have been starved for a sustained period: at that point nothing
-    // old enough exists, and reclaiming younger geometry (bounded thrash) beats freezing all uploads
-    private static final int STARVED_MIN_EVICT_AGE = 30;
-    //Uploads stop below this much free geometry memory (see AsyncNodeManager upload loop's 50mb gate)
-    private static final long UPLOAD_STARVED_THRESHOLD = 55_000_000L;
 
     private final AutoBindingShader sorter = Shader.makeAuto(PrintfDebugUtil.PRINTF_processor)
             .define("WORK_SIZE", SORTING_WORKER_SIZE)
@@ -74,7 +58,6 @@ public class NodeCleaner {
 
     private final AsyncNodeManager nodeManager;
     int visibilityId = 0;
-    private int starvedTicks = 0;
 
 
     public NodeCleaner(AsyncNodeManager nodeManager) {
@@ -89,50 +72,19 @@ public class NodeCleaner {
                 .ssbo("VISIBILITY_BUFFER_BINDING", this.visibilityBuffer)
                 .ssbo("OUTPUT_BUFFER_BINDING", this.outputBuffer);
 
-        /*
-        this.nodeManager.setClear(new NodeManager.ICleaner() {
-            @Override
-            public void alloc(int id) {
-                NodeCleaner.this.allocIds.add(id);
-                NodeCleaner.this.freeIds.remove(id);
-            }
-
-            @Override
-            public void move(int from, int to) {
-                NodeCleaner.this.allocIds.remove(to);
-                glCopyNamedBufferSubData(NodeCleaner.this.visibilityBuffer.id, NodeCleaner.this.visibilityBuffer.id, 4L*from, 4L*to, 4);
-            }
-
-            @Override
-            public void free(int id) {
-                NodeCleaner.this.freeIds.add(id);
-                NodeCleaner.this.allocIds.remove(id);
-            }
-        });
-         */
     }
 
 
     public void tick(GlBuffer nodeDataBuffer) {
         this.visibilityId++;
-        long free = this.nodeManager.getGeometryCapacity() - this.nodeManager.getUsedGeometryCapacity();
-        if (free < UPLOAD_STARVED_THRESHOLD) {
-            this.starvedTicks++;
-        } else {
-            this.starvedTicks = 0;
-        }
         if (this.shouldCleanGeometry()) {
-            this.outputBuffer.fill(this.nodeManager.maxNodeCount - 2);//TODO: maybe dont set to zero??
+            this.outputBuffer.fill(this.nodeManager.maxNodeCount - 2);
 
             this.sorter.bind();
-            glUniform1ui(0, this.visibilityId);
-            glUniform1ui(1, this.starvedTicks > 240 ? STARVED_MIN_EVICT_AGE : MIN_EVICT_AGE);
             glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, nodeDataBuffer.id);
 
-            //TODO: choose whether this is in nodeSpace or section/geometryId space
             //
             glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
-            //This should (IN THEORY naturally align its self to the pow2 max boarder, if not... well undefined behavior is ok right?)
             glDispatchCompute((this.nodeManager.getCurrentMaxNodeId() + (SORTING_WORKER_SIZE*WORK_PER_THREAD) - 1) / (SORTING_WORKER_SIZE*WORK_PER_THREAD), 1, 1);
 
             this.resultTransformer.bind();
@@ -158,12 +110,8 @@ public class NodeCleaner {
             long used = this.nodeManager.getUsedGeometryCapacity();
             return 3 < ((double) used) / ((double) (this.nodeManager.getGeometryCapacity() - used));
         } else {
-            long capacity = this.nodeManager.getGeometryCapacity();
-            long remaining = capacity - this.nodeManager.getUsedGeometryCapacity();
-            //Keep the trigger proportional to the buffer size: on small (VRAM limited) buffers a flat
-            // 256mb trigger starts evicting while half the store is still actively rendered, causing
-            // visible sections to lose their mesh and flicker between lod levels as they rebuild
-            return remaining < Math.min(256_000_000L, capacity / 8);
+            long remaining = this.nodeManager.getGeometryCapacity() - this.nodeManager.getUsedGeometryCapacity();
+            return remaining < 256_000_000;//If less than 256 mb free memory
         }
     }
 
@@ -195,11 +143,6 @@ public class NodeCleaner {
         for(int i =0;i < OUTPUT_COUNT; i++) {
             System.out.println(outData[i]);
         }
-        /*
-        System.out.println("---------------\n");
-        for(int i =0;i < OUTPUT_COUNT; i++) {
-            System.out.println(data[i*2+OUTPUT_COUNT]+", "+data[i*2+OUTPUT_COUNT+1]);
-        }*/
         int[] visData = new int[(int) (this.visibilityBuffer.size()/4)];
         ARBDirectStateAccess.glGetNamedBufferSubData(this.visibilityBuffer.id, 0, visData);
         int a = 0;

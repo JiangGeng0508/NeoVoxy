@@ -17,16 +17,47 @@ import java.lang.reflect.Type;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Locale;
 import java.util.function.Function;
 import java.util.function.IntSupplier;
+import java.util.regex.Pattern;
 
 import static org.lwjgl.opengl.GL11.*;
 import static org.lwjgl.opengl.GL33.*;
 
+/** 解析光影包中的 Voxy 扩展，并在运行时提供绘制目标和混合状态。 */
 public class IrisShaderPatch {
-    public static final int VERSION = ((IntSupplier)()->1).getAsInt();
-    public static final int SHADER_DEFINE_VERSION = 2;
+    public static final int VERSION = ((IntSupplier) () -> 1).getAsInt();
+    public static final int SHADER_DEFINE_VERSION = 3;
+    private static final int LITE_CONTRACT_VERSION = 1;
+    private static final Pattern LITE_CONTRACT = Pattern.compile(
+            "VOXY_LITE_CONTRACT\\s+api=(\\d+);pack=([^;\\r\\n]+);versions=([^;\\r\\n]+);transition=([a-z0-9_-]+)");
 
+    private record LiteContract(int api, String pack, String versions, String transition) {
+    }
+
+    private static LiteContract readLiteContract(String source) {
+        var matcher = LITE_CONTRACT.matcher(source);
+        if (!matcher.find()) {
+            return null;
+        }
+        return new LiteContract(
+                Integer.parseInt(matcher.group(1)),
+                matcher.group(2).trim(),
+                matcher.group(3).trim(),
+                matcher.group(4).trim());
+    }
+
+    private static boolean validTransition(LiteContract contract) {
+        if ("pack-distance-fade".equals(contract.transition)) {
+            return true;
+        }
+        return "lod-boundary-fade".equals(contract.transition)
+                && me.cortex.voxy.client.config.VoxyConfig.CONFIG.enableLodBoundaryFade;
+    }
+
+
+    // ---- 光影 JSON 反序列化 -------------------------------------------
 
     private static final class SSBODeserializer implements JsonDeserializer<Int2ObjectOpenHashMap<String>> {
         @Override
@@ -79,13 +110,13 @@ public class IrisShaderPatch {
     }
 
     public record BlendState(int buffer, boolean off, int sRGB, int dRGB, int sA, int dA) {
-        public static BlendState ALL_OFF = new BlendState(-1, true, 0,0,0,0);
+        public static BlendState ALL_OFF = new BlendState(-1, true, 0, 0, 0, 0);
     }
 
 
     private static final class BlendStateDeserializer implements JsonDeserializer<Int2ObjectMap<BlendState>> {
         private static int parseType(String type) {
-            type = type.toUpperCase();
+            type = type.toUpperCase(Locale.ROOT);
             if (!type.startsWith("GL_")) {
                 type = "GL_"+type;
             }
@@ -161,7 +192,7 @@ public class IrisShaderPatch {
     }
 
     private static class PatchGson {
-        public int version;//TODO maybe replace with semver?
+        public int version;
         public int[] opaqueDrawBuffers;
         public int[] translucentDrawBuffers;
         public String[] uniforms;
@@ -178,7 +209,7 @@ public class IrisShaderPatch {
         public float[] renderScale;
         public boolean useViewportDims;
         public boolean skipShaderDepthHackFix;
-        //public boolean deferTranslucentRendering;
+        public boolean useDynamicFarPlane;
         public String checkValid() {
             if (this.blending != null) {
                 int i = 0;
@@ -211,6 +242,8 @@ public class IrisShaderPatch {
 
 
 
+    // ---- 已解析补丁的访问器 -------------------------------------------
+
     private final PatchGson patchData;
     private final ShaderPack pack;
     private final Int2ObjectMap<String> ssbos;
@@ -230,6 +263,7 @@ public class IrisShaderPatch {
     }
 
     public boolean skipShaderDepthHackFix() { return this.patchData.skipShaderDepthHackFix; }
+    public boolean useDynamicFarPlane() { return this.patchData.useDynamicFarPlane; }
     public Int2ObjectMap<String> getSSBOs() {
         return new Int2ObjectLinkedOpenHashMap<>(this.ssbos);
     }
@@ -240,7 +274,7 @@ public class IrisShaderPatch {
         return this.patchData.translucentPatchData;
     }
     public String getTAAShift() {
-        return this.patchData.taaOffset;// == null?"{return vec2(0.0);}":this.patchData.taaOffset;
+        return this.patchData.taaOffset;
     }
     public String[] getUniformList() {
         return this.patchData.uniforms;
@@ -273,17 +307,17 @@ public class IrisShaderPatch {
     }
 
     public boolean deferedTranslucentRendering() {
-        return false;//this.patchData.deferTranslucentRendering;
+        return false;
     }
 
+    /** 创建延迟执行的 OpenGL 混合状态设置，调用顺序由渲染管线决定。 */
     public Runnable createBlendSetup() {
         if (this.patchData.blending == null || this.patchData.blending.isEmpty()) {
-            return ()->{};//No blending change
+            return ()->{};
         }
         return ()->{
-            final var BS = this.patchData.blending;
-            //Set inital state
-            var init = BS.getOrDefault(-1, null);
+            final var blendStates = this.patchData.blending;
+            var init = blendStates.getOrDefault(-1, null);
             if (init != null) {
                 if (init.off) {
                     glDisable(GL_BLEND);
@@ -292,14 +326,13 @@ public class IrisShaderPatch {
                     glBlendFuncSeparate(init.sRGB, init.dRGB, init.sA, init.dA);
                 }
             }
-            for (var entry:BS.int2ObjectEntrySet()) {
+            for (var entry : blendStates.int2ObjectEntrySet()) {
                 if (entry.getIntKey() == -1) continue;
                 final var s = entry.getValue();
                 if (s.off) {
                     glDisablei(GL_BLEND, s.buffer);
                 } else {
                     glEnablei(GL_BLEND, s.buffer);
-                    //_sigh_ thanks nvidia
                     ARBDrawBuffersBlend.glBlendFuncSeparateiARB(s.buffer, s.sRGB, s.dRGB, s.sA, s.dA);
                 }
             }
@@ -311,26 +344,35 @@ public class IrisShaderPatch {
             .setLenient()
             .create();
 
+    // ---- 补丁加载与 Lite shader 回退 ----------------------------------
+
     public static IrisShaderPatch makePatch(ShaderPack ipack, AbsolutePackPath directory, Function<AbsolutePackPath, String> sourceProvider) {
+        boolean liteRequested = me.cortex.voxy.client.config.VoxyConfig.CONFIG.lodLiteShading;
+        LiteShaderStatus.set(liteRequested
+                ? LiteShaderStatus.Code.REQUESTED
+                : LiteShaderStatus.Code.DISABLED);
         String voxyPatchData = sourceProvider.apply(directory.resolve("voxy.json"));
-        if (voxyPatchData == null) {//No voxy patch data in shaderpack
+        if (voxyPatchData == null) {
+            if (liteRequested) {
+                LiteShaderStatus.fail(LiteShaderStatus.Code.NO_VOXY_PATCH);
+            }
             return null;
         }
 
-        //A more graceful exit on blank string
         if (voxyPatchData.isBlank()) {
+            if (liteRequested) {
+                LiteShaderStatus.fail(LiteShaderStatus.Code.NO_VOXY_PATCH);
+            }
             return null;
         }
 
-        //Escape things
         voxyPatchData = voxyPatchData.replace("\\", "\\\\");
 
         PatchGson patchData = null;
         try {
-            //TODO: basicly find any "commented out" quotation marks and escape them (if the line, when stripped starts with a // or /* then escape all quotation marks in that line)
             {
                 StringBuilder builder = new StringBuilder(voxyPatchData.length());
-                //Rebuild the patch, replacing commented out " with \"
+                // Preserve quotes inside JSON comments before Gson parsing.
                 for (var line : voxyPatchData.split("\n")) {
                     int idx = line.indexOf("//");
                     if (idx != -1) {
@@ -344,7 +386,6 @@ public class IrisShaderPatch {
                 voxyPatchData = builder.toString();
             }
 
-            //Stupid chunk fade in patch (should probably just breaks
             voxyPatchData = voxyPatchData.replaceAll("void _cfi_ignoreMarker\\(\\) \\{\\}", "");
 
             patchData = GSON.fromJson(voxyPatchData, PatchGson.class);
@@ -352,18 +393,82 @@ public class IrisShaderPatch {
                 throw new IllegalStateException("Voxy patch json returned null, this is most likely due to malformed json file");
             }
 
-            {//Inject data from the auxilery files if they are present
-                var opaque = sourceProvider.apply(directory.resolve("voxy_opaque.glsl"));
+            {
+                String opaque = null;
+                String translucent = null;
+                String standardOpaque = null;
+                String standardTranslucent = null;
+                if (liteRequested) {
+                    standardOpaque = sourceProvider.apply(directory.resolve("voxy_opaque.glsl"));
+                    standardTranslucent = sourceProvider.apply(directory.resolve("voxy_translucent.glsl"));
+
+                    var builtin = BuiltinLiteShaderPatches.tryCreate(
+                            standardOpaque, standardTranslucent);
+                    if (builtin != null) {
+                        if (!me.cortex.voxy.client.config.VoxyConfig.CONFIG.enableLodBoundaryFade) {
+                            LiteShaderStatus.fail(LiteShaderStatus.Code.TRANSITION_REQUIRED,
+                                    builtin.transition());
+                        } else {
+                            opaque = builtin.opaque();
+                            translucent = builtin.translucent();
+                            LiteShaderStatus.active(builtin.packName(), builtin.testedVersions(),
+                                    builtin.transition());
+                            Logger.info("Built-in Lite LOD shader programs applied for "
+                                    + builtin.packName() + " (tested " + builtin.testedVersions() + ")");
+                        }
+                    } else {
+                        String liteOpaque = sourceProvider.apply(directory.resolve("voxy_opaque_lite.glsl"));
+                        String liteTranslucent = sourceProvider.apply(directory.resolve("voxy_translucent_lite.glsl"));
+                        if (liteOpaque == null || liteTranslucent == null) {
+                            LiteShaderStatus.fail(LiteShaderStatus.Code.MISSING_PROGRAMS);
+                        } else {
+                            LiteContract opaqueContract = readLiteContract(liteOpaque);
+                            LiteContract translucentContract = readLiteContract(liteTranslucent);
+                            if (opaqueContract == null || translucentContract == null) {
+                                LiteShaderStatus.fail(LiteShaderStatus.Code.MISSING_CONTRACT);
+                            } else if (!opaqueContract.equals(translucentContract)) {
+                                LiteShaderStatus.fail(LiteShaderStatus.Code.CONTRACT_MISMATCH);
+                            } else if (opaqueContract.api != LITE_CONTRACT_VERSION) {
+                                LiteShaderStatus.fail(LiteShaderStatus.Code.API_MISMATCH,
+                                        Integer.toString(opaqueContract.api));
+                            } else if (opaqueContract.pack.isBlank() || opaqueContract.versions.isBlank()) {
+                                LiteShaderStatus.fail(LiteShaderStatus.Code.MISSING_CONTRACT);
+                            } else if (!validTransition(opaqueContract)) {
+                                LiteShaderStatus.fail(LiteShaderStatus.Code.TRANSITION_REQUIRED,
+                                        opaqueContract.transition);
+                            } else {
+                                opaque = liteOpaque;
+                                translucent = liteTranslucent;
+                                LiteShaderStatus.active(opaqueContract.pack, opaqueContract.versions,
+                                        opaqueContract.transition);
+                                Logger.info("External Lite LOD shader programs applied for "
+                                        + opaqueContract.pack + " (tested " + opaqueContract.versions + ")");
+                            }
+                        }
+                    }
+                }
+
+                // Lite programs fall back as an atomic pair.
+                if (opaque == null || translucent == null) {
+                    opaque = standardOpaque != null
+                            ? standardOpaque
+                            : sourceProvider.apply(directory.resolve("voxy_opaque.glsl"));
+                    translucent = standardTranslucent != null
+                            ? standardTranslucent
+                            : sourceProvider.apply(directory.resolve("voxy_translucent.glsl"));
+                    if (liteRequested) {
+                        Logger.info("Lite LOD shader programs were not applied; using the standard pair ("
+                                + LiteShaderStatus.get().code() + ")");
+                    }
+                }
                 if (opaque != null) {
                     Logger.info("External opaque shader patch applied");
                     patchData.opaquePatchData = opaque;
                 }
-                var translucent = sourceProvider.apply(directory.resolve("voxy_translucent.glsl"));
                 if (translucent != null) {
                     Logger.info("External translucent shader patch applied");
                     patchData.translucentPatchData = translucent;
                 }
-                //This might be ok? not.. sure if is nice or not
                 var taa = sourceProvider.apply(directory.resolve("voxy_taa.glsl"));
                 if (taa != null) {
                     Logger.info("External taa shader patch applied");
@@ -377,6 +482,9 @@ public class IrisShaderPatch {
             }
         } catch (Exception e) {
             patchData = null;
+            if (liteRequested) {
+                LiteShaderStatus.fail(LiteShaderStatus.Code.ERROR, e.getClass().getSimpleName());
+            }
             Logger.error("Failed to parse patch data gson, dumping json",e);
             try {
                 Files.writeString(Path.of("JSON_DUMP.txt"), voxyPatchData);
@@ -389,6 +497,9 @@ public class IrisShaderPatch {
             return null;
         }
         if (patchData.version != VERSION) {
+            if (liteRequested) {
+                LiteShaderStatus.fail(LiteShaderStatus.Code.ERROR, "voxy.json version mismatch");
+            }
             Logger.error("Shader has voxy patch data, but patch version is incorrect. expected " + VERSION + " got "+patchData.version);
             throw new IllegalStateException("Shader version mismatch expected " + VERSION + " got "+patchData.version);
         }

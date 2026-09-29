@@ -8,7 +8,6 @@ import java.lang.ref.Cleaner;
 import static me.cortex.voxy.common.util.GlobalCleaner.CLEANER;
 
 public abstract class TrackedObject {
-    //TODO: maybe make this false? for performance overhead?
     public static final boolean TRACK_OBJECT_ALLOCATIONS = VoxyCommon.isVerificationFlagOn("ensureTrackedObjectsAreFreed", true);
     public static final boolean TRACK_OBJECT_ALLOCATION_STACKS = VoxyCommon.isVerificationFlagOn("trackObjectAllocationStacks");
 

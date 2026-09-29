@@ -20,7 +20,7 @@ import static org.lwjgl.opengl.GL42C.GL_FRAMEBUFFER_BARRIER_BIT;
 import static org.lwjgl.opengl.GL42C.glMemoryBarrier;
 import static org.lwjgl.opengl.GL45C.glTextureBarrier;
 
-public class HiZBuffer {
+public class HiZBuffer implements HiZBufferAccess {
     private final Shader hiz;
     private final GlFramebuffer fb = new GlFramebuffer().name("HiZ");
     private final int sampler = glGenSamplers();
@@ -48,11 +48,8 @@ public class HiZBuffer {
 
     private void alloc(int width, int height) {
         this.levels = (int)Math.ceil(Math.log(Math.max(width, height))/Math.log(2));
-        //We dont care about e.g. 1x1 size texture since you dont get meshlets that big to cover such a large area
-        //this.levels -= 1;//Arbitrary size, shinks the max level by alot and saves a significant amount of processing time
-        // (could probably increase it to be defined by a max meshlet coverage computation thing)
 
-        //GL_DEPTH_COMPONENT32F //Cant use this as it does not match the depth format of the provided depth buffer
+        //GL_DEPTH_COMPONENT32F
         this.texture = new GlTexture().store(this.type, this.levels, width, height).name("HiZ");
         glTextureParameteri(this.texture.id, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
         glTextureParameteri(this.texture.id, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
@@ -108,7 +105,7 @@ public class HiZBuffer {
             }
         }
         glTextureParameteri(this.texture.id, GL_TEXTURE_BASE_LEVEL, 0);
-        glTextureParameteri(this.texture.id, GL_TEXTURE_MAX_LEVEL, 1000);//TODO: CHECK IF ITS -1 or -0
+        glTextureParameteri(this.texture.id, GL_TEXTURE_MAX_LEVEL, 1000);
 
         glDepthFunc(this.properties.closerEqualDepthCompare());
         glDisable(GL_DEPTH_TEST);

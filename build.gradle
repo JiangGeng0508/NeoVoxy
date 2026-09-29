@@ -1,6 +1,4 @@
 //file:noinspection GroovyAssignabilityCheck
-import java.nio.file.Files
-import java.nio.file.StandardCopyOption
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
@@ -29,16 +27,16 @@ repositories {
 
 minecraft.accessTransformers.file rootProject.file('src/main/resources/META-INF/accesstransformer.cfg')
 
+// jarJar's output (mod classes + nested dependency jars) is only an input to slimJar. Keep that
+// intermediate out of build/libs so it cannot be published by mistake; the distributable is the
+// trimmed archive slimJar writes back under the standard file name.
 jar {
-    // jarJar embeds this project's jar, so it always depends on `jar`. Copying the full
-    // jar-in-jar output over the plain jar output must therefore happen *after* jarJar
-    // (as a finalizer); wiring it as a jar -> jarJar dependency creates a circular task
-    // graph and breaks every build.
-    finalizedBy tasks.named('jarJar')
+    destinationDirectory.set(layout.buildDirectory.dir('intermediate-jars'))
 }
 
 tasks.named('jarJar') {
     archiveClassifier = 'bundled'
+    destinationDirectory.set(layout.buildDirectory.dir('intermediate-jars'))
 }
 
 runs {
@@ -79,7 +77,9 @@ configurations {
     }
     runtimeClasspath.extendsFrom localRuntime
     sodiumOuter
-    prunedRocksDB
+    createOuter
+    sableOuter
+    lwjglNativesRaw
 }
 
 def sodiumNeoForgeModJar = layout.buildDirectory.file('extracted/sodium-neoforge-mod.jar')
@@ -95,96 +95,203 @@ def extractSodiumNeoForgeModJar = tasks.register('extractSodiumNeoForgeModJar', 
     into layout.buildDirectory.dir('extracted')
 }
 
-def prunedLibraryDir = layout.buildDirectory.dir('pruned-libs')
+// Create ships its Ponder and Flywheel compile APIs as nested jarjar jars. Extract the exact
+// nested artifacts so the optional Create integration can be compiled against a version-matched
+// API without hand-maintained libs/ files.
+def createPonderJar = layout.buildDirectory.file('extracted/create/ponder-neoforge-1.0.82+mc1.21.1.jar')
+def createFlywheelJar = layout.buildDirectory.file('extracted/create/flywheel-neoforge-1.21.1-1.0.6.jar')
 
-tasks.register('makePrunedRocksDBJar', Zip) {
-    group = 'build'
-    description = 'Removes non-desktop RocksDB native libraries from the JarJar dependency.'
-    dependsOn configurations.prunedRocksDB
-
-    archiveFileName.set('rocksdbjni-10.2.1.jar')
-    destinationDirectory.set(prunedLibraryDir)
-    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
-
-    from { zipTree(configurations.prunedRocksDB.singleFile) }
-
-    exclude { details ->
-        def file = details.name
-        if (file.endsWith('.jnilib') || file.endsWith('.dylib')) {
-            return true
+def extractCreateCompileJars = tasks.register('extractCreateCompileJars', Copy) {
+    from({ zipTree(configurations.createOuter.singleFile) }) {
+        include 'META-INF/jarjar/ponder-neoforge-1.0.82+mc1.21.1.jar'
+        include 'META-INF/jarjar/flywheel-neoforge-1.21.1-1.0.6.jar'
+        eachFile { details ->
+            details.path = details.name
         }
-        if (!file.endsWith('.so')) {
-            return false
-        }
-        return ['linux32', 'musl', 's390x', 'riscv64', 'ppc64le', 'aarch64'].any { file.contains(it) }
+        includeEmptyDirs = false
     }
+    into layout.buildDirectory.dir('extracted/create')
 }
 
-def replaceZipEntries = { File jarFile, Map<String, File> replacements ->
-    def tempFile = new File(jarFile.parentFile, "${jarFile.name}.tmp")
-    def buffer = new byte[8192]
-    def seen = [] as Set
+// Sable likewise ships its companion API and generated Rapier implementation as nested jars.
+def sableCompanionJar = layout.buildDirectory.file('extracted/sable/sable-companion-common-1.21.1-1.6.0.jar')
+def sableRapierJar = layout.buildDirectory.file('extracted/sable/dev.ryanhcode.sable.sable-sable_rapier-1.21.1-2.0.5.jar')
 
-    new ZipInputStream(new BufferedInputStream(new FileInputStream(jarFile))).withCloseable { zin ->
-        new ZipOutputStream(new BufferedOutputStream(new FileOutputStream(tempFile))).withCloseable { zout ->
-            ZipEntry entry
-            while ((entry = zin.nextEntry) != null) {
-                def replacement = replacements[entry.name]
-                def outEntry = new ZipEntry(entry.name)
-                outEntry.time = entry.time
-                zout.putNextEntry(outEntry)
+def extractSableCompileJars = tasks.register('extractSableCompileJars', Copy) {
+    from({ zipTree(configurations.sableOuter.singleFile) }) {
+        include 'META-INF/jarjar/sable-companion-common-1.21.1-1.6.0.jar'
+        include 'META-INF/jarjar/dev.ryanhcode.sable.sable-sable_rapier-1.21.1-2.0.5.jar'
+        eachFile { details ->
+            details.path = details.name
+        }
+        includeEmptyDirs = false
+    }
+    into layout.buildDirectory.dir('extracted/sable')
+}
 
-                if (replacement != null) {
-                    replacement.withInputStream { input -> input.transferTo(zout) }
-                    seen.add(entry.name)
-                } else if (!entry.directory) {
-                    int read
-                    while ((read = zin.read(buffer)) > 0) {
-                        zout.write(buffer, 0, read)
-                    }
+// Voxy needs the LWJGL ZSTD/LMDB classes *and* their native binaries. Minecraft/NeoForge ship
+// neither, and JarJar can only embed one archive per Maven coordinate, so follow the neo-voxy
+// layout: the class jars go into the jar-in-jar bundle (slimJar strips their Java-9 module
+// descriptors) while the native binaries are flattened into the root of the distributable JAR,
+// where LWJGL's SharedLibraryLoader looks for them.
+def extractedNativesDir = layout.buildDirectory.dir('extracted-natives')
+
+tasks.register('extractLwjglNatives') {
+    group = 'build'
+    description = 'Extracts the LWJGL native binaries Voxy needs (Windows/Linux x86_64).'
+    inputs.files(configurations.lwjglNativesRaw)
+    outputs.dir(extractedNativesDir)
+
+    doLast {
+        def outputDir = extractedNativesDir.get().asFile
+        delete(outputDir)
+        outputDir.mkdirs()
+        configurations.lwjglNativesRaw.resolvedConfiguration.resolvedArtifacts.each { artifact ->
+            logger.lifecycle("Extracting natives from ${artifact.file.name}")
+            copy {
+                from(zipTree(artifact.file)) {
+                    include '**/*.dll'
+                    include '**/*.so'
+                    include '**/*.dylib'
+                    // Flatten: LWJGL looks the binaries up at the classpath root.
+                    eachFile { fcp -> fcp.relativePath = new RelativePath(true, fcp.name) }
+                    includeEmptyDirs = false
                 }
-
-                zout.closeEntry()
-                zin.closeEntry()
+                into outputDir
             }
         }
-    }
-
-    def missing = replacements.keySet() - seen
-    if (!missing.isEmpty()) {
-        tempFile.delete()
-        throw new GradleException("JarJar entries not found for pruning: ${missing}")
-    }
-    if (!jarFile.delete()) {
-        tempFile.delete()
-        throw new GradleException("Could not replace ${jarFile}")
-    }
-    if (!tempFile.renameTo(jarFile)) {
-        throw new GradleException("Could not move ${tempFile} to ${jarFile}")
     }
 }
 
 tasks.named('jarJar') {
-    dependsOn tasks.named('makePrunedRocksDBJar')
-    inputs.files(tasks.named('makePrunedRocksDBJar').flatMap { it.archiveFile })
-
-    doLast {
-        replaceZipEntries(archiveFile.get().asFile, [
-                'META-INF/jarjar/rocksdbjni-10.2.1.jar' : tasks.named('makePrunedRocksDBJar').get().archiveFile.get().asFile
-        ])
-    }
-
-    // Leave the complete (jar-in-jar) mod under the standard file name so the
-    // `gradlew jar` / `gradlew build` outputs are directly usable.
-    doLast {
-        def out = tasks.named('jar').get().archiveFile.get().asFile
-        def full = archiveFile.get().asFile
-        if (full.exists() && full != out) {
-            Files.copy(full.toPath(), out.toPath(), StandardCopyOption.REPLACE_EXISTING)
-        }
+    dependsOn tasks.named('extractLwjglNatives')
+    from(extractedNativesDir) {
+        // Natives at the JAR root, where LWJGL's SharedLibraryLoader finds them.
+        into ''
     }
 }
 
+// The distributable: jarJar's output with native libraries that cannot run on the two supported
+// desktop targets trimmed, the LWJGL module descriptors removed (on a dedicated server those
+// descriptors require the client-only org.lwjgl module before FML can start) and every nested
+// jarjar archive left STORED so NeoForge's jarjar loader can random-access it.
+def slimJarOutput = layout.buildDirectory.file(
+        "libs/${tasks.named('jar').get().archiveFileName.get()}")
+
+tasks.register('slimJar') {
+    group = 'build'
+    description = 'Creates the trimmed Windows/Linux distributable JAR without external tools'
+    dependsOn tasks.named('jarJar')
+
+    def sourceJar = tasks.named('jarJar').flatMap { it.archiveFile }
+    inputs.file(sourceJar)
+    outputs.file(slimJarOutput)
+
+    doLast {
+        def source = sourceJar.get().asFile
+        def target = slimJarOutput.get().asFile
+        target.parentFile.mkdirs()
+
+        def putEntry
+        putEntry = { ZipOutputStream output, String name, byte[] data, int requestedMethod, long timestamp ->
+            def entry = new ZipEntry(name)
+            if (timestamp >= 0L) entry.time = timestamp
+            int method = requestedMethod == ZipEntry.STORED ? ZipEntry.STORED : ZipEntry.DEFLATED
+            entry.method = method
+            if (method == ZipEntry.STORED) {
+                def crc = new java.util.zip.CRC32()
+                crc.update(data)
+                entry.size = data.length
+                entry.compressedSize = data.length
+                entry.crc = crc.value
+            }
+            output.putNextEntry(entry)
+            if (data.length != 0) output.write(data)
+            output.closeEntry()
+        }
+
+        def rewriteNested = { byte[] inputBytes, Closure<Boolean> shouldDrop, String label ->
+            def bytesOut = new ByteArrayOutputStream(inputBytes.length)
+            int removed = 0
+            new ZipInputStream(new ByteArrayInputStream(inputBytes)).withCloseable { input ->
+                new ZipOutputStream(bytesOut).withCloseable { output ->
+                    ZipEntry entry
+                    while ((entry = input.nextEntry) != null) {
+                        byte[] data = entry.directory ? new byte[0] : input.readAllBytes()
+                        if (shouldDrop.call(entry.name)) {
+                            removed++
+                        } else {
+                            putEntry(output, entry.name, data, entry.method, entry.time)
+                        }
+                        input.closeEntry()
+                    }
+                }
+            }
+            logger.lifecycle("  ${label}: removed ${removed} unused entries")
+            return bytesOut.toByteArray()
+        }
+
+        boolean foundRocks = false
+        boolean foundSqlite = false
+        int foundLwjgl = 0
+        def rocksKeep = ['librocksdbjni-win64.dll', 'librocksdbjni-linux64.so'] as Set
+        def sqliteKeep = ['org/sqlite/native/Windows/x86_64/', 'org/sqlite/native/Linux/x86_64/']
+
+        if (target.exists() && !target.delete()) {
+            throw new GradleException("Could not replace ${target}")
+        }
+
+        new java.util.zip.ZipFile(source).withCloseable { input ->
+            new ZipOutputStream(new BufferedOutputStream(new FileOutputStream(target))).withCloseable { output ->
+                def entries = input.entries()
+                while (entries.hasMoreElements()) {
+                    def entry = entries.nextElement()
+                    byte[] data = entry.directory ? new byte[0] : input.getInputStream(entry).withCloseable { it.readAllBytes() }
+                    String name = entry.name
+
+                    if (name.startsWith('META-INF/jarjar/rocksdbjni-') && name.endsWith('.jar')) {
+                        foundRocks = true
+                        data = rewriteNested(data, { String nestedName ->
+                            String baseName = nestedName.substring(nestedName.lastIndexOf('/') + 1)
+                            boolean nativeFile = baseName.startsWith('librocksdbjni-') &&
+                                    (baseName.endsWith('.so') || baseName.endsWith('.dll') || baseName.endsWith('.jnilib'))
+                            return nativeFile && !rocksKeep.contains(baseName)
+                        }, 'rocksdbjni')
+                    } else if (name.startsWith('META-INF/jarjar/sqlite-jdbc-') && name.endsWith('.jar')) {
+                        foundSqlite = true
+                        data = rewriteNested(data, { String nestedName ->
+                            if (!nestedName.startsWith('org/sqlite/native/') || nestedName.endsWith('/')) return false
+                            return !sqliteKeep.any { nestedName.startsWith(it) }
+                        }, 'sqlite-jdbc')
+                    } else if ((name.startsWith('META-INF/jarjar/lwjgl-zstd-') ||
+                                name.startsWith('META-INF/jarjar/lwjgl-lmdb-')) && name.endsWith('.jar')) {
+                        foundLwjgl++
+                        data = rewriteNested(data, { String nestedName ->
+                            nestedName == 'META-INF/versions/9/module-info.class'
+                        }, name.substring(name.lastIndexOf('/') + 1))
+                    }
+
+                    // Nested archives must stay STORED so NeoForge's jarjar loader can random-access them.
+                    int method = name.startsWith('META-INF/jarjar/') && name.endsWith('.jar')
+                            ? ZipEntry.STORED : entry.method
+                    putEntry(output, name, data, method, entry.time)
+                }
+            }
+        }
+
+        if (!foundRocks || !foundSqlite || foundLwjgl != 2) {
+            target.delete()
+            throw new GradleException("Expected nested dependencies were not found " +
+                    "(rocksdb=${foundRocks}, sqlite=${foundSqlite}, lwjgl=${foundLwjgl}/2)")
+        }
+        logger.lifecycle(String.format(Locale.ROOT, 'Slim JAR: %.1f MB -> %.1f MB',
+                source.length() / 1048576.0d, target.length() / 1048576.0d))
+    }
+}
+
+tasks.named('assemble') {
+    dependsOn tasks.named('slimJar')
+}
 dependencies {
     modules {
         module('org.lz4:lz4-java') {
@@ -202,6 +309,23 @@ dependencies {
     compileOnly "maven.modrinth:iris:1.8.0+1.21.1-neoforge"
     compileOnly "maven.modrinth:fALzjamp:LuFhm4eU"
 
+    // === Optional mod integration compile-time APIs (all optional at runtime) ===
+    createOuter "maven.modrinth:create:6.0.10+mc1.21.1"
+    compileOnly "maven.modrinth:create:6.0.10+mc1.21.1"
+    compileOnly files(createPonderJar, createFlywheelJar).builtBy(extractCreateCompileJars)
+
+    sableOuter "maven.modrinth:sable:2.0.5+mc1.21.1"
+    compileOnly "maven.modrinth:sable:2.0.5+mc1.21.1"
+    compileOnly files(sableCompanionJar, sableRapierJar).builtBy(extractSableCompileJars)
+
+    compileOnly "maven.modrinth:ecliptic-seasons:0.15.0-rc-3-1"
+    compileOnly "maven.modrinth:lithium:mc1.21.1-0.15.1-neoforge"
+    compileOnly "maven.modrinth:create-bits-n-bobs:2.1.11-beta"
+    compileOnly "maven.modrinth:azimuth-api:1.4.1"
+    compileOnly "maven.modrinth:entityculling:1.10.5"
+    compileOnly "maven.modrinth:sodium-options-api:neoforge-1.21.1-1.0.10"
+    compileOnly "maven.modrinth:reeses-sodium-options:mc1.21.3-1.8.0+neoforge"
+
     implementation platform('org.lwjgl:lwjgl-bom:3.3.3')
     implementation 'org.lwjgl:lwjgl'
     implementation 'org.lwjgl:lwjgl-lmdb'
@@ -218,9 +342,22 @@ dependencies {
     implementation 'org.tukaani:xz:1.10'
     implementation 'org.xerial:sqlite-jdbc:3.49.1.0'
 
-    prunedRocksDB 'org.rocksdb:rocksdbjni:10.2.1'
+    //Native binaries repackaged into the distributable JAR root by extractLwjglNatives.
+    lwjglNativesRaw "org.lwjgl:lwjgl-zstd:3.3.3:natives-windows"
+    lwjglNativesRaw "org.lwjgl:lwjgl-lmdb:3.3.3:natives-windows"
+    lwjglNativesRaw "org.lwjgl:lwjgl-zstd:3.3.3:natives-linux"
+    lwjglNativesRaw "org.lwjgl:lwjgl-lmdb:3.3.3:natives-linux"
 
+    //Runtime libraries the shipped JAR must provide: the default section storage is RocksDB + ZSTD,
+    //LMDB and Redis are selectable backends, and xz/sqlite power the Distant Horizons import.
+    //(LZ4 is deliberately NOT bundled - Minecraft ships org.lz4:lz4-java itself.)
     jarJar 'org.rocksdb:rocksdbjni:10.2.1'
+    jarJar 'org.lwjgl:lwjgl-zstd:3.3.3'
+    jarJar 'org.lwjgl:lwjgl-lmdb:3.3.3'
+    jarJar 'redis.clients:jedis:5.1.0'
+    jarJar 'org.apache.commons:commons-pool2:2.12.0'
+    jarJar 'org.tukaani:xz:1.10'
+    jarJar 'org.xerial:sqlite-jdbc:3.49.1.0'
 }
 
 tasks.withType(ProcessResources).configureEach {

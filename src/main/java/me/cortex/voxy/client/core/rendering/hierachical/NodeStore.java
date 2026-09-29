@@ -72,7 +72,7 @@ public final class NodeStore {
     public void free(int baseNodeId, int count) {
         for (int i = 0; i < count; i++) {
             int nodeId = baseNodeId + i;
-            if (!this.allocationSet.free(nodeId)) {//TODO: add batch free
+            if (!this.allocationSet.free(nodeId)) {
                 throw new IllegalStateException("Node " + nodeId + " was not allocated!");
             }
             this.clear(nodeId);
@@ -200,7 +200,6 @@ public final class NodeStore {
         return ((this.localNodeData[id2idx(nodeId)+1]>>63)&1)!=0;
     }
 
-    //TODO: Implement this in node manager
     public void setAllChildrenAreLeaf(int nodeId, boolean state) {
         this.localNodeData[id2idx(nodeId)+2] &= ~(1L<<19);
         this.localNodeData[id2idx(nodeId)+2] |= state?1L<<19:0;
@@ -291,11 +290,10 @@ public final class NodeStore {
             } else if (geometry == -1) {
                 z |= 0xFFFFFF;//Special case null
             } else {
-                z |= geometry&0xFFFFFF;//TODO: check and ensure bounds
+                z |= geometry&0xFFFFFF;
             }
         }
         int childPtr = this.getChildPtr(nodeId);
-        //TODO: check and ensure bounds
         w |= childPtr&0xFFFFFF;
 
         z |= (flags&0xFF)<<24;

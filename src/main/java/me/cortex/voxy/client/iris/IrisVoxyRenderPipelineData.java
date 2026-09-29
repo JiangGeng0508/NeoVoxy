@@ -53,8 +53,8 @@ public class IrisVoxyRenderPipelineData {
     public final String TAA;
     public final boolean useViewportDims;
     public final boolean deferTranslucency;
-    public boolean skipShaderDepthHackFix;
-    private boolean destroyed;
+    public final boolean skipShaderDepthHackFix;
+    public final boolean useDynamicFarPlane;
 
     private IrisVoxyRenderPipelineData(IrisShaderPatch patch, int[] opaqueDrawTargets, int[] translucentDrawTargets, StructLayout uniformSet, Runnable blendingSetup, ImageSet imageSet, SSBOSet ssboSet) {
         this.opaqueDrawTargets = opaqueDrawTargets;
@@ -71,6 +71,7 @@ public class IrisVoxyRenderPipelineData {
         this.useViewportDims = patch.useViewportDims();
         this.deferTranslucency = patch.deferedTranslucentRendering();
         this.skipShaderDepthHackFix = patch.skipShaderDepthHackFix();
+        this.useDynamicFarPlane = patch.useDynamicFarPlane();
     }
 
     public SSBOSet getSsboSet() {
@@ -94,19 +95,6 @@ public class IrisVoxyRenderPipelineData {
         return this.translucentPatch;
     }
 
-    public boolean isValid() {
-        return !this.destroyed;
-    }
-
-    public void markIrisPipelineDestroyed() {
-        this.destroyed = true;
-    }
-
-    public static boolean isDestroyedRenderTargetsException(IllegalStateException exception) {
-        String message = exception.getMessage();
-        return message != null && message.contains("destroyed RenderTargets");
-    }
-
 
     public static IrisVoxyRenderPipelineData buildPipeline(IrisRenderingPipeline ipipe, IrisShaderPatch patch, CustomUniforms cu, ShaderStorageBufferHolder ssboHolder) {
         var uniforms = createUniformLayoutStructAndUpdater(createUniformSet(cu, patch));
@@ -121,7 +109,6 @@ public class IrisVoxyRenderPipelineData {
 
 
 
-        //TODO: need to transform the string patch with the uniform decleration aswell as sampler declerations
         return new IrisVoxyRenderPipelineData(patch, opaqueDrawTargets, translucentDrawTargets, uniforms, patch.createBlendSetup(), imageSet, ssboSet);
     }
 
@@ -169,7 +156,6 @@ public class IrisVoxyRenderPipelineData {
             ordering[order].add(uniform);
         }
 
-        //Emit the ordering, note this is not optimial, but good enough, e.g. if have even number of align 2, emit that after align 4
         int pos = 0;
         Int2ObjectLinkedOpenHashMap<UniformWritingHolder> layout = new Int2ObjectLinkedOpenHashMap<>();
         for (var uniform : ordering[0]) {//Emit exact align 4
@@ -315,7 +301,6 @@ public class IrisVoxyRenderPipelineData {
 
     }
     private static List<UniformWritingHolder> createUniformSet(CustomUniforms cu, IrisShaderPatch patch) {
-        //This is a fking awful hack... but it works thinks
 
         List<UniformWritingHolder> uniforms = new ArrayList<>();
         Set<String> seenUniforms = new HashSet<>();
@@ -383,16 +368,12 @@ public class IrisVoxyRenderPipelineData {
             @Override
             public DynamicLocationalUniformHolder addDynamicUniform(Uniform uniform, ValueUpdateNotifier valueUpdateNotifier) {
                 throw new IllegalStateException("Type not implemented for uniform: " + uniform);
-                //return this;
             }
-            //TODO: override the uniform1b call to specialcase booleans
 
             @Override
             public LocationalUniformHolder addUniform(UniformUpdateFrequency uniformUpdateFrequency, Uniform uniform) {
-                //TODO: error/log the type of uniform that was added (and its location)
 
                 if (uniform instanceof BooleanUniform bu) {
-                    //TODO: need to assert the loc is from a actually valid location
                     int loc = bu.getLocation();
                     var ul = patch.getUniformList();
                     if (loc<ul.length) {
@@ -421,6 +402,8 @@ public class IrisVoxyRenderPipelineData {
         };
         CommonUniforms.addDynamicUniforms(uniformBuilder, FogMode.PER_FRAGMENT);
 
+        // 部分光影在自定义 uniform 列表里请求这两个名称但不是通过 CustomUniforms 注册的，缺失时
+        // 程序会拿不到 uniform 而报错；补一个恒为 0 的默认值（不覆盖光影自己提供的版本）。
         if (!seenUniforms.contains("endFlashIntensity")) {
             FloatSupplier endFlashIntensity = () -> 0.0f;
             uniformBuilder.uniform1f("endFlashIntensity", endFlashIntensity, null);
@@ -536,7 +519,6 @@ public class IrisVoxyRenderPipelineData {
             Logger.error("Did not find all requested samplers. Found [" + samplerSet.stream().map(a->a.name).collect(Collectors.joining(", ")) + "] expected " + samplerNameSet);
         }
 
-        //TODO: generate a layout (defines) for all the samplers with the correct types
 
         StringBuilder builder = new StringBuilder();
         TextureWSampler[] samplers = new TextureWSampler[samplerSet.size()];
@@ -558,7 +540,7 @@ public class IrisVoxyRenderPipelineData {
                 int sampler = ts.sampler;
                 if (sampler != -1) {
                     glBindSampler(unit, sampler);
-                }//TODO: might need to bind sampler 0
+                }
             }
         };
         return new ImageSet(builder.toString(), bindingFunction);

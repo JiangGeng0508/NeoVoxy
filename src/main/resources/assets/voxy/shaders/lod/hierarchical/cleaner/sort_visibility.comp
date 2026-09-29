@@ -2,21 +2,17 @@
 //Uses intrinsics and other operations to perform very fast sorting
 // we dont need a propper sort, only a fuzzy sort, as in we only need to top 128 entries, but those can be unsorted
 
-//#define OUTPUT_SIZE 128
 
 layout(local_size_x=WORK_SIZE, local_size_y=1) in;
 #define OPS_PER_THREAD (OUTPUT_SIZE/WORK_SIZE)
 
 #import <voxy:lod/hierarchical/node.glsl>
 
-layout(location=0) uniform uint visibilityCounter;
-layout(location=1) uniform uint minEvictAge;
-
 layout(binding = VISIBILITY_BUFFER_BINDING, std430) restrict readonly buffer VisibilityDataBuffer {
     uint[] visibility;
 };
 
-layout(binding = OUTPUT_BUFFER_BINDING, std430) restrict volatile buffer MinimumVisibilityBuffer {//TODO: might need to be volatile
+layout(binding = OUTPUT_BUFFER_BINDING, std430) restrict volatile buffer MinimumVisibilityBuffer {
     uint minVisIds[OUTPUT_SIZE];
 };
 
@@ -24,7 +20,7 @@ layout(binding = OUTPUT_BUFFER_BINDING, std430) restrict volatile buffer Minimum
 uint atomicDerefMaxExchangeGlobal(uint atId, uint id) {
     const uint value = visibility[id];
     while (true) {
-        const uint existingId = minVisIds[atId];//TODO: check that this does what we want, and that it obtains the value of atValue, at this point
+        const uint existingId = minVisIds[atId];
         if (existingId == id) {//If we are trying to insert self, return -1
             return uint(-1);
         }
@@ -44,7 +40,6 @@ uint atomicDerefMaxExchangeGlobal(uint atId, uint id) {
     }
 }
 
-//TODO: optimize
 void bubbleSortGlobal(uint start, uint id) {
     for (uint i = start; i < OUTPUT_SIZE; i++) {
         id = atomicDerefMaxExchangeGlobal(i, id);
@@ -54,7 +49,6 @@ void bubbleSortGlobal(uint start, uint id) {
     }
 }
 
-//TODO: maybe also have a shared "cache" of the visibility data
 // meaning that the shader doesnt need to access global memory as much
 shared uint initalSort[OUTPUT_SIZE];
 
@@ -63,7 +57,7 @@ shared uint initalSort[OUTPUT_SIZE];
 uint atomicDerefMaxExchangeLocal(uint atId, uint id) {
     const uint value = visibility[id];
     while (true) {
-        const uint existingId = initalSort[atId];//TODO: check that this does what we want, and that it obtains the value of atValue, at this point
+        const uint existingId = initalSort[atId];
         if (existingId == id) {//If we are trying to insert self, return -1
             return uint(-1);
         }
@@ -102,7 +96,6 @@ bool shouldSortId(uint id) {
     if (isEmptyMesh(node) || (!hasMesh(node))) {//|| (!hasChildren(node))
         return false;
     }
-    //TODO: FIXME: DONT HARDCODE TOP LEVEL LOD LEVEL
     if (node.lodLevel == 4) {// (!hasChildren(node)) -> Assume leaf node
         return false;//Cannot remove geometry from top level node
     }
@@ -111,22 +104,6 @@ bool shouldSortId(uint id) {
         return false;
     }
 
-    /*THIS IS COMPLETLY WRONG, we need to check if all the children of the parent of the child are leaf nodes
-    // not this node
-
-    //Very sneeky hack, ensure all children are leaf nodes
-    if (hasChildren(node)&&!childListIsEmpty(node)) {
-        uint ptr = getChildPtr(node);
-        uint cnt = getChildCount(node);
-        for (uint i = 0; i < cnt; i++) {
-            UnpackedNode child;
-            unpackNode(child, i+ptr);
-            if (hasChildren(child)) {
-                return;
-            }
-        }
-    }
-    */
 
     return true;
 }
@@ -144,14 +121,6 @@ void main() {
         uint id = gl_GlobalInvocationID.x*ELEMS_PER_THREAD+i;
         uint vis = visibility[id];
         if (vis == uint(-1)) {
-            continue;
-        }
-        //Never consider geometry rendered within the last minEvictAge frames: under memory
-        // pressure the least-recently-rendered set would otherwise include currently visible
-        // sections, evicting meshes that are still on screen and making lods flicker between
-        // detail levels as they get removed and immediately rebuilt. (The counter+60 future
-        // values written on eviction underflow the subtraction and so still rank as recent.)
-        if ((visibilityCounter - vis) < minEvictAge) {
             continue;
         }
         //Quick exit if this element is already bigger than global output

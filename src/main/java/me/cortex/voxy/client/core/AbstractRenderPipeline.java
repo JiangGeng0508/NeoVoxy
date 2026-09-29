@@ -3,6 +3,7 @@ package me.cortex.voxy.client.core;
 import me.cortex.voxy.client.RenderStatistics;
 import me.cortex.voxy.client.TimingStatistics;
 import me.cortex.voxy.client.VoxyClient;
+import me.cortex.voxy.client.config.VoxyConfig;
 import me.cortex.voxy.client.core.model.ModelBakerySubsystem;
 import me.cortex.voxy.client.core.rendering.Viewport;
 import me.cortex.voxy.client.core.rendering.hierachical.AsyncNodeManager;
@@ -33,6 +34,8 @@ import static org.lwjgl.opengl.GL11C.glEnable;
 import static org.lwjgl.opengl.GL11C.glStencilFunc;
 import static org.lwjgl.opengl.GL11C.glStencilMask;
 import static org.lwjgl.opengl.GL11C.glStencilOp;
+import static org.lwjgl.opengl.GL30.GL_DEPTH_ATTACHMENT;
+import static org.lwjgl.opengl.GL30.GL_DEPTH_STENCIL_ATTACHMENT;
 import static org.lwjgl.opengl.GL30C.GL_DEPTH24_STENCIL8;
 import static org.lwjgl.opengl.GL30C.GL_FRAMEBUFFER;
 import static org.lwjgl.opengl.GL30C.glBindFramebuffer;
@@ -44,17 +47,36 @@ import static org.lwjgl.opengl.GL45.glClearNamedFramebufferfi;
 import static org.lwjgl.opengl.GL45.glGetNamedFramebufferAttachmentParameteri;
 import static org.lwjgl.opengl.GL45C.glBindTextureUnit;
 
+/** LOD 渲染管线的公共生命周期、深度交接和区段遍历实现。 */
 public abstract class AbstractRenderPipeline extends TrackedObject {
     public final RenderProperties properties;
     private final BooleanSupplier frexStillHasWork;
 
     private final AsyncNodeManager nodeManager;
     private final NodeCleaner nodeCleaner;
-    protected final HierarchicalOcclusionTraverser traversal;
+    private final HierarchicalOcclusionTraverser traversal;
 
     protected AbstractSectionRenderer<?,?> sectionRenderer;
 
+    //Command-list hold state (experimentalCmdListHold). lastBuildMVP and lastBuildCam* are the
+    //camera the current command lists were built for. The MVP carries rotation and projection
+    //only - the translation lives in viewport.section/innerTranslation - so the position must be
+    //keyed separately or a straight-line flight would count as a still camera. hasBuiltCommandLists
+    //guards the first frame - the identity-initialised matrix must never pass the compare on its own.
+    private final Matrix4f lastBuildMVP = new Matrix4f();
+    private double lastBuildCamX, lastBuildCamY, lastBuildCamZ;
+    //Vanilla folds the decaying view bob into the projection for ~10 s after the player stops, so a
+    //bit-exact MVP compare would keep the hold off for that long. The tolerance is far below a
+    //pixel and the baseline is the last BUILD, so drift cannot accumulate past it.
+    private static final float HOLD_MVP_TOLERANCE = 1.0e-6f;
+    private boolean hasBuiltCommandLists;
+    private Viewport<?> lastBuildViewport;
+    private int lastBuildWidth, lastBuildHeight;
+    private int consecutiveHolds;
+    private long heldFrameCount, builtFrameCount;
+
     private final FullscreenBlit depthStencilSetup;
+    private final FullscreenBlit sentinelRestore;
 
     public final DepthFramebuffer fb = new DepthFramebuffer(GL_DEPTH24_STENCIL8);
 
@@ -64,6 +86,8 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
     static {
         glSamplerParameteri(DEPTH_SAMPLER, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         glSamplerParameteri(DEPTH_SAMPLER, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glSamplerParameteri(DEPTH_SAMPLER, org.lwjgl.opengl.GL12C.GL_TEXTURE_WRAP_S, org.lwjgl.opengl.GL12C.GL_CLAMP_TO_EDGE);
+        glSamplerParameteri(DEPTH_SAMPLER, org.lwjgl.opengl.GL12C.GL_TEXTURE_WRAP_T, org.lwjgl.opengl.GL12C.GL_CLAMP_TO_EDGE);
     }
 
     protected AbstractRenderPipeline(RenderProperties properties, AsyncNodeManager nodeManager, NodeCleaner nodeCleaner, HierarchicalOcclusionTraverser traversal, BooleanSupplier frexSupplier, boolean deferTranslucency) {
@@ -75,12 +99,13 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         this.deferTranslucency = deferTranslucency;
 
         this.depthStencilSetup = new FullscreenBlit(properties, "voxy:post/fullscreen2.vert", "voxy:post/setup_stencil_depth.frag");
+        this.sentinelRestore = new FullscreenBlit(properties, "voxy:post/fullscreen2.vert", "voxy:post/depth0.frag");
     }
 
     //Allows pipelines to configure model baking system
     public void setupExtraModelBakeryData(ModelBakerySubsystem modelService) {}
 
-    public final void setSectionRenderer(AbstractSectionRenderer<?,?> sectionRenderer) {//Stupid java ordering not allowing something pre super
+    public final void setSectionRenderer(AbstractSectionRenderer<?,?> sectionRenderer) {
         if (this.sectionRenderer != null) throw new IllegalStateException();
         this.sectionRenderer = sectionRenderer;
     }
@@ -104,24 +129,57 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         GPUTiming.INSTANCE.marker("RO");
         rs.renderOpaque(viewport);
         var occlusionDebug = VoxyClient.getOcclusionDebugState();
+        boolean built = true;
         if (occlusionDebug==0) {
             GPUTiming.INSTANCE.marker("I");
-            this.innerPrimaryWork(viewport, depthTexture);
+            built = this.innerPrimaryWork(viewport, depthTexture);
             GPUTiming.INSTANCE.marker();
         }
 
-        if (occlusionDebug<=1) {
-            TimingStatistics.G.start();
-            rs.buildDrawCalls(viewport);
-            TimingStatistics.G.stop();
-        }
+        if (built) {
+            if (occlusionDebug<=1) {
+                TimingStatistics.G.start();
+                rs.buildDrawCalls(viewport);
+                TimingStatistics.G.stop();
+            }
 
-        GPUTiming.INSTANCE.marker("TP");
-        rs.renderTemporal(viewport);
+            GPUTiming.INSTANCE.marker("TP");
+            rs.renderTemporal(viewport);
+
+            //Advanced only after buildDrawCalls consumed the old value: the occlusion raster inside
+            //it compares visibility stamps against the PREVIOUS build's frameId, then restamps with
+            //the current one - which becomes the baseline for the next build.
+            viewport.prevBuildFrameId = viewport.frameId;
+            this.lastBuildMVP.set(viewport.MVP);
+            this.lastBuildCamX = viewport.cameraX;
+            this.lastBuildCamY = viewport.cameraY;
+            this.lastBuildCamZ = viewport.cameraZ;
+            this.hasBuiltCommandLists = true;
+            this.lastBuildViewport = viewport;
+            this.lastBuildWidth = viewport.width;
+            this.lastBuildHeight = viewport.height;
+            this.consecutiveHolds = 0;
+            this.builtFrameCount++;
+        } else {
+            //Held frame: renderOpaque above already replayed the previous command lists (they draw
+            //the identical scene - same camera, same geometry), and the translucent draw below
+            //replays its lane the same way. The temporal pass is skipped outright: it exists to
+            //paper over sections whose visibility CHANGED this frame, and on a held frame nothing
+            //did.
+            this.consecutiveHolds++;
+            this.heldFrameCount++;
+
+        }
 
         rs.postOpaquePreperation(viewport);
 
+        me.cortex.voxy.client.compat.LodPipelineHooks.beforeTranslucent(this, viewport, this.properties.closerEqualDepthCompare());
+
         this.postOpaquePreTranslucent(viewport, sourceFrameBuffer);
+
+        me.cortex.voxy.client.compat.LodPipelineHooks.translucent(
+                this, viewport, this.properties.closerEqualDepthCompare());
+
         GPUTiming.INSTANCE.marker("RT");
 
         if (!this.deferTranslucency) {
@@ -133,12 +191,13 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         glBindFramebuffer(GL_FRAMEBUFFER, sourceFrameBuffer);
     }
 
-    //Renders the LOD for a secondary pass (Vista TV) into its own already-bound off-screen target.
-    // Unlike runPipeline this does NOT initialise/resize the shared depth framebuffer, write depth
-    // back to the source gbuffer, or run the main-camera model/render-distance servicing -- none of
-    // that applies to a secondary target and it would corrupt the main camera's SSR. It DOES build
-    // the secondary viewport's own HiZ (from the secondary target's depth), traverse to fill its
-    // render list, generate its draw calls and draw them, all in one frame so there is no delay.
+    //Renders the LOD for a secondary pass (camera mods like Vista, mirrors, freecam...) into its own
+    //already-bound off-screen target. Unlike runPipeline this does NOT initialise/resize the shared
+    //depth framebuffer, write depth back to the source gbuffer, or run the main-camera
+    //model/render-distance servicing - none of that applies to a secondary target and it would
+    //corrupt the main camera's SSR. It DOES build the secondary viewport's own HiZ (from the
+    //secondary target's depth), traverse to fill its render list, generate its draw calls and draw
+    //them, all in one frame so there is no delay.
     public void renderSecondary(Viewport<?> viewport, int sourceFramebuffer) {
         var rs = ((AbstractSectionRenderer)this.sectionRenderer);
         if (rs == null) {
@@ -146,7 +205,7 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         }
 
         //Build this viewport's HiZ from the secondary target's own depth for occlusion culling.
-        // Touches only the secondary viewport's HiZ buffer, never the shared main fb.
+        //Touches only the secondary viewport's HiZ buffer, never the shared main fb.
         int depthTex = glGetNamedFramebufferAttachmentParameteri(
                 sourceFramebuffer,
                 getDepthAttachment(sourceFramebuffer),
@@ -155,19 +214,29 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         viewport.hiZBuffer.buildMipChain(depthTex, viewport.width, viewport.height);
 
         //Traverse to fill this viewport's render list, then build draw calls and draw into the
-        // caller's already-bound target. Drawn the same frame so there's no one-frame blank.
+        //caller's already-bound target. Drawn the same frame so there's no one-frame blank.
         this.traversal.doTraversal(viewport);
         rs.buildDrawCalls(viewport);
         rs.renderOpaque(viewport);
     }
 
-    protected void initDepthStencil(int sourceFrameBuffer, int targetFb, int srcWidth, int srcHeight, int width, int height) {
+    //The depth attachment point depends on whether the framebuffer carries a combined
+    //depth-stencil texture (vanilla/Iris) or a plain depth texture; querying the wrong point
+    //returns texture 0 and the secondary HiZ would be built from nothing.
+    private static int getDepthAttachment(int framebuffer) {
+        int depthObject = glGetNamedFramebufferAttachmentParameteri(
+                framebuffer,
+                GL_DEPTH_ATTACHMENT,
+                GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME
+        );
+        return depthObject != 0 ? GL_DEPTH_ATTACHMENT : GL_DEPTH_STENCIL_ATTACHMENT;
+    }
+
+    protected void initDepthStencil(Viewport<?> viewport, int sourceFrameBuffer, int targetFb, int srcWidth, int srcHeight, int width, int height) {
         glClearNamedFramebufferfi(targetFb, GL_DEPTH_STENCIL, 0, this.properties.clearDepth(), 1);
-        // using blit to copy depth from mismatched depth formats is not portable so instead a full screen pass is performed for a depth copy
-        // the mismatched formats in this case is the d32 to d24s8
         glBindFramebuffer(GL30.GL_FRAMEBUFFER, targetFb);
 
-        //If pixel passes, update stencil to 0 and set depth to 0
+        //If pixel passes, update stencil to 0 and set depth to the reprojected source depth
         glEnable(GL_DEPTH_TEST);
         glDepthFunc(GL_ALWAYS);
 
@@ -178,47 +247,87 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
 
 
         this.depthStencilSetup.bind();
-        int depthAttachment = getDepthAttachment(sourceFrameBuffer);
-        int depthTexture = glGetNamedFramebufferAttachmentParameteri(
-                sourceFrameBuffer,
-                depthAttachment,
-                GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME
-        );
+        int depthTexture = glGetNamedFramebufferAttachmentParameteri(sourceFrameBuffer, GL_DEPTH_ATTACHMENT, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME);
+        this.lastSourceDepthTex = depthTexture;
+        this.lastSrcWidth = srcWidth;
+        this.lastSrcHeight = srcHeight;
         glBindTextureUnit(0, depthTexture);
         glBindSampler(0, DEPTH_SAMPLER);
         glUniform2f(1,((float)width)/srcWidth, ((float)height)/srcHeight);
+        INVERSE_MVP.set(viewport.vanillaProjection)
+                .mul(viewport.modelView)
+                .invert()
+                .getToAddress(SCRATCH);
+        nglUniformMatrix4fv(2, 1, false, SCRATCH);
+        viewport.MVP.getToAddress(SCRATCH);
+        nglUniformMatrix4fv(3, 1, false, SCRATCH);
+        boolean halfNdc = RenderProperties.windowIsHalfNdc();
+        float ndcRemapScale = halfNdc ? 0.5f : 1.0f;
+        float ndcRemapBias = halfNdc ? 0.5f : 0.0f;
+        //xy: voxy ndc->window; zw: the inverse map for the source depth being unprojected - both
+        //sides share the one clip-control mode, and only z is affected by it
+        glUniform4f(4, ndcRemapScale, ndcRemapBias,
+                1.0f / ndcRemapScale, -ndcRemapBias / ndcRemapScale);
+        var boundary = me.cortex.voxy.client.core.rendering.LodBoundaryFade.getDistances();
+        glUniform1f(6, boundary.fadeStart());
+        glUniform1f(7, boundary.fadeEnd());
+        int cameraBlockX = (int) Math.floor(viewport.cameraX);
+        int cameraBlockY = (int) Math.floor(viewport.cameraY);
+        int cameraBlockZ = (int) Math.floor(viewport.cameraZ);
+        glUniform3i(8, cameraBlockX, cameraBlockY, cameraBlockZ);
+        glUniform3f(9,
+                (float) (viewport.cameraX - cameraBlockX),
+                (float) (viewport.cameraY - cameraBlockY),
+                (float) (viewport.cameraZ - cameraBlockZ));
+        glUniform1i(10, 0);
         glDepthMask(true);
         glColorMask(false,false,false,false);
         this.depthStencilSetup.blit();
+
+        if (boundary.enabled() && this.useBoundaryGuardPass()) {
+            glStencilMask(0x00);
+            glUniform1i(10, 1);
+            this.depthStencilSetup.blit();
+            glUniform1i(10, 0);
+            glStencilMask(0xFF);
+        }
 
 
         glDepthFunc(this.properties.closerEqualDepthCompare());
         glColorMask(true,true,true,true);
 
-        //Make voxy terrain render only where there isnt mc terrain
         glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
-        glStencilFunc(GL_EQUAL, 1, 0xFF);
+        glStencilFunc(GL_EQUAL, 1, 0x1);
     }
 
-    private static int getDepthAttachment(int framebuffer) {
-        int depthObject = glGetNamedFramebufferAttachmentParameteri(
-                framebuffer,
-                GL_DEPTH_ATTACHMENT,
-                GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME
-        );
-        return depthObject != 0 ? GL_DEPTH_ATTACHMENT : GL_DEPTH_STENCIL_ATTACHMENT;
+    protected boolean useBoundaryGuardPass() {
+        return true;
+    }
+
+    protected void restoreSentinelDepth() {
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_ALWAYS);
+        glDepthMask(true);
+        glColorMask(false,false,false,false);
+        glEnable(GL_STENCIL_TEST);
+        //Full-mask EQUAL,0: only untouched vanilla-covered pixels revert; pixels the hook meshes
+        //tagged (3) keep their real depth so SSAO/composite/the vanilla handback carry them
+        glStencilFunc(GL_EQUAL, 0, 0xFF);
+        this.sentinelRestore.blit();
+        glStencilFunc(GL_EQUAL, 1, 0x1);
+        glDepthFunc(this.properties.closerEqualDepthCompare());
+        glColorMask(true,true,true,true);
     }
 
     private static final long SCRATCH = MemoryUtil.nmemAlloc(4*4*4);
+    private static final Matrix4f INVERSE_MVP = new Matrix4f();
     protected static void transformBlitDepth(FullscreenBlit blitShader, int srcDepthTex, int dstFB, Viewport<?> viewport, Matrix4f targetTransform) {
-        // at this point the dst frame buffer doesn't have a stencil attachment so we don't need to keep the stencil test on for the blit
-        // in the worst case the dstFB does have a stencil attachment causing this pass to become 'corrupted'
         glDisable(GL_STENCIL_TEST);
         glBindFramebuffer(GL30.GL_FRAMEBUFFER, dstFB);
 
         blitShader.bind();
         glBindTextureUnit(0, srcDepthTex);
-        new Matrix4f(viewport.MVP).invert().getToAddress(SCRATCH);
+        viewport.MVP.invert(INVERSE_MVP).getToAddress(SCRATCH);
         nglUniformMatrix4fv(1, 1, false, SCRATCH);//inverse fromProjection
         targetTransform.getToAddress(SCRATCH);//new Matrix4f(tooProjection).mul(vp.modelView).get(data);
         nglUniformMatrix4fv(2, 1, false, SCRATCH);//tooProjection
@@ -229,11 +338,24 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         glDisable(GL_DEPTH_TEST);
     }
 
-    protected void innerPrimaryWork(Viewport<?> viewport, int depthBuffer) {
+    protected boolean innerPrimaryWork(Viewport<?> viewport, int depthBuffer) {
+        //All hold conditions are evaluated against the LAST BUILD, not the last frame: the command
+        //lists being reused are the last build's, so drift accumulates against that baseline.
+        //Camera position is compared exactly (a still entity lerps to the identical value); any
+        //translation, rotation, fov change or projection-jittering shader pack fails the key and
+        //forces a build, which is the safe direction.
+        boolean holdEligible = VoxyConfig.CONFIG.experimentalCmdListHold
+                && this.hasBuiltCommandLists
+                && this.lastBuildViewport == viewport
+                && this.lastBuildWidth == viewport.width && this.lastBuildHeight == viewport.height
+                && this.consecutiveHolds < VoxyConfig.CONFIG.cmdListHoldMaxFrames - 1
+                && viewport.cameraX == this.lastBuildCamX
+                && viewport.cameraY == this.lastBuildCamY
+                && viewport.cameraZ == this.lastBuildCamZ
+                && viewport.MVP.equals(this.lastBuildMVP, HOLD_MVP_TOLERANCE);
 
-        //Compute the mip chain
-        viewport.hiZBuffer.buildMipChain(depthBuffer, viewport.width, viewport.height);
-
+        boolean built = false;
+        boolean mipChainBuilt = false;
         do {
             TimingStatistics.main.stop();
             TimingStatistics.dynamic.start();
@@ -243,20 +365,50 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
             DownloadStream.INSTANCE.tick();
             TimingStatistics.D.stop();
 
-            this.nodeManager.tick(this.traversal.getNodeBuffer(), this.nodeCleaner);
+            //Ticked on held frames too - this drains worker results and issues the geometry
+            //uploads. Consuming ANY result set is a hard build trigger, not a heuristic: commands
+            //bake baseVertex offsets into the geometry arena, and the moves/frees in a consumed
+            //batch leave held command lists pointing at stale memory.
+            if (this.nodeManager.tick(this.traversal.getNodeBuffer(), this.nodeCleaner)) {
+                holdEligible = false;
+            }
             //glFlush();
 
-            this.nodeCleaner.tick(this.traversal.getNodeBuffer());//Probably do this here??
+            this.traversal.tickRequestClock();
+            if (!holdEligible) {
+                //The cleaner's visibilityId is the LRU clock the traversal stamps rendered nodes
+                //with; a held frame renders the same nodes again, so the clock only ticks on
+                //frames that traverse. The eviction it queues lands through nodeManager.tick,
+                //which forces a build by itself.
+                this.nodeCleaner.tick(this.traversal.getNodeBuffer());//Probably do this here??
+            }
 
             TimingStatistics.dynamic.stop();
             TimingStatistics.main.start();
 
-            glMemoryBarrier(GL_FRAMEBUFFER_BARRIER_BIT | GL_PIXEL_BUFFER_BARRIER_BIT);
+            if (!holdEligible) {
+                if (!mipChainBuilt) {
+                    //Compute the mip chain
+                    GPUTiming.INSTANCE.marker("HZ");
+                    viewport.hiZBuffer.buildMipChain(depthBuffer, viewport.width, viewport.height);
+                    mipChainBuilt = true;
+                }
+                GPUTiming.INSTANCE.marker("TV");
 
-            TimingStatistics.F.start();
-            this.traversal.doTraversal(viewport);
-            TimingStatistics.F.stop();
-        } while (this.frexStillHasWork.getAsBoolean());
+                glMemoryBarrier(GL_FRAMEBUFFER_BARRIER_BIT | GL_PIXEL_BUFFER_BARRIER_BIT);
+
+                TimingStatistics.F.start();
+                this.traversal.doTraversal(viewport);
+                TimingStatistics.F.stop();
+                built = true;
+            }
+
+            if (!this.frexStillHasWork.getAsBoolean()) break;
+            //frex signals it needs further traversal passes; a held frame never traverses, so
+            //honouring the hold here would spin this loop with no way for that work to finish
+            holdEligible = false;
+        } while (true);
+        return built;
     }
 
     @Override
@@ -264,6 +416,7 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         this.fb.free();
         this.sectionRenderer.free();
         this.depthStencilSetup.delete();
+        this.sentinelRestore.delete();
         super.free0();
     }
 
@@ -271,6 +424,8 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         this.sectionRenderer.addDebug(debug);
         this.traversal.addDebug(debug);
         RenderStatistics.addDebug(debug);
+        debug.add("cmdHold: " + VoxyConfig.CONFIG.experimentalCmdListHold + " held " + this.heldFrameCount
+                + " built " + this.builtFrameCount + " run " + this.consecutiveHolds);
     }
 
     //Binds the framebuffer and any other bindings needed for rendering
@@ -287,10 +442,6 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
 
     public boolean hasTAA() {
         return false;
-    }
-
-    public boolean isValid() {
-        return true;
     }
 
     //null means no function, otherwise return the taa injection function
@@ -312,7 +463,25 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         return null;
     }
 
-    //Null means no scaling factor
-    public float[] getRenderScalingFactor() {return null;}
+    public float[] getRenderScalingFactor() {
+        return null;
+    }
+
+    public boolean useDynamicFarPlane() {
+        return false;
+    }
+
+    //Depth texture LOD geometry renders into, for sable contraption depth-occlusion compositing.
+    //Default none; only the Iris pipeline provides one.
+    public int getSableOcclusionDepthTexture() {
+        return 0;
+    }
+
+    //Inputs of the last initDepthStencil, for the occlusion debug recorder
+    private int lastSourceDepthTex;
+    private int lastSrcWidth, lastSrcHeight;
+    public final int debugSourceDepthTex() { return this.lastSourceDepthTex; }
+    public final int debugSrcWidth() { return this.lastSrcWidth; }
+    public final int debugSrcHeight() { return this.lastSrcHeight; }
 
 }

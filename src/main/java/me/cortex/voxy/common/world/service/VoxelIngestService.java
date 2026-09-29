@@ -11,38 +11,50 @@ import me.cortex.voxy.common.world.WorldEngine;
 import me.cortex.voxy.common.world.WorldUpdater;
 import me.cortex.voxy.commonImpl.VoxyCommon;
 import me.cortex.voxy.commonImpl.WorldIdentifier;
+import me.cortex.voxy.commonImpl.compat.DomumOrnamentumCompat;
 import net.minecraft.core.SectionPos;
 import net.minecraft.world.level.LightLayer;
+import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.chunk.DataLayer;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.LevelChunkSection;
+import net.minecraft.world.level.chunk.PalettedContainer;
 import net.minecraft.world.level.lighting.LayerLightSectionStorage;
 import org.jetbrains.annotations.NotNull;
 
 import java.util.concurrent.ConcurrentLinkedDeque;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.Consumer;
 
+/** 将 Minecraft 区段快照排队转换为 Voxy 的体素区段。 */
 public class VoxelIngestService {
     private static final ThreadLocal<VoxelizedSection> SECTION_CACHE = ThreadLocal.withInitial(VoxelizedSection::createEmpty);
     private final Service service;
-    private record IngestSection(int cx, int cy, int cz, WorldEngine world, LevelChunkSection section, DataLayer blockLight, DataLayer skyLight, IngestBatch batch){}
+    /** 队列元素持有一个 WorldEngine 引用，任务完成或丢弃时必须释放。 */
+    private record IngestSection(
+            int cx, int cy, int cz,
+            WorldEngine world,
+            LevelChunk chunk,
+            BlockEntity[] domumBlockEntities,
+            LevelChunkSection section,
+            DataLayer blockLight,
+            DataLayer skyLight,
+            me.cortex.voxy.commonImpl.compat.littletiles.LittleTilesCompat.SectionSnapshot littleTiles,
+            IngestBatch batch) {
+    }
     private final ConcurrentLinkedDeque<IngestSection> ingestQueue = new ConcurrentLinkedDeque<>();
 
     /**
-     * Tracks completion of a group of enqueued ingest tasks. The caller declares how many tasks
-     * it will enqueue via {@link #await(int)} BEFORE enqueueing them; every completed (or refused)
-     * task must be reported exactly once via {@link #taskDone}. When the count reaches zero the
-     * callback fires with {@link #succeeded()} reporting whether anything failed. The callback may
-     * run on any thread.
+     * Tracks completion of a group of enqueued ingest tasks. The caller declares how many tasks it
+     * will enqueue via {@link #await(int)} BEFORE enqueueing them; every completed (or refused) task
+     * must be reported exactly once via {@link #taskDone}. When the count reaches zero the callback
+     * fires with {@link #succeeded()} reporting whether anything failed. The callback may run on any
+     * thread.
      */
     public static final class IngestBatch {
-        private final AtomicInteger remaining = new AtomicInteger();
-        private final AtomicBoolean failed = new AtomicBoolean(false);
-        private final Consumer<IngestBatch> onDone;
+        private final java.util.concurrent.atomic.AtomicInteger remaining = new java.util.concurrent.atomic.AtomicInteger();
+        private final java.util.concurrent.atomic.AtomicBoolean failed = new java.util.concurrent.atomic.AtomicBoolean(false);
+        private final java.util.function.Consumer<IngestBatch> onDone;
 
-        private IngestBatch(Consumer<IngestBatch> onDone) {
+        private IngestBatch(java.util.function.Consumer<IngestBatch> onDone) {
             this.onDone = onDone;
         }
 
@@ -66,7 +78,7 @@ public class VoxelIngestService {
         }
     }
 
-    public static IngestBatch createBatch(Consumer<IngestBatch> onDone) {
+    public static IngestBatch createBatch(java.util.function.Consumer<IngestBatch> onDone) {
         return new IngestBatch(onDone);
     }
 
@@ -74,41 +86,63 @@ public class VoxelIngestService {
         this.service = pool.createServiceNoCleanup(()->this::processJob, 5000, "Ingest service");
     }
 
+    // ---- 后台任务 ------------------------------------------------------
+
     private void processJob() {
         var task = this.ingestQueue.pop();
-        task.world.markActive();
+        boolean ok = false;
 
-        boolean ok;
-        try {
-            this.processTask(task);
-            ok = true;
-        } catch (Throwable t) {
-            Logger.error("Voxy ingest had an exception while processing section [" + task.cx + ", " + task.cy + ", " + task.cz + "] please check logs and report error", t);
-            ok = false;
-        }
-        if (task.batch != null) {
-            task.batch.taskDone(ok);
-        }
-    }
-
-    private void processTask(IngestSection task) {
         var section = task.section;
-        var vs = SECTION_CACHE.get().setPosition(task.cx, task.cy, task.cz);
+        long tIngest = me.cortex.voxy.commonImpl.VoxyProfile.begin();
+        try {
+            //Inside the try: the queue holds a world ref per task and the finally below releases it, so
+            //anything that can throw has to be covered or the world can never be closed again
+            DomumOrnamentumCompat.beginSection(
+                    task.world.getMapper(), task.world.storage, task.domumBlockEntities,
+                    task.section, task.cx, task.cy, task.cz);
+            me.cortex.voxy.commonImpl.compat.CreateCopycatCompat.beginSection(task.world.getMapper(), task.world.storage, task.chunk, task.section, task.cx, task.cy, task.cz);
+            me.cortex.voxy.commonImpl.compat.FramedBlocksCompat.beginSection(task.world.getMapper(), task.world.storage, task.chunk, task.section, task.cx, task.cy, task.cz);
+            me.cortex.voxy.commonImpl.compat.littletiles.LittleTilesCompat.beginSection(
+                    task.world.storage, task.littleTiles, task.section, task.cx, task.cy, task.cz);
+            //Read off the section rather than the chunk's block entities: sections streamed by VSS arrive
+            //with no chunk at all, and a beacon is a block whether or not its block entity is here.
+            long tBeacon = me.cortex.voxy.commonImpl.VoxyProfile.begin();
+            me.cortex.voxy.common.world.other.BeaconScanner.scan(
+                    task.world.getBeaconIndex(), section, task.cx, task.cy, task.cz);
+            me.cortex.voxy.commonImpl.VoxyProfile.end("ingest/beaconScan", tBeacon);
+            var vs = SECTION_CACHE.get().setPosition(task.cx, task.cy, task.cz);
 
-        if (section.hasOnlyAir() && task.blockLight==null && task.skyLight==null) {//If the chunk section has lighting data, propagate it
-            WorldUpdater.insertUpdate(task.world, vs.zero());
-        } else {
-            VoxelizedSection csec = WorldConversionFactory.convert(
-                    vs,
-                    task.world.getMapper(),
-                    section.getStates(),
-                    section.getBiomes(),
-                    getLightingSupplier(task)
-            );
-            WorldVoxilizedSectionMipper.mipSection(csec, task.world.getMapper());
-            WorldUpdater.insertUpdate(task.world, csec);
+            if (section.hasOnlyAir() && task.blockLight==null && task.skyLight==null) {//If the chunk section has lighting data, propagate it
+                WorldUpdater.insertUpdate(task.world, vs.uniformAir(me.cortex.voxy.common.world.other.Mapper.airWithLight(0x0F)));
+            } else {
+                VoxelizedSection csec = WorldConversionFactory.convert(
+                        vs,
+                        task.world.getMapper(),
+                        section.getStates(),
+                        section.getBiomes(),
+                        getLightingSupplier(task)
+                );
+                WorldVoxilizedSectionMipper.mipSection(csec, task.world.getMapper());
+                WorldUpdater.insertUpdate(task.world, csec);
+            }
+            ok = true;
+        } finally {
+            DomumOrnamentumCompat.endSection();
+            me.cortex.voxy.commonImpl.compat.CreateCopycatCompat.endSection();
+            me.cortex.voxy.commonImpl.compat.FramedBlocksCompat.endSection();
+            me.cortex.voxy.commonImpl.compat.littletiles.LittleTilesCompat.endSection();
+            //The queue holds a ref per task rather than a one-shot markActive stamp, so a large backlog
+            //on a laggy system cannot let the idle cleaner close the world out from under its own
+            //pending ingests
+            task.world.releaseRef();
+            me.cortex.voxy.commonImpl.VoxyProfile.end("ingest/section", tIngest);
+            if (task.batch != null) {
+                task.batch.taskDone(ok);
+            }
         }
     }
+
+    // ---- 光照快照 ------------------------------------------------------
 
     @NotNull
     private static ILightingSupplier getLightingSupplier(IngestSection task) {
@@ -145,6 +179,8 @@ public class VoxelIngestService {
         return true;
     }
 
+    // ---- 区段入队 ------------------------------------------------------
+
     public boolean enqueueIngest(WorldEngine engine, LevelChunk chunk) {
         if (!this.service.isLive()) {
             return false;
@@ -155,6 +191,11 @@ public class VoxelIngestService {
 
         engine.markActive();
 
+        // Snapshot and group once on the caller thread. Each section job receives only its Domum
+        // entities, avoiding repeated traversal of the live block-entity map on ingest workers.
+        var domumBlockEntities = DomumOrnamentumCompat.captureBlockEntitiesBySection(chunk);
+        var littleTiles = me.cortex.voxy.commonImpl.compat.littletiles.LittleTilesCompat.capture(chunk);
+
         var lightingProvider = chunk.getLevel().getLightEngine();
         boolean gotLighting = false;
 
@@ -164,7 +205,6 @@ public class VoxelIngestService {
             i++;
             if (section == null || !shouldIngestSection(section, chunk.getPos().x, i, chunk.getPos().z)) continue;
             allEmpty&=section.hasOnlyAir();
-            //if (section.isEmpty()) continue;
             var pos = SectionPos.of(chunk.getPos(), i);
             if (lightingProvider.getDebugSectionType(LightLayer.SKY, pos) != LayerLightSectionStorage.SectionType.LIGHT_AND_DATA && lightingProvider.getDebugSectionType(LightLayer.BLOCK, pos) != LayerLightSectionStorage.SectionType.LIGHT_AND_DATA)
                 continue;
@@ -177,8 +217,11 @@ public class VoxelIngestService {
             for (var section : chunk.getSections()) {
                 i++;
                 if (section == null || !shouldIngestSection(section, chunk.getPos().x, i, chunk.getPos().z)) continue;
-                engine.markActive();
-                this.ingestQueue.add(new IngestSection(chunk.getPos().x, i, chunk.getPos().z, engine, section, null, null, null));
+                engine.acquireRef();
+                this.ingestQueue.add(new IngestSection(
+                        chunk.getPos().x, i, chunk.getPos().z, engine, chunk,
+                        domumBlockEntities.forSection(i), snapshotCustomSection(section), null, null,
+                        littleTiles == null ? null : littleTiles.section(i), null));
                 try {
                     this.service.execute();
                 } catch (Exception e) {
@@ -200,7 +243,6 @@ public class VoxelIngestService {
         for (var section : chunk.getSections()) {
             i++;
             if (section == null || !shouldIngestSection(section, chunk.getPos().x, i, chunk.getPos().z)) continue;
-            //if (section.isEmpty()) continue;
             var pos = SectionPos.of(chunk.getPos(), i);
 
             var bl = blp.getDataLayerData(pos);
@@ -211,14 +253,22 @@ public class VoxelIngestService {
             var sl = slp.getDataLayerData(pos);
             if (sl != null) {
                 sl = sl.copy();
+            } else {
+                //Sections above the sky-light storage range have no DataLayer but are implicitly fully lit.
+                //Null-data sections are uniform, so probe one block for the value; dark sections and
+                //skylight-less dimensions probe 0 and stay unchanged.
+                int uniform = slp.getLightValue(pos.origin());
+                if (uniform > 0) {
+                    sl = new DataLayer(uniform);
+                }
             }
 
             //If its null for either, assume failure to obtain lighting and ignore section
-            //if (blNone && slNone) {
-            //    continue;
-            //}
-            engine.markActive();
-            this.ingestQueue.add(new IngestSection(chunk.getPos().x, i, chunk.getPos().z, engine, section, bl, sl, null));//TODO: fixme, this is technically not safe todo on the chunk load ingest, we need to copy the section data so it cant be modified while being read
+            engine.acquireRef();
+            this.ingestQueue.add(new IngestSection(
+                    chunk.getPos().x, i, chunk.getPos().z, engine, chunk,
+                    domumBlockEntities.forSection(i), snapshotCustomSection(section), bl, sl,
+                    littleTiles == null ? null : littleTiles.section(i), null));
             try {
                 this.service.execute();
             } catch (Exception e) {
@@ -233,7 +283,7 @@ public class VoxelIngestService {
         return this.service.numJobs();
     }
 
-    /** Waits for the ingest backlog to drain; returns false on timeout or interrupt. */
+    /** 等待摄取积压清空；超时或中断时返回 false。 */
     public boolean blockTillEmpty(long timeoutMs) {
         long deadline = System.currentTimeMillis() + timeoutMs;
         while (this.service.isLive() && this.service.numJobs() != 0) {
@@ -250,11 +300,21 @@ public class VoxelIngestService {
         return true;
     }
 
+    /** 停止服务并释放队列中尚未执行任务持有的世界引用。 */
     public void shutdown() {
         this.service.shutdown();
+        //Every queued task still holds a world ref - drain and release so worlds can close
+        while (!this.ingestQueue.isEmpty()) {
+            var task = this.ingestQueue.pop();
+            if (task != null) {
+                task.world().releaseRef();
+            }
+        }
     }
 
-    //Utility method to ingest a chunk into the given WorldIdentifier or world
+    // ---- 公共入口 ------------------------------------------------------
+
+    /** 将已加载区块送入对应世界的摄取队列。 */
     public static boolean tryIngestChunk(WorldIdentifier worldId, LevelChunk chunk) {
         if (worldId == null) return false;
         var instance = VoxyCommon.getInstance();
@@ -265,46 +325,100 @@ public class VoxelIngestService {
         return instance.getIngestService().enqueueIngest(engine, chunk);
     }
 
-    //Try to automatically ingest the chunk into the correct world
+    /** 根据区块所在维度自动选择目标世界。 */
     public static boolean tryAutoIngestChunk(LevelChunk chunk) {
         return tryIngestChunk(WorldIdentifier.of(chunk.getLevel()), chunk);
     }
 
-    private boolean rawIngest0(WorldEngine engine, LevelChunkSection section, int x, int y, int z, DataLayer bl, DataLayer sl) {
-        return this.rawIngest0(engine, section, x, y, z, bl, sl, null);
+    /** 供网络/兼容层提交单个区段，调用方不直接接触队列引用计数。 */
+    private boolean rawIngest0(WorldEngine engine, LevelChunk chunk, LevelChunkSection section, int x, int y, int z, DataLayer bl, DataLayer sl) {
+        return this.rawIngest0(engine, chunk, section, x, y, z, bl, sl, null);
     }
 
-    private boolean rawIngest0(WorldEngine engine, LevelChunkSection section, int x, int y, int z, DataLayer bl, DataLayer sl, IngestBatch batch) {
-        this.ingestQueue.add(new IngestSection(x, y, z, engine, section, bl, sl, batch));
+    private boolean rawIngest0(WorldEngine engine, LevelChunk chunk, LevelChunkSection section, int x, int y, int z, DataLayer bl, DataLayer sl, IngestBatch batch) {
+        engine.acquireRef();
+        BlockEntity[] domumBlockEntities =
+                DomumOrnamentumCompat.captureBlockEntities(chunk, section);
+        var littleTiles = me.cortex.voxy.commonImpl.compat.littletiles.LittleTilesCompat.capture(chunk);
+        this.ingestQueue.add(new IngestSection(
+                x, y, z, engine, chunk, domumBlockEntities, snapshotCustomSection(section), bl, sl,
+                littleTiles == null ? null : littleTiles.section(y), batch));
         try {
             this.service.execute();
             return true;
         } catch (Exception e) {
+            //Task stays queued; shutdown's queue drain releases its ref exactly once
             Logger.error("Executing had an error: assume shutting down, aborting",e);
-            //Batch accounting for the refused task is owned by the caller (it sees the false return)
             return false;
         }
     }
 
     public static boolean rawIngest(WorldIdentifier id, LevelChunkSection section, int x, int y, int z, DataLayer bl, DataLayer sl) {
-        return rawIngest(id, section, x, y, z, bl, sl, null);
+        return rawIngest(id, recoverChunk(id, x, z), section, x, y, z, bl, sl);
     }
 
     public static boolean rawIngest(WorldIdentifier id, LevelChunkSection section, int x, int y, int z, DataLayer bl, DataLayer sl, IngestBatch batch) {
+        return rawIngest(id, recoverChunk(id, x, z), section, x, y, z, bl, sl, batch);
+    }
+
+    private static LevelChunk recoverChunk(WorldIdentifier id, int chunkX, int chunkZ) {
+        if (id == null) {
+            return null;
+        }
+        if (!net.neoforged.fml.loading.FMLEnvironment.dist.isClient()) {
+            return null;
+        }
+        try {
+            //Named only here, so this class never resolves a client type on a dedicated server
+            return me.cortex.voxy.client.ClientChunkRecovery.find(id, chunkX, chunkZ);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    public static boolean rawIngest(WorldIdentifier id, LevelChunk chunk, LevelChunkSection section, int x, int y, int z, DataLayer bl, DataLayer sl) {
         if (id == null) return false;
         var engine = id.getOrCreateEngine();
         if (engine == null) return false;
-        return rawIngest(engine, section, x, y, z, bl, sl, batch);
+        return rawIngest(engine, chunk, section, x, y, z, bl, sl);
     }
 
-    public static boolean rawIngest(WorldEngine engine, LevelChunkSection section, int x, int y, int z, DataLayer bl, DataLayer sl) {
-        return rawIngest(engine, section, x, y, z, bl, sl, null);
+    public static boolean rawIngest(WorldIdentifier id, LevelChunk chunk, LevelChunkSection section, int x, int y, int z, DataLayer bl, DataLayer sl, IngestBatch batch) {
+        if (id == null) return false;
+        var engine = id.getOrCreateEngine();
+        if (engine == null) return false;
+        return rawIngest(engine, chunk, section, x, y, z, bl, sl, batch);
     }
 
-    public static boolean rawIngest(WorldEngine engine, LevelChunkSection section, int x, int y, int z, DataLayer bl, DataLayer sl, IngestBatch batch) {
+    public static boolean rawIngest(WorldEngine engine, LevelChunk chunk, LevelChunkSection section, int x, int y, int z, DataLayer bl, DataLayer sl) {
         if (!shouldIngestSection(section, x, y, z)) return false;
+        if (chunk == null) {
+            me.cortex.voxy.commonImpl.PerfStats.sectionIngestedChunkless.increment();
+        } else {
+            me.cortex.voxy.commonImpl.PerfStats.sectionIngestedWithChunk.increment();
+        }
         if (engine.instanceIn == null) return false;
-        if (!engine.instanceIn.isIngestEnabled(null)) return false;//TODO: dont pass in null
-        return engine.instanceIn.getIngestService().rawIngest0(engine, section, x, y, z, bl, sl, batch);
+        if (!engine.instanceIn.isIngestEnabled(null)) return false;
+        return engine.instanceIn.getIngestService().rawIngest0(engine, chunk, section, x, y, z, bl, sl);
+    }
+
+    public static boolean rawIngest(WorldEngine engine, LevelChunk chunk, LevelChunkSection section, int x, int y, int z, DataLayer bl, DataLayer sl, IngestBatch batch) {
+        if (!shouldIngestSection(section, x, y, z)) return false;
+        if (chunk == null) {
+            me.cortex.voxy.commonImpl.PerfStats.sectionIngestedChunkless.increment();
+        } else {
+            me.cortex.voxy.commonImpl.PerfStats.sectionIngestedWithChunk.increment();
+        }
+        if (engine.instanceIn == null) return false;
+        if (!engine.instanceIn.isIngestEnabled(null)) return false;
+        return engine.instanceIn.getIngestService().rawIngest0(engine, chunk, section, x, y, z, bl, sl, batch);
+    }
+
+    /** 非标准调色板需要拷贝，避免异步线程读取主线程正在修改的容器。 */
+    private static LevelChunkSection snapshotCustomSection(LevelChunkSection section) {
+        if (section == null || section.getStates().getClass() == PalettedContainer.class) {
+            return section;
+        }
+        return new LevelChunkSection(section.getStates().copy(), section.getBiomes());
     }
 }

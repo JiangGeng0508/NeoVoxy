@@ -42,10 +42,10 @@ public class MixinLevelRenderer {
             var renderer = ((IGetVoxyRenderSystem) this).voxy$getRenderSystem();
             if (renderer != null) {
                 //Fix the fucking viewport dims, fuck iris. Iris can leave a 0-sized viewport at
-                // capture time on the main pass. Only repair that broken case: secondary level
-                // renders (Vista TVs/mirrors, freecam...) deliberately run with a small viewport
-                // matching their own off-screen target, and stomping it here renders everything
-                // with the wrong projection size.
+                //capture time on the main pass. Only repair that broken case: secondary level
+                //renders (Vista TVs/mirrors, freecam...) deliberately run with a small viewport
+                //matching their own off-screen target, and stomping it here renders everything
+                //with the wrong projection size.
                 int[] dims = new int[4];
                 glGetIntegerv(GL_VIEWPORT, dims);
                 if (dims[2] <= 0 || dims[3] <= 0) {

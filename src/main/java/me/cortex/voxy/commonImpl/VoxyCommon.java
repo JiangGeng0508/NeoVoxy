@@ -2,24 +2,54 @@ package me.cortex.voxy.commonImpl;
 
 import me.cortex.voxy.common.Logger;
 import me.cortex.voxy.common.config.Serialization;
-import me.cortex.voxy.commonImpl.network.VoxyNetwork;
 import net.neoforged.api.distmarker.Dist;
-import net.neoforged.fml.ModContainer;
-import net.neoforged.fml.common.Mod;
-import net.neoforged.fml.loading.FMLEnvironment;
+import net.neoforged.fml.ModList;
+import net.neoforged.fml.loading.FMLLoader;
+import net.neoforged.fml.loading.LoadingModList;
 
-@Mod(VoxyCommon.MOD_ID)
+/**
+ * Common initialization for Voxy on NeoForge.
+ *
+ * IMPORTANT: This class may be loaded very early via mixin class loading,
+ * before NeoForge's ModList is populated. We must use LoadingModList or
+ * FMLLoader APIs that are available during early bootstrap.
+ */
 public class VoxyCommon {
     public static final String MOD_ID = "voxy";
-    public static String MOD_VERSION = "<UNKNOWN>";
-    public static final boolean IS_DEDICATED_SERVER = FMLEnvironment.dist == Dist.DEDICATED_SERVER;
-    public static final boolean IS_IN_MINECRAFT = true;
+    public static final String MOD_VERSION;
+    public static final boolean IS_DEDICATED_SERVER;
+    public static final boolean IS_IN_MINECRAFT;
 
-    public VoxyCommon(ModContainer modContainer) {
-        MOD_VERSION = modContainer.getModInfo().getVersion().toString();
-        Serialization.init();
-        modContainer.getEventBus().addListener((net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent event) ->
-                VoxyNetwork.register(event.registrar("1")));
+    static {
+        // Use LoadingModList for early access - ModList.get() may be null during mixin loading
+        var modFile = LoadingModList.get() != null ? LoadingModList.get().getModFileById("voxy") : null;
+        if (modFile == null) {
+            IS_IN_MINECRAFT = false;
+            Logger.error("Running voxy without minecraft");
+            MOD_VERSION = "0.4.3-beta.1";
+            IS_DEDICATED_SERVER = false;
+        } else {
+            IS_IN_MINECRAFT = true;
+            // Get version from LoadingModList (available early)
+            var version = modFile.getMods().stream()
+                    .filter(m -> m.getModId().equals("voxy"))
+                    .findFirst()
+                    .map(m -> m.getVersion().toString())
+                    .orElse("0.4.3-beta.1");
+            MOD_VERSION = version;
+            IS_DEDICATED_SERVER = FMLLoader.getDist() == Dist.DEDICATED_SERVER;
+            Serialization.init();
+        }
+    }
+
+    public static String displayName() {
+        var list = ModList.get();
+        if (list == null) {
+            return "Neo-Voxy";
+        }
+        return list.getModContainerById("voxy")
+                .map(container -> container.getModInfo().getDisplayName())
+                .orElse("Neo-Voxy");
     }
 
     //This is hardcoded like this because people do not understand what they are doing
@@ -60,7 +90,6 @@ public class VoxyCommon {
 
     public static void createInstance() {
         if (FACTORY == null) {
-            //Logger.info("Voxy factory");
             return;
         }
         if (INSTANCE != null) {

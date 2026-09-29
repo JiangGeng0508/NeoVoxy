@@ -64,7 +64,6 @@ public class BasicSectionGeometryManager extends AbstractSectionGeometryManager 
         //Invalidate the section id
         this.invalidatedSectionIds.add(newId);
 
-        //HierarchicalOcclusionTraverser.HACKY_SECTION_COUNT = this.allocationSet.getCount();
         return newId;
     }
 
@@ -87,7 +86,6 @@ public class BasicSectionGeometryManager extends AbstractSectionGeometryManager 
         return new SectionMeta(geometry.position, geometry.aabb, geometryPtr, (int) (geometry.geometryBuffer.size/8), geometry.offsets, geometry.childExistence);
     }
 
-    //TODO: move child existence to and external thing to not get confused
     private record SectionMeta(long position, int aabb, int geometryPtr, int itemCount, int[] offsets, byte childExistence) {
         public void writeMetadata(long ptr) {
             //Split the long into 2 ints to solve endian issues
@@ -135,10 +133,8 @@ public class BasicSectionGeometryManager extends AbstractSectionGeometryManager 
         }
         var oldMetadata = this.sectionMetadata.set(id, null);
         this.geometry.downloadRemove(oldMetadata.geometryPtr, buffer ->
-                //TODO: occupancy
             callback.accept(new BuiltSection(oldMetadata.position, oldMetadata.childExistence, oldMetadata.aabb, buffer.copy(), oldMetadata.offsets, null))
         );
-        //this.geometry.free(oldMetadata.geometryPtr);
         this.invalidatedSectionIds.add(id);
     }
 

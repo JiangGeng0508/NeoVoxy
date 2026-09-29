@@ -17,13 +17,6 @@ public class GlFence extends TrackedObject {
 
     public boolean signaled() {
         if (!this.signaled) {
-            /*
-            int ret = glClientWaitSync(this.fence, 0, 0);
-            if (ret == GL_ALREADY_SIGNALED || ret == GL_CONDITION_SATISFIED) {
-                this.signaled = true;
-            } else if (ret != GL_TIMEOUT_EXPIRED) {
-                throw new IllegalStateException("Poll for fence failed, glError: " + glGetError());
-            }*/
             MemoryUtil.memPutInt(SCRATCH, -1);
             nglGetSynciv(this.fence, GL_SYNC_STATUS, 1, 0, SCRATCH);
             int val = MemoryUtil.memGetInt(SCRATCH);

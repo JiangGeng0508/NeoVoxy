@@ -14,7 +14,53 @@ public abstract class StorageBackend implements IMappingStorage, IStoredSectionP
 
     public abstract void setSectionData(long key, MemoryBuffer data);
 
+    public interface SectionWriteBatch extends AutoCloseable {
+        void put(long key, MemoryBuffer data);
+        long dataSize();
+        //Apply and empty the batch; the batch stays usable afterwards
+        void commit();
+        @Override void close();
+    }
+
+    //Default: replay entries one at a time, i.e. exactly today's behaviour. Backends that can do better
+    //(rocksdb) override; the rest need no changes.
+    public SectionWriteBatch createSectionWriteBatch() {
+        return new SectionWriteBatch() {
+            private long bytes;
+
+            @Override
+            public void put(long key, MemoryBuffer data) {
+                StorageBackend.this.setSectionData(key, data);
+                this.bytes += data.size;
+            }
+
+            @Override public long dataSize() { return this.bytes; }
+            @Override public void commit() { this.bytes = 0; }
+            @Override public void close() {}
+        };
+    }
+
     public abstract void deleteSectionData(long key);
+
+    public interface AuxEntryConsumer {
+        void accept(long key, byte[] value);
+    }
+
+    public boolean supportsAuxTable(String table) {
+        return false;
+    }
+
+    public void putAux(String table, long key, byte[] value) {}
+
+    //Single-key read. Used by consumers that ask about one section at a time rather than loading a whole
+    //table up front, so nothing has to be held in memory between the write and the read.
+    public byte[] getAux(String table, long key) {
+        return null;
+    }
+
+    public void deleteAux(String table, long key) {}
+
+    public void forEachAux(String table, AuxEntryConsumer consumer) {}
 
     public abstract void flush();
 

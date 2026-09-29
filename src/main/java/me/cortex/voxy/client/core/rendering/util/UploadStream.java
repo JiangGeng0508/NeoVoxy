@@ -66,8 +66,6 @@ public class UploadStream {
             throw new IllegalStateException("Negative size");
         }
 
-        //Force natural size alignment, this should ensure that _all_ allocations are aligned to this size, note, this only effects the allocation block
-        // not how much data is moved or copied
         size = alignUp(size, BASE_ALLOCATION_ALIGNEMENT);
         //size = (size+15)&~15;//Alignment to 16 bytes
 
@@ -80,11 +78,8 @@ public class UploadStream {
             if ((!USE_COHERENT)&&this.caddr!=-1) {
                 glFlushMappedNamedBufferRange(this.uploadBuffer.id, this.caddr, this.offset);
             }
-            this.caddr = this.allocationArena.alloc((int) size);//TODO: replace with allocFromLargest
+            this.caddr = this.allocationArena.alloc((int) size);
             if (this.caddr == SIZE_LIMIT) {
-                //Note! we dont commit here, we only try to flush existing memory copies, we dont commit
-                // since commit is an explicit op saying we are done any to push upload everything
-                //We dont commit since we dont want to invalidate existing upload pointers
                 Logger.error("Upload stream full, preemptively committing, this could cause bad things to happen");
                 int attempts = 10;
                 while (--attempts != 0 && this.caddr == SIZE_LIMIT) {

@@ -1,6 +1,5 @@
 package me.cortex.voxy.client.config;
 
-import com.mojang.datafixers.types.Func;
 import me.cortex.voxy.common.util.Pair;
 import net.caffeinemc.mods.sodium.api.config.ConfigState;
 import net.caffeinemc.mods.sodium.api.config.StorageEventHandler;
@@ -38,25 +37,6 @@ public class SodiumConfigBuilder {
             this(tester, mapIds(dependencies), joinParent);
         }
 
-        /*
-        public static Enabler joinAnd(Enabler... enablers) {
-            Set<ResourceLocation> identifiers = new HashSet<>();
-            for (var e : enablers) {
-                for (var i : e.dependencies) {
-                    identifiers.add(i);
-                }
-            }
-            Predicate<ConfigState> tester = state->{
-                for (var test:enablers) {
-                    if (!test.tester.test(state)) {
-                        return false;
-                    }
-                }
-                return true;
-            };
-            var newEnabler = new Enabler(tester, identifiers.toArray(ResourceLocation[]::new));
-            return newEnabler;
-        }*/
         public Enabler joinAnd(Enabler parent) {
             Set<ResourceLocation> identifiers = new HashSet<>();
             for (var i : this.dependencies) {
@@ -121,6 +101,10 @@ public class SodiumConfigBuilder {
             return this.setEnabler0(new Enabler(enabler, dependencies, true));
         }
 
+        public TYPE setEnablerInherit(Predicate<ConfigState> enabler) {
+            return this.setEnabler0(new Enabler(enabler, new ResourceLocation[0], true));
+        }
+
         public TYPE setEnablerInherit(Predicate<ConfigState> enabler, ResourceLocation... dependencies) {
             return this.setEnabler0(new Enabler(enabler, dependencies, true));
         }
@@ -131,6 +115,11 @@ public class SodiumConfigBuilder {
             }
             var id = ResourceLocation.parse(enabler);
             return this.setEnabler(s->s.readBooleanOption(id), enabler);
+        }
+
+        public TYPE setEnablerInherit(String enabler) {
+            var id = ResourceLocation.parse(enabler);
+            return this.setEnablerInherit(s->s.readBooleanOption(id), enabler);
         }
 
         public TYPE setEnablerAND(String... enablers) {
@@ -174,13 +163,21 @@ public class SodiumConfigBuilder {
     }
 
     public static class Group extends Enableable<Group> {
+        protected @Nullable Component name;
         protected Option[] options;
         public Group(Option... options) {
+            this.options = options;
+        }
+        public Group(Component name, Option... options) {
+            this.name = name;
             this.options = options;
         }
 
         protected OptionGroupBuilder create(ConfigBuilder builder, BuildCtx ctx) {
             var group = builder.createOptionGroup();
+            if (this.name != null) {
+                group.setName(this.name);
+            }
             for (var option : this.options) {
                 group.addOption(option.create(builder, ctx));
             }
@@ -194,7 +191,6 @@ public class SodiumConfigBuilder {
     }
 
     public static abstract class Option <TYPE, OPTION extends Option<TYPE,OPTION,STYPE>, STYPE extends StatefulOptionBuilder<TYPE>> extends Enableable<Option<TYPE,OPTION,STYPE>> {
-        //Setter returns a post save update set
         protected String id;
         protected Component name;
         protected Component tooltip;
@@ -202,6 +198,13 @@ public class SodiumConfigBuilder {
         protected Supplier<TYPE> getter;
         protected Consumer<TYPE> setter;
         protected OptionImpact impact;
+        private TYPE defaultValue;
+        private boolean explicitDefault;
+        public OPTION setDefault(TYPE value) {
+            this.defaultValue = value;
+            this.explicitDefault = true;
+            return (OPTION) this;
+        }
         public Option(String id, Component name, Component tooltip, Supplier<TYPE> getter, Consumer<TYPE> setter) {
             this.id = id;
             this.name = name;
@@ -278,7 +281,7 @@ public class SodiumConfigBuilder {
 
             option.setStorageHandler(ctx.saveHandler);
 
-            option.setDefaultValue(this.getter.get());
+            option.setDefaultValue(this.explicitDefault ? this.defaultValue : this.getter.get());
 
             if (this.tooltipSupplier != null) {
                 option.setTooltip(this.tooltipSupplier);

@@ -17,10 +17,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.StampedLock;
 import java.util.function.Consumer;
 
-//TODO: Add a render cache
 
 
-//TODO: to add remove functionallity add a "defunked" variable to the build task and set it to true on remove
 // and process accordingly
 public class RenderGenerationService {
     private static final int MAX_HOLDING_SECTION_COUNT = 1000;
@@ -62,10 +60,6 @@ public class RenderGenerationService {
     private final Service service;
 
 
-    /*
-    public RenderGenerationService(WorldEngine world, ModelBakerySubsystem modelBakery, ServiceManager sm, boolean emitMeshlets) {
-        this(world, modelBakery, sm, emitMeshlets, ()->true);
-    }*/
 
     public RenderGenerationService(WorldEngine world, ModelBakerySubsystem modelBakery, ServiceManager sm, boolean emitMeshlets) {
         this.emitMeshlets = emitMeshlets;
@@ -107,7 +101,16 @@ public class RenderGenerationService {
     private void computeAndRequestRequiredModels(IntOpenHashSet seenMissedIds, WorldSection section) {
         //Know this is... very much not safe, however it reduces allocation rates and other garbage, am sure its "fine"
         final var factory = this.modelBakery.factory;
-        for (long state : section._unsafeGetRawDataArray()) {
+        long[] raw = section._rawOrNull();
+        if (raw == null) {
+            //Uniform section: one value covers all 32768 voxels, so test it once
+            int block = Mapper.getBlockId(section.getUniformValue());
+            if (block != 0 && !factory.hasModelForBlockId(block) && seenMissedIds.add(block)) {
+                this.modelBakery.requestBlockBake(block);
+            }
+            return;
+        }
+        for (long state : raw) {
             int block = Mapper.getBlockId(state);
             if (block != 0 && !factory.hasModelForBlockId(block)) {
                 if (seenMissedIds.add(block)) {
@@ -126,12 +129,10 @@ public class RenderGenerationService {
         return WorldEngine.getLevel(pos) > 2;
     }
 
-    //TODO: add a generated render data cache
     private void processJob(RenderDataFactory factory, IntOpenHashSet seenMissedIds) {
         BuildTask task = this.taskQueue.poll();
         this.taskQueueCount.decrementAndGet();
 
-        //long time = BuiltSection.getTime();
         boolean shouldFreeSection = true;
 
         WorldSection section;
@@ -173,7 +174,6 @@ public class RenderGenerationService {
                 if (other != null) {//Weve been replaced
                     //Request the block
                     if (e.isIdBlockId) {
-                        //TODO: maybe move this to _after_ task as been readded to queue??
                         if (!this.modelBakery.factory.hasModelForBlockId(e.id)) {
                             if (seenMissedIds.add(e.id)) {
                                 this.modelBakery.requestBlockBake(e.id);
@@ -200,7 +200,6 @@ public class RenderGenerationService {
 
                 //Request the block
                 if (e.isIdBlockId) {
-                    //TODO: maybe move this to _after_ task as been readded to queue??
                     if (!this.modelBakery.factory.hasModelForBlockId(e.id)) {
                         if (seenMissedIds.add(e.id)) {
                             this.modelBakery.requestBlockBake(e.id);
@@ -220,7 +219,6 @@ public class RenderGenerationService {
                     }
 
                     if (!task.hasDoneModelRequestInner) {
-                        //The reason for the extra id parameter is that we explicitly add/check against the exception id due to e.g. requesting accross a chunk boarder wont be captured in the request
                         if (e.auxData == null)//the null check this is because for it to be, the inner must already be computed
                             this.computeAndRequestRequiredModels(seenMissedIds, section);
                         task.hasDoneModelRequestInner = true;
@@ -297,11 +295,6 @@ public class RenderGenerationService {
         }
     }
 
-    /*
-    public void enqueueTask(int lvl, int x, int y, int z) {
-        this.enqueueTask(WorldEngine.getWorldSectionId(lvl, x, y, z));
-    }
-    */
 
     public void shutdown() {
         //Steal and free as much work as possible

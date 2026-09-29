@@ -7,6 +7,8 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 import me.cortex.voxy.client.core.IGetVoxyRenderSystem;
+import me.cortex.voxy.client.core.rendering.Viewport;
+import me.cortex.voxy.client.core.util.IrisUtil;
 import net.caffeinemc.mods.sodium.client.render.SodiumWorldRenderer;
 import net.caffeinemc.mods.sodium.client.render.chunk.ChunkRenderMatrices;
 import net.minecraft.client.Minecraft;
@@ -33,6 +35,8 @@ public class MixinSodiumWorldRendererVS {
         if (renderLayer == RenderType.solid()) {
             var renderer = ((IGetVoxyRenderSystem) Minecraft.getInstance().levelRenderer).voxy$getRenderSystem();
             if (renderer != null) {
+                //Primary vs secondary (camera mod, mirror...) passes are resolved inside
+                //setupViewportForCurrentPass, which also reuses the iris-configured capture.
                 renderer.renderOpaque(renderer.setupViewportForCurrentPass(matrices, x, y, z));
             }
         }

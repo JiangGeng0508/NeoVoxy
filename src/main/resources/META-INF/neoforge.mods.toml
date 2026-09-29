@@ -20,6 +20,12 @@ config="common.voxy.mixins.json"
 [[mixins]]
 config="client.voxy.mixins.json"
 
+[[mixins]]
+config="iris.voxy.mixins.json"
+
+[[mixins]]
+config="fakesight.voxy.mixins.json"
+
 [[accessTransformers]]
 file="META-INF/accesstransformer.cfg"
 
@@ -43,3 +49,25 @@ file="META-INF/accesstransformer.cfg"
     versionRange="[0.8.12,)"
     ordering="AFTER"
     side="CLIENT"
+
+[[dependencies.${mod_id}]]
+    modId="iris"
+    type="optional"
+    versionRange="[1.8.12,)"
+    ordering="AFTER"
+    side="CLIENT"
+
+[[dependencies.${mod_id}]]
+    modId="domum_ornamentum"
+    type="optional"
+    versionRange="[1.0,)"
+    ordering="AFTER"
+    side="CLIENT"
+
+[[dependencies.${mod_id}]]
+    modId="eclipticseasons_voxycompact"
+    type="incompatible"
+    versionRange="[0,)"
+    ordering="NONE"
+    side="CLIENT"
+    reason="This voxy fork has EclipticSeasons seasonal-LOD support built in. Ecliptic Seasons: Voxy Compact targets the official voxy internal classes, which this fork no longer has - loading both crashes the game. Remove eclipticseasons_voxycompact."

@@ -4,7 +4,7 @@ import com.mojang.serialization.Dynamic;
 import it.unimi.dsi.fastutil.objects.ObjectArrayList;
 import me.cortex.voxy.common.Logger;
 import me.cortex.voxy.common.config.IMappingStorage;
-import me.cortex.voxy.common.util.Pair;
+import me.cortex.voxy.commonImpl.compat.DomumOrnamentumCompat;
 import me.cortex.voxy.common.world.other.Mapper.BiomeEntry;
 import me.cortex.voxy.common.world.other.Mapper.StateEntry;
 import net.minecraft.SharedConstants;
@@ -25,8 +25,6 @@ import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.material.FluidState;
 
-import org.lwjgl.system.MemoryUtil;
-
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -34,15 +32,17 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
-import java.util.Random;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 
+import org.lwjgl.system.MemoryUtil;
 
-//There are independent mappings for biome and block states, these get combined in the shader and allow for more
-// variaty of things
+/** 管理方块状态、生物群系和变体 ID，并编码为渲染器使用的 64 位体素值。 */
 public class Mapper {
+    private static final long SURFACE_CARRIER_BLOCK_MASK = (1L << 20) - 1L;
+    private static final long SURFACE_CARRIER_FLAG = 1L << 20;
+    private static final long SURFACE_CARRIER_MASK = SURFACE_CARRIER_FLAG | SURFACE_CARRIER_BLOCK_MASK;
     private static final int BLOCK_STATE_TYPE = 1;
     private static final int BIOME_TYPE = 2;
 
@@ -52,6 +52,7 @@ public class Mapper {
 
     private final ReentrantLock blockLock = new ReentrantLock();
     private final ConcurrentHashMap<BlockState, StateEntry> block2stateEntry = new ConcurrentHashMap<>(2000,0.75f, 10);
+    private final ConcurrentHashMap<VariantStateKey, StateEntry> variantBlock2stateEntry = new ConcurrentHashMap<>(2000,0.75f, 10);
     private final ObjectArrayList<StateEntry> blockId2stateEntry = new ObjectArrayList<>();
 
 
@@ -61,6 +62,9 @@ public class Mapper {
 
     private Consumer<StateEntry> newStateCallback;
     private Consumer<BiomeEntry> newBiomeCallback;
+
+    private record VariantStateKey(BlockState state, String variantType, String variantKey) { }
+
     public Mapper(IMappingStorage storage) {
         this.storage = storage;
         //Insert air since its a special entry (index 0)
@@ -72,9 +76,15 @@ public class Mapper {
     }
 
 
+    // ---- 64 位体素编码 -----------------------------------------------
+
     public static boolean isAir(long id) {
         //Note: air can mean void, cave or normal air, as the block state is remapped during ingesting
         return (id&(((1L<<20)-1)<<27)) == 0;
+    }
+
+    public static int isNotAirInt(long id) {
+        return Math.min(getBlockId(id), 1);
     }
 
     public static int getBlockId(long id) {
@@ -101,6 +111,33 @@ public class Mapper {
         return Integer.toUnsignedLong(light&0xFF)<<56;
     }
 
+    public static long makeSurfaceCarrier(long voxel) {
+        int block = getBlockId(voxel);
+        return (voxel & ~((((1L << 20) - 1L) << 27) | SURFACE_CARRIER_MASK))
+                | SURFACE_CARRIER_FLAG | Integer.toUnsignedLong(block);
+    }
+
+    public static boolean isSurfaceCarrier(long voxel) {
+        return (voxel & SURFACE_CARRIER_FLAG) != 0;
+    }
+
+    public static long clearSurfaceCarrier(long voxel) {
+        return voxel & ~SURFACE_CARRIER_MASK;
+    }
+
+    public static long restoreSurfaceCarrier(long voxel) {
+        int block = (int) (voxel & SURFACE_CARRIER_BLOCK_MASK);
+        return withBlockBiome(voxel, block, getBiomeId(voxel));
+    }
+
+    public static long applySurfaceCarrier(long below, long carrier) {
+        return withLight(
+                withBlockBiome(below, (int) (carrier & SURFACE_CARRIER_BLOCK_MASK), getBiomeId(carrier)),
+                getLightId(carrier));
+    }
+
+    // ---- 持久化映射 ----------------------------------------------------
+
     public void setStateCallback(Consumer<StateEntry> stateCallback) {
         this.newStateCallback = stateCallback;
     }
@@ -110,14 +147,12 @@ public class Mapper {
     }
 
     private void loadFromStorage() {
-        //TODO: FIXME: have/store the minecraft version the mappings are from (the data version)
         // SharedConstants.getGameVersion().dataVersion().id()
         // then use this to create an update path instead
 
         var mappings = this.storage.getIdMappingsData();
         List<StateEntry> sentries = new ArrayList<>();
         List<BiomeEntry> bentries = new ArrayList<>();
-        List<Pair<byte[], Integer>> sentryErrors = new ArrayList<>();
 
         boolean[] forceResave = new boolean[1];
         for (var entry : mappings.int2ObjectEntrySet()) {
@@ -125,16 +160,36 @@ public class Mapper {
             int id = entry.getIntKey() & ((1<<30)-1);
             if (entryType == BLOCK_STATE_TYPE) {
                 var sentry = StateEntry.deserialize(id, entry.getValue(), forceResave);
-                if (sentry.state.isAir()) {
-                    Logger.error("Deserialization was air, removed block");
-                    sentryErrors.add(new Pair<>(entry.getValue(), id));
+                if (id == 0) {
+                    //The canonical air entry is created before storage is read.
                     continue;
                 }
+
                 sentries.add(sentry);
+                if (sentry.state.isAir()) {
+                    //Keep the numeric mapping slot so old voxel data remains valid, but do not
+                    //replace a removed mod block with an unrelated random registry entry.
+                    forceResave[0] = true;
+                    Logger.warn("Stored block-state mapping " + id + " is unavailable and will render as air");
+                    continue;
+                }
+
+                if (sentry.isVariant()) {
+                    this.variantBlock2stateEntry.putIfAbsent(
+                            new VariantStateKey(sentry.state, sentry.variantType, sentry.variantKey), sentry);
+                    DomumOrnamentumCompat.restoreVariant(
+                            this, sentry.id, sentry.state, sentry.variantType, sentry.variantData);
+                    me.cortex.voxy.commonImpl.compat.CreateCopycatCompat.restoreVariant(
+                            this, sentry.id, sentry.state, sentry.variantType, sentry.variantData);
+                    me.cortex.voxy.commonImpl.compat.FramedBlocksCompat.restoreVariant(
+                            this, sentry.id, sentry.state, sentry.variantType, sentry.variantData);
+                    continue;
+                }
+
                 var oldEntry = this.block2stateEntry.putIfAbsent(sentry.state, sentry);
-                if (oldEntry != null) {
-                    //forceResave[0] |= true;
-                    Logger.warn("Multiple mappings for blockstate, using old state, expect things to possibly go really badly. " + oldEntry.id + ":" + sentry.id + ":" + sentry.state );
+                if (oldEntry != null && !DomumOrnamentumCompat.isDomumState(sentry.state)) {
+                    Logger.warn("Multiple mappings for blockstate " + sentry.state + ": "
+                            + oldEntry.id + " and " + sentry.id);
                 }
             } else if (entryType == BIOME_TYPE) {
                 var bentry = BiomeEntry.deserialize(id, entry.getValue());
@@ -144,21 +199,6 @@ public class Mapper {
                 }
             } else {
                 throw new IllegalStateException("Unknown entryType");
-            }
-        }
-
-        if (!sentryErrors.isEmpty()) {
-            forceResave[0] |= true;
-            //Insert garbage types into the mapping for those blocks, TODO:FIXME: Need to upgrade the type or have a solution to error blocks
-            var rand = new Random();
-            for (var error : sentryErrors) {
-                while (true) {
-                    var state = new StateEntry(error.right(), Block.BLOCK_STATE_REGISTRY.byId(rand.nextInt(Block.BLOCK_STATE_REGISTRY.size() - 1)));
-                    if (this.block2stateEntry.put(state.state, state) == null) {
-                        sentries.add(state);
-                        break;
-                    }
-                }
             }
         }
 
@@ -183,6 +223,8 @@ public class Mapper {
         }
     }
 
+    // ---- 状态/生物群系查询与注册 --------------------------------------
+
     public final int getBlockStateCount() {
         return this.blockId2stateEntry.size();
     }
@@ -200,16 +242,21 @@ public class Mapper {
         this.block2stateEntry.put(state, entry);
         this.blockLock.unlock();
 
-        byte[] serialized = entry.serialize();
-        ByteBuffer buffer = MemoryUtil.memAlloc(serialized.length);
-        buffer.put(serialized);
-        buffer.rewind();
-        this.storage.putIdMapping(entry.id | (BLOCK_STATE_TYPE<<30), buffer);
-        MemoryUtil.memFree(buffer);
-        //this.storage.flush();
+        this.persistStateEntry(entry);
 
         if (this.newStateCallback!=null)this.newStateCallback.accept(entry);
         return entry;
+    }
+
+    private void persistStateEntry(StateEntry entry) {
+        byte[] serialized = entry.serialize();
+        ByteBuffer buffer = MemoryUtil.memAlloc(serialized.length);
+        try {
+            buffer.put(serialized).rewind();
+            this.storage.putIdMapping(entry.id | (BLOCK_STATE_TYPE << 30), buffer);
+        } finally {
+            MemoryUtil.memFree(buffer);
+        }
     }
 
     private BiomeEntry registerNewBiome(String biome) {
@@ -230,21 +277,40 @@ public class Mapper {
         buffer.rewind();
         this.storage.putIdMapping(entry.id | (BIOME_TYPE<<30), buffer);
         MemoryUtil.memFree(buffer);
-        //this.storage.flush();
 
         if (this.newBiomeCallback!=null)this.newBiomeCallback.accept(entry);
         return entry;
     }
 
 
-    //TODO:FIXME: IS VERY SLOW NEED TO MAKE IT LOCK FREE, or at minimum use a concurrent map
     public long getBaseId(byte light, BlockState state, Holder<Biome> biome) {
         if (state.isAir()) return Byte.toUnsignedLong(light) <<56;//Special case and fast return for air, dont care about the biome
         return composeMappingId(light, this.getIdForBlockState(state), this.getIdForBiome(biome));
     }
 
     public BlockState getBlockStateFromBlockId(int blockId) {
-        return this.blockId2stateEntry.get(blockId).state;
+        return this.stateEntryForRenderId(blockId).state;
+    }
+
+    private StateEntry stateEntryForRenderId(int blockId) {
+        if (blockId < this.blockId2stateEntry.size()) {
+            return this.blockId2stateEntry.get(blockId);
+        }
+        if (blockId == SeasonalIdSpace.VIRTUAL_ICE_ID) {
+            return SeasonalIdSpace.virtualIceEntry();
+        }
+        int real = SeasonalIdSpace.decode(this, blockId);
+        return this.blockId2stateEntry.get(real);//An unresolvable id throws here like any unknown id
+    }
+
+    public BiomeEntry getBiomeEntry(int biomeId) {
+        this.biomeLock.lock();
+        try {
+            return biomeId >= 0 && biomeId < this.biomeId2biomeEntry.size()
+                    ? this.biomeId2biomeEntry.get(biomeId) : null;
+        } finally {
+            this.biomeLock.unlock();
+        }
     }
 
     public int getIdForBlockState(BlockState state) {
@@ -258,17 +324,58 @@ public class Mapper {
         return mapping.id;
     }
 
+    public int getIdForBlockStateVariant(BlockState state, String variantType,
+                                              String variantKey, CompoundTag variantData) {
+        if (state.isAir()) {
+            return 0;
+        }
+        if (variantKey == null || variantKey.isEmpty()) {
+            return this.getIdForBlockState(state);
+        }
+
+        var key = new VariantStateKey(state, variantType, variantKey);
+        var mapping = this.variantBlock2stateEntry.get(key);
+        if (mapping != null) {
+            return mapping.id;
+        }
+
+        this.blockLock.lock();
+        try {
+            mapping = this.variantBlock2stateEntry.get(key);
+            if (mapping != null) {
+                return mapping.id;
+            }
+
+            mapping = new StateEntry(this.blockId2stateEntry.size(), state,
+                    variantType, variantKey, variantData);
+            this.blockId2stateEntry.add(mapping);
+            this.variantBlock2stateEntry.put(key, mapping);
+        } finally {
+            this.blockLock.unlock();
+        }
+
+        this.persistStateEntry(mapping);
+        if (this.newStateCallback != null) {
+            this.newStateCallback.accept(mapping);
+        }
+        return mapping.id;
+    }
+
     public int getBlockStateOpacity(long mappingId) {
         return this.getBlockStateOpacity(getBlockId(mappingId));
     }
 
     public int getBlockStateOpacity(int blockId) {
-        return this.blockId2stateEntry.get(blockId).opacity;
+        return this.stateEntryForRenderId(blockId).opacity;
     }
 
     public int getIdForBiome(Holder<Biome> biome) {
         String biomeId = biome.unwrapKey().get().location().toString();
-        return this.getOrCreateBiomeId(biomeId);
+        var entry = this.biome2biomeEntry.get(biomeId);
+        if (entry == null) {
+            entry = this.registerNewBiome(biomeId);
+        }
+        return entry.id;
     }
 
     /** String-keyed variant used by server->client mapping sync (no registry lookup). */
@@ -280,10 +387,6 @@ public class Mapper {
         return entry.id;
     }
 
-    public int getBiomeCount() {
-        return this.biomeId2biomeEntry.size();
-    }
-
     public static long composeMappingId(byte light, int blockId, int biomeId) {
         if (blockId == AIR) {//Dont care about biome for air
             return Byte.toUnsignedLong(light)<<56;
@@ -291,7 +394,8 @@ public class Mapper {
         return (Byte.toUnsignedLong(light)<<56)|(Integer.toUnsignedLong(biomeId) << 47)|(Integer.toUnsignedLong(blockId)<<27);
     }
 
-    //TODO: fixme: synchronize access to this.blockId2stateEntry
+    // ---- 存储维护与生命周期 -------------------------------------------
+
     public StateEntry[] getStateEntries() {
         this.blockLock.lock();
         var set = new ArrayList<>(this.blockId2stateEntry);
@@ -307,7 +411,6 @@ public class Mapper {
         return out;
     }
 
-    //TODO: fixme: synchronize access to this.biomeId2biomeEntry
     public BiomeEntry[] getBiomeEntries() {
         this.biomeLock.lock();
         var set = new ArrayList<>(this.biomeId2biomeEntry);
@@ -324,7 +427,7 @@ public class Mapper {
     }
 
     public void forceResaveStates() {
-        var blocks = new ArrayList<>(this.block2stateEntry.values());
+        var blocks = new ArrayList<>(this.blockId2stateEntry);
         var biomes = new ArrayList<>(this.biome2biomeEntry.values());
 
 
@@ -335,12 +438,7 @@ public class Mapper {
             if (this.blockId2stateEntry.indexOf(entry) != entry.id) {
                 throw new IllegalStateException("State Id NOT THE SAME, very critically bad. arr:" + this.blockId2stateEntry.indexOf(entry) + " entry: " + entry.id);
             }
-            byte[] serialized = entry.serialize();
-            ByteBuffer buffer = MemoryUtil.memAlloc(serialized.length);
-            buffer.put(serialized);
-            buffer.rewind();
-            this.storage.putIdMapping(entry.id | (BLOCK_STATE_TYPE<<30), buffer);
-            MemoryUtil.memFree(buffer);
+            this.persistStateEntry(entry);
         }
 
         for (var entry : biomes) {
@@ -360,17 +458,32 @@ public class Mapper {
     }
 
     public void close() {
-
+        DomumOrnamentumCompat.closeMapper(this);
+        me.cortex.voxy.commonImpl.compat.CreateCopycatCompat.closeMapper(this);
+        me.cortex.voxy.commonImpl.compat.FramedBlocksCompat.closeMapper(this);
     }
 
 
+    /** 一个可持久化的方块状态映射，包括可选的兼容模组变体信息。 */
     public static final class StateEntry {
         public final int id;
         public final BlockState state;
         public final int opacity;
+        public final String variantType;
+        public final String variantKey;
+        public final CompoundTag variantData;
+
         public StateEntry(int id, BlockState state) {
+            this(id, state, null, null, null);
+        }
+
+        public StateEntry(int id, BlockState state, String variantType,
+                          String variantKey, CompoundTag variantData) {
             this.id = id;
             this.state = state;
+            this.variantType = variantType;
+            this.variantKey = variantKey;
+            this.variantData = variantData == null ? null : variantData.copy();
             //Override opacity of leaves to be solid
             if (state.getBlock() instanceof LeavesBlock) {
                 this.opacity = 15;
@@ -406,11 +519,22 @@ public class Mapper {
             }
         }
 
+        public boolean isVariant() {
+            return this.variantType != null && this.variantKey != null;
+        }
+
         public byte[] serialize() {
             try {
                 var serialized = new CompoundTag();
                 serialized.putInt("id", this.id);
                 serialized.put("block_state", BlockState.CODEC.encodeStart(NbtOps.INSTANCE, this.state).result().get());
+                if (this.isVariant()) {
+                    serialized.putString("variant_type", this.variantType);
+                    serialized.putString("variant_key", this.variantKey);
+                    if (this.variantData != null) {
+                        serialized.put("variant_data", this.variantData.copy());
+                    }
+                }
                 var out = new ByteArrayOutputStream();
                 NbtIo.writeCompressed(serialized, out);
                 return out.toByteArray();
@@ -419,35 +543,62 @@ public class Mapper {
             }
         }
 
+        private static StateEntry airReplacement(int id, boolean[] forceResave, String message, Throwable cause) {
+            forceResave[0] = true;
+            if (cause == null) {
+                Logger.warn(message + "; mapping id " + id + " will use air");
+            } else {
+                Logger.error(message + "; mapping id " + id + " will use air", cause);
+            }
+            return new StateEntry(id, Blocks.AIR.defaultBlockState());
+        }
+
         public static StateEntry deserialize(int id, byte[] data, boolean[] forceResave) {
             try {
                 var compound = NbtIo.readCompressed(new ByteArrayInputStream(data), NbtAccounter.unlimitedHeap());
                 if (compound.getInt("id") != id) {
-                    throw new IllegalStateException("Encoded id != expected id");
+                    return airReplacement(id, forceResave, "Stored block-state id does not match its mapping key", null);
                 }
-                var bsc = compound.getCompound("block_state");
-                var state = BlockState.CODEC.parse(NbtOps.INSTANCE, bsc);
-                if (state.isError()) {
-                    Logger.info("Could not decode blockstate, attempting fixes, error: "+ state.error().get().message());
-                    bsc = (CompoundTag) DataFixers.getDataFixer().update(References.BLOCK_STATE, new Dynamic<>(NbtOps.INSTANCE,bsc),0, SharedConstants.getCurrentVersion().getDataVersion().getVersion()).getValue();
-                    state = BlockState.CODEC.parse(NbtOps.INSTANCE, bsc);
-                    if (state.isError()) {
-                        Logger.error("Could not decode blockstate setting to air. id:" + id + " error: " + state.error().get().message());
-                        return new StateEntry(id, Blocks.AIR.defaultBlockState());
-                    } else {
-                        Logger.info("Fixed blockstate to: " + state.getOrThrow());
-                        forceResave[0] |= true;
-                        return new StateEntry(id, state.getOrThrow());
-                    }
-                } else {
-                    return new StateEntry(id, state.getOrThrow());
+
+                var encodedState = compound.getCompound("block_state");
+                String variantType = compound.contains("variant_type") ? compound.getString("variant_type") : null;
+                String variantKey = compound.contains("variant_key") ? compound.getString("variant_key") : null;
+                CompoundTag variantData = compound.contains("variant_data")
+                        ? compound.getCompound("variant_data") : null;
+
+                var decoded = BlockState.CODEC.parse(NbtOps.INSTANCE, encodedState);
+                if (!decoded.isError()) {
+                    return new StateEntry(id, decoded.getOrThrow(), variantType, variantKey, variantData);
                 }
-            } catch (IOException e) {
-                throw new RuntimeException(e);
+
+                Logger.info("Stored block state needs data fixing: " + decoded.error().get().message());
+                try {
+                    var upgraded = DataFixers.getDataFixer().update(
+                            References.BLOCK_STATE,
+                            new Dynamic<>(NbtOps.INSTANCE, encodedState),
+                            0,
+                            SharedConstants.getCurrentVersion().getDataVersion().getVersion()).getValue();
+                    decoded = BlockState.CODEC.parse(NbtOps.INSTANCE, upgraded);
+                } catch (RuntimeException fixerFailure) {
+                    return airReplacement(id, forceResave, "Unable to upgrade a stored block state (the source mod may be absent)", fixerFailure);
+                }
+
+                if (decoded.isError()) {
+                    return airReplacement(id, forceResave, "Unable to decode a stored block state after data fixing", null);
+                }
+
+                forceResave[0] = true;
+                Logger.info("Updated stored block state to: " + decoded.getOrThrow());
+                return new StateEntry(id, decoded.getOrThrow(), variantType, variantKey, variantData);
+            } catch (IOException readFailure) {
+                return airReplacement(id, forceResave, "Unable to read a stored block state", readFailure);
+            } catch (RuntimeException decodeFailure) {
+                return airReplacement(id, forceResave, "Unexpected error while reading a stored block state", decodeFailure);
             }
         }
     }
 
+    /** 一个可持久化的生物群系映射条目。 */
     public static final class BiomeEntry {
         public final int id;
         public final String biome;

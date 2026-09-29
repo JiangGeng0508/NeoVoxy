@@ -55,7 +55,7 @@ public class UnifiedServiceThreadPool {
     }
 
     private void workerThread() {
-        this.selfBlock.acquire();//This is stupid but it works
+        this.selfBlock.acquire();
 
         //We are exiting, remove self from list of threads
         synchronized (this.threads) {

@@ -9,14 +9,13 @@ import me.cortex.voxy.common.config.storage.StorageConfig;
 import me.cortex.voxy.common.util.ThreadLocalMemoryBuffer;
 import me.cortex.voxy.common.world.SaveLoadSystem3;
 import me.cortex.voxy.common.world.WorldSection;
-import me.cortex.voxy.common.world.other.Mapper;
 
 import java.nio.ByteBuffer;
-import java.util.Arrays;
 import java.util.function.LongConsumer;
 
 public class SectionSerializationStorage extends SectionStorage {
     public static final int BIGGEST_SERIALIZED_SECTION_SIZE = 32 * 32 * 32 * 8 * 2 + 8;
+
     private static final int MISS_CACHE_SIZE = Integer.getInteger("voxy.storageMissCacheSize", 1 << 16);
 
     /** Hook for remote fetching: invoked (any thread) on a store miss. Set by client netcode, null on servers. */
@@ -35,24 +34,22 @@ public class SectionSerializationStorage extends SectionStorage {
         if (this.isKnownMissing(into.key)) {
             return 1;
         }
-
         var data = this.backend.getSectionData(into.key, MEMORY_CACHE.get().createUntrackedUnfreeableReference());
         if (data != null) {
             this.forgetMissing(into.key);
             if (!SaveLoadSystem3.deserialize(into, data)) {
                 this.backend.deleteSectionData(into.key);
-                this.rememberMissing(into.key);
-                //TODO: regenerate the section from children
-                Arrays.fill(into._unsafeGetRawDataArray(), Mapper.AIR);
+                //No fill here: returning -1 makes the tracker force status 1 and set the section to
+                //uniform air itself, so filling an array we are about to discard was dead work (and it
+                //would now needlessly materialise one).
                 Logger.error("Section " + into.lvl + ", " + into.x + ", " + into.y + ", " + into.z + " was unable to load, removing");
                 return -1;
             } else {
                 return 0;
             }
         } else {
-            //TODO: if we need to fetch an lod from a server, send the request here and block until the request is finished
-            // the response should be put into the local db so that future data can just use that
-            // the server can also send arbitrary updates to the client for arbitrary lods
+            //The response is expected to be put into the local db so future loads hit the fast path;
+            //the server can also send arbitrary updates to the client for arbitrary lods.
             var listener = MISS_LISTENER;
             if (listener != null) {
                 try {
@@ -62,6 +59,8 @@ public class SectionSerializationStorage extends SectionStorage {
                 }
             }
             this.rememberMissing(into.key);
+            // the response should be put into the local db so that future data can just use that
+            // the server can also send arbitrary updates to the client for arbitrary lods
             return 1;
         }
     }
@@ -102,12 +101,55 @@ public class SectionSerializationStorage extends SectionStorage {
         this.forgetMissing(key);
     }
 
+
+    @Override
+    public boolean supportsAuxTable(String table) {
+        return this.backend.supportsAuxTable(table);
+    }
+
+    @Override
+    public void putAux(String table, long key, byte[] value) {
+        this.backend.putAux(table, key, value);
+    }
+
+    @Override
+    public byte[] getAux(String table, long key) {
+        return this.backend.getAux(table, key);
+    }
+
+    @Override
+    public void deleteAux(String table, long key) {
+        this.backend.deleteAux(table, key);
+    }
+
+    @Override
+    public void forEachAux(String table, StorageBackend.AuxEntryConsumer consumer) {
+        this.backend.forEachAux(table, consumer);
+    }
+
     @Override
     public void saveSection(WorldSection section) {
         var saveData = SaveLoadSystem3.serialize(section);
         this.backend.setSectionData(section.key, saveData);
         this.forgetMissing(section.key);
         //Note that savedData isnt freed (the save system uses a cache)
+    }
+
+    @Override
+    public SectionSaveBatch createSaveBatch() {
+        var inner = this.backend.createSectionWriteBatch();
+        return new SectionSaveBatch() {
+            @Override
+            public void add(WorldSection section) {
+                //Serialise here, exactly where saveSection would have: the serializer returns a
+                //thread-local scratch buffer, so the batch must consume it before this returns
+                inner.put(section.key, SaveLoadSystem3.serialize(section));
+            }
+
+            @Override public long dataSize() { return inner.dataSize(); }
+            @Override public void commit() { inner.commit(); }
+            @Override public void close() { inner.close(); }
+        };
     }
 
     @Override

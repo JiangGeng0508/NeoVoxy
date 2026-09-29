@@ -10,7 +10,6 @@ import me.cortex.voxy.client.core.rendering.hierachical.HierarchicalOcclusionTra
 import me.cortex.voxy.client.core.rendering.hierachical.NodeCleaner;
 import me.cortex.voxy.client.core.rendering.post.FullscreenBlit;
 import me.cortex.voxy.client.core.util.GPUTiming;
-import net.minecraft.client.Minecraft;
 import org.joml.Matrix4f;
 
 import java.util.List;
@@ -35,24 +34,26 @@ import static org.lwjgl.opengl.GL30C.*;
 import static org.lwjgl.opengl.GL43.GL_DEPTH_STENCIL_TEXTURE_MODE;
 import static org.lwjgl.opengl.GL45C.glBindTextureUnit;
 import static org.lwjgl.opengl.GL45C.glTextureParameterf;
+import static org.lwjgl.opengl.GL42C.GL_FRAMEBUFFER_BARRIER_BIT;
+import static org.lwjgl.opengl.GL42C.GL_SHADER_IMAGE_ACCESS_BARRIER_BIT;
+import static org.lwjgl.opengl.GL42C.GL_TEXTURE_FETCH_BARRIER_BIT;
+import static org.lwjgl.opengl.GL42C.glMemoryBarrier;
 
+/** 无 Iris 接管时使用的默认 LOD 管线，负责 SSAO、雾效和最终合成。 */
 public class NormalRenderPipeline extends AbstractRenderPipeline {
     private GlTexture colourTex;
     private GlTexture colourSSAOTex;
     private final GlFramebuffer fbSSAO = new GlFramebuffer();
 
-    private final boolean useEnvFog;
     private final FullscreenBlit finalBlit;
 
     private final SSAO ssao;
+    private final Matrix4f targetTransform = new Matrix4f();
 
     protected NormalRenderPipeline(RenderProperties properties, AsyncNodeManager nodeManager, NodeCleaner nodeCleaner, HierarchicalOcclusionTraverser traversal, BooleanSupplier frexSupplier) {
         super(properties, nodeManager, nodeCleaner, traversal, frexSupplier, false);
-        this.useEnvFog = VoxyConfig.CONFIG.useEnvironmentalFog;
         this.finalBlit = new FullscreenBlit(properties, "voxy:post/blit_texture_depth_cutout.frag",
-                a->a.defineIf("USE_ENV_FOG", this.useEnvFog).define("EMIT_COLOUR"));
-
-
+                builder -> builder.define("USE_ENV_FOG").define("EMIT_COLOUR"));
         this.ssao = SSAO.createSSAO(properties, VoxyConfig.CONFIG.getSSAOMode());
     }
 
@@ -71,7 +72,6 @@ public class NormalRenderPipeline extends AbstractRenderPipeline {
             this.fb.framebuffer.bind(GL_COLOR_ATTACHMENT0, this.colourTex).verify();
             this.fbSSAO.bind(this.fb.getDepthAttachmentType(), this.fb.getDepthTex()).bind(GL_COLOR_ATTACHMENT0, this.colourSSAOTex).verify();
 
-
             glTextureParameterf(this.colourTex.id, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
             glTextureParameterf(this.colourTex.id, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
             glTextureParameterf(this.colourSSAOTex.id, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
@@ -79,67 +79,95 @@ public class NormalRenderPipeline extends AbstractRenderPipeline {
             glTextureParameterf(this.fb.getDepthTex().id, GL_DEPTH_STENCIL_TEXTURE_MODE, GL_DEPTH_COMPONENT);
         }
 
-        this.initDepthStencil(sourceFB, this.fb.framebuffer.id, viewport.width, viewport.height, viewport.width, viewport.height);
+        this.initDepthStencil(viewport, sourceFB, this.fb.framebuffer.id, viewport.width, viewport.height, viewport.width, viewport.height);
 
         return this.fb.getDepthTex().id;
     }
 
     @Override
     protected void postOpaquePreTranslucent(Viewport<?> viewport, int sourceFrameBuffer) {
+        //Vanilla-covered pixels held reprojected real depth for the hook geometry; SSAO and the
+        //final cutout blit identify vanilla coverage by depth==NEAR, so put the sentinel back
+        this.fb.bind();
+        this.restoreSentinelDepth();
+
         GPUTiming.INSTANCE.marker("ao");
         this.ssao.computeSSAO(viewport, this.colourSSAOTex, this.colourTex, this.fb.getDepthTex(), sourceFrameBuffer);
+
+        // Make the SSAO image writes visible before translucent terrain uses the target.
+        glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GL_FRAMEBUFFER_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT);
         glBindFramebuffer(GL_FRAMEBUFFER, this.fbSSAO.id);
     }
 
     @Override
     protected void finish(Viewport<?> viewport, int sourceFrameBuffer, int srcWidth, int srcHeight) {
         this.finalBlit.bind();
-        var vrs = IGetVoxyRenderSystem.getNullable();
-        float fogStart = vrs != null ? vrs.getCapturedFogStart() : RenderSystem.getShaderFogStart();
-        float fogEnd   = vrs != null ? vrs.getCapturedFogEnd()   : RenderSystem.getShaderFogEnd();
-        float[] fogColor = vrs != null ? vrs.getCapturedFogColor() : RenderSystem.getShaderFogColor();
 
-        float renderDistance = Minecraft.getInstance().gameRenderer.getRenderDistance();
-        boolean fogCoversAllRendering = fogEnd < renderDistance;
-
-        if (this.useEnvFog) {
-            if (Math.abs(fogEnd - fogStart) > 1) {
-                glUniform2f(4, fogStart, fogEnd);
+        float mediumNear = VoxyRenderSystem.getTerrainFogStartAtRender();
+        float mediumFar = VoxyRenderSystem.getTerrainFogEndAtRender();
+        var mc = net.minecraft.client.Minecraft.getInstance();
+        boolean inMedium = mc.gameRenderer != null
+                && mc.gameRenderer.getMainCamera().getFluidInCamera()
+                    != net.minecraft.world.level.material.FogType.NONE
+                && mediumFar > mediumNear;
+        if (inMedium) {
+            float[] fogColor = RenderSystem.getShaderFogColor();
+            glUniform2f(4, mediumNear, mediumFar);
+            glUniform4f(5, fogColor[0], fogColor[1], fogColor[2], 1.0f);
+            glUniform1i(6, RenderSystem.getShaderFogShape().getIndex());
+            //Vanilla's linear ramp at full strength: the ambient intensity/density knobs describe the
+            //open-air band and must not soften a medium that is meant to cut vision off.
+            glUniform1f(7, 1.0f);
+            glUniform1f(8, 0.0f);
+            glUniform1i(9, 1);
+        } else if (VoxyConfig.CONFIG.useEnvironmentalFog && VoxyConfig.CONFIG.fogIntensity > 0.0f) {
+            float[] fogColor = RenderSystem.getShaderFogColor();
+            // The percentage shown in the UI is relative to the actual LOD radius.
+            float fogBaselineBlocks = VoxyConfig.CONFIG.getFarEntityRenderDistanceBlocks();
+            float far = fogBaselineBlocks * (VoxyConfig.CONFIG.fogDistancePercent / 100.0f);
+            float near = far * 0.5f;
+            if (far - near > 1) {
+                glUniform2f(4, near, far);
                 glUniform4f(5, fogColor[0], fogColor[1], fogColor[2], 1.0f);
                 glUniform1i(6, RenderSystem.getShaderFogShape().getIndex());
-                glUniform1f(7, VoxyConfig.CONFIG.fogIntensity);
-                glUniform1f(8, VoxyConfig.CONFIG.fogDensity);
+                glUniform1f(7, Math.clamp(VoxyConfig.CONFIG.fogIntensity, 0.0f, 1.0f));
+                glUniform1f(8, Math.clamp(VoxyConfig.CONFIG.fogDensity, 0.0f, 1.0f));
+                glUniform1i(9, 0);
             } else {
                 glUniform2f(4, 0, 0);
                 glUniform4f(5, 0, 0, 0, 0);
                 glUniform1i(6, 0);
                 glUniform1f(7, 0);
                 glUniform1f(8, 0);
+                glUniform1i(9, 0);
             }
+        } else {
+            glUniform2f(4, 0, 0);
+            glUniform4f(5, 0, 0, 0, 0);
+            glUniform1i(6, 0);
+            glUniform1f(7, 0);
+            glUniform1f(8, 0);
         }
 
         glBindTextureUnit(3, this.colourSSAOTex.id);
 
-        //Do alpha blending
-        //Unbelievably jank hack, only blit out to the framebuffer if we are rendering fog
-        if (!fogCoversAllRendering) {
-            glEnable(GL_BLEND);
-            glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-            AbstractRenderPipeline.transformBlitDepth(this.finalBlit, this.fb.getDepthTex().id, sourceFrameBuffer, viewport, new Matrix4f(viewport.vanillaProjection).mul(viewport.modelView));
-            glDisable(GL_BLEND);
-        } else {
-            glDisable(GL_STENCIL_TEST);
-            glDisable(GL_DEPTH_TEST);
-        }
-        //glBlitNamedFramebuffer(this.fbSSAO.id, sourceFrameBuffer, 0,0, viewport.width, viewport.height, 0,0, viewport.width, viewport.height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        // Always composite the LOD target. The previous "fully fogged" shortcut
+        // ignored fog intensity/density and could drop the whole LOD image.
+        glEnable(GL_BLEND);
+        // The LOD target stores straight-alpha translucency.
+        glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+        AbstractRenderPipeline.transformBlitDepth(this.finalBlit, this.fb.getDepthTex().id,
+                sourceFrameBuffer, viewport,
+                this.targetTransform.set(viewport.vanillaProjection).mul(viewport.modelView));
+        glDisable(GL_BLEND);
     }
 
     @Override
     public void setupAndBindOpaque(Viewport<?> viewport) {
         if (!viewport.isMainViewport) {
             //Secondary pass (Vista TV): draw into the caller's already-bound off-screen target
-            // rather than our shared fb. The plain terrain shader + MDICSectionRenderer's own
-            // buffer bindings provide everything it needs, so don't bind the shared fb here.
+            //rather than our shared fb. The plain terrain shader + MDICSectionRenderer's own
+            //buffer bindings provide everything it needs, so don't bind the shared fb here.
             return;
         }
         this.fb.bind();

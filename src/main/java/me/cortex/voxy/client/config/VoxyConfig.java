@@ -6,79 +6,207 @@ import com.google.gson.GsonBuilder;
 import me.cortex.voxy.client.core.SSAO;
 import me.cortex.voxy.common.Logger;
 import me.cortex.voxy.common.util.cpu.CpuLayout;
+import me.cortex.voxy.common.world.WorldSection;
 import me.cortex.voxy.commonImpl.VoxyCommon;
+import me.cortex.voxy.commonImpl.compat.create.DistantTrainConfig;
+import me.cortex.voxy.commonImpl.compat.sable.SableContraptionRenderDistance;
 import net.neoforged.fml.loading.FMLPaths;
 
 import java.io.FileReader;
 import java.io.IOException;
 import java.lang.reflect.Modifier;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.Locale;
 
+/**
+ * Voxy 的客户端配置和配置文件生命周期。
+ *
+ * 字段名称是 JSON 对外格式；设置页可以转换显示方式，但保存时仍使用这些兼容字段。
+ */
 public class VoxyConfig {
+    public enum LeafLodMode {
+        FAST,
+        BALANCED,
+        QUALITY
+    }
+
+    // 配置范围和渲染精度档位是设置界面的共享来源。
+    public static final int MIN_REQUEST_DISTANCE = 8;
+    public static final int MAX_REQUEST_DISTANCE = 48;
+    public static final int MAX_CLOUD_DISTANCE = 128;
+    public static final float MIN_SUBDIVISION_SIZE = 28.0f;
+    public static final float MAX_SUBDIVISION_SIZE = 1024.0f;
+    public static final int DEFAULT_RENDER_QUALITY_LEVEL = 3;
+    private static final float[] RENDER_QUALITY_SIZES = {1024, 768, 512, 256, 123, 64, 28};
+
     private static final Gson GSON = new GsonBuilder()
             .setFieldNamingPolicy(FieldNamingPolicy.LOWER_CASE_WITH_UNDERSCORES)
             .setPrettyPrinting()
-            .excludeFieldsWithModifiers(Modifier.PRIVATE)
+            .excludeFieldsWithModifiers(Modifier.PRIVATE, Modifier.STATIC, Modifier.TRANSIENT)
             .create();
 
-    public static VoxyConfig CONFIG = loadOrCreate();
+    public static final VoxyConfig CONFIG = loadOrCreate();
 
+    // 基础生命周期和数据采集。
     public boolean enabled = true;
     public boolean enableRendering = true;
     public boolean ingestEnabled = true;
     public float sectionRenderDistance = 16;
-    public int serviceThreads = (int) Math.max(CpuLayout.getCoreCount()/1.5, 1);
-    public float subDivisionSize = 64;
+    public boolean sableLodRendering = true;
+    // 可选模组的总开关和距离上限；0 表示使用完整 LOD 半径。
+    public int aeronauticsContraptionMaxChunks = 0;
+    public boolean distantTrains = true;
+    public boolean distantTracks = true;
+    public boolean distantContraptions = true;
+    public boolean distantBeacons = true;
+    public int distantBeaconMaxChunks = 0;
+    public boolean distantKinetics = true;
+    public boolean kineticEnclosedCulling = true;
+    public int distantTrainMaxChunks = 0;
+    public int distantTrackMaxChunks = 0;
+    public int distantContraptionMaxChunks = 0;
+    public int distantKineticMaxChunks = 0;
+    public boolean distantPowerGridWires = true;
+    public int distantPowerGridWireMaxChunks = 0;
+    public boolean distantCopycats = true;
+    public int distantCopycatsMaxChunks = 0;
+    public boolean distantSimulatedLasers = true;
+    public int distantSimulatedLaserMaxChunks = 0;
+    public boolean distantFramedBlocks = true;
+    public int distantFramedBlocksMaxChunks = 0;
+    public boolean distantLittleTiles = true;
+    public int distantLittleTilesMaxChunks = 0;
+    public boolean distantDomum = true;
+    public int distantDomumMaxChunks = 0;
+    public int distantContraptionGpuBudgetMiB = 48;
+    public int distantKineticGpuBudgetMiB = 32;
+    // 画面和资源开销选项。
+    public boolean lodLiteShading = false;
+    public int biomeBlendRadius = 2;
+    public String biomeBlendScope = "water";
+    public int serviceThreads = (int) Math.max(CpuLayout.getCoreCount() / 1.5, 1);
+    public float subDivisionSize = RENDER_QUALITY_SIZES[DEFAULT_RENDER_QUALITY_LEVEL];
     public int skyFogDistance = 96;
     public float fogIntensity = 1.0f;
     public float fogDensity = 0.0f;
+    public int fogDistancePercent = 100;
     public boolean adaptCloudDistance = true;
     public int cloudDistance = 0;
     public boolean dontUseSodiumBuilderThreads = false;
-
-    public String ssaoMode;
-
-    public boolean useEnvironmentalFog = true;
-
-    // Runtime toggle for the LOD colour/brightness fix, so it can be compared against raw brightness live.
-    // Toggled in-game via "/voxy colorfix" (not exposed in the config screen). true = brightness fix applied
-    // (no-shader ~0.955, shader ~1.025), false = raw brightness (1.0, no fix). Read live by MDICSectionRenderer
-    // and uploaded to the LOD shaders as uColorFix.
-    public boolean colorFix = true;
-
-    // Runtime toggle for the world-curvature fix (seamless start at the vanilla edge + camera-relative, smooth
-    // tracking). Toggled in-game via "/voxy curvefix". true = fixed curve, false = original curve (measured from
-    // the section origin, so it cuts at the boundary and snaps every 32 blocks). Uploaded to the shader as uCurveFix.
-    public boolean curveFix = true;
-
-    // World curvature: simulates standing on a spherical planet
-    // 0 = disabled (flat world)
-    // 1 = real Earth curvature (6371km radius)
-    // Higher values = more extreme curvature (smaller planet effect)
-    // Range: 0, or 50-5000 (values 1-49 are invalid and auto-corrected to 50)
-    // Inspired by Distant Horizons' earth curvature feature
+    public int renderPressure = 2;
+    public int lodBoundaryBuffer = 1;
+    public boolean enableLodBoundaryFade = true;
+    public int lodBoundaryFadeLength = 16;
+    public int lodBoundaryInset = 8;
     public int earthCurveRatio = 0;
 
-    // Distant generation: background-generate chunks beyond the vanilla render distance on the
-    // integrated server (singleplayer/LAN host) and ingest them into the LOD store. Chunks are
-    // generated only to the LIGHT status (blocks+biomes+light, no entities/ticking) in expanding
-    // rings around the player, throttled by server MSPT and the ingest backlog.
+    // Distant generation (server chunk system; singleplayer/integrated server only)
     public boolean distantGenEnabled = false;
-    // Radius in chunks around the player to generate. 96 chunks = 1536 blocks.
+    // Radius in chunks around the player to keep generating. 96 chunks = 1536 blocks.
     public int distantGenRadius = 96;
-    // How many chunks may generate concurrently. Higher = faster but more server load.
+    // How many chunks may generate concurrently.
     public int distantGenMaxInFlight = 16;
     // Only start new chunks while the server's average tick time is below this (milliseconds).
     public int distantGenMaxMspt = 45;
+    public boolean enableExtendedRequestDistance = false;
+    public int requestDistance = 48;
+    public String ssaoMode;
+    public boolean useEnvironmentalFog = true;
+    public String leafLodMode = "balanced";
+    public boolean enableFarPlayerRendering = true;
+    public boolean enableFarVehicleRendering = true;
+    public boolean renderFarPlayerNames = true;
+    public int farPlayerAnimationDistance = 0;
+    public boolean shareFarPlayerPosition = true;
+    public boolean joinMessageShown = false;
+    public boolean upgradeCleanupNoticeShown = false;
+    // 实验性选项集中放在文件末段，设置页和配置迁移可统一处理。
+    public boolean experimentalHiZCompute = false;
+    public boolean experimentalCmdListHold = false;
+    public int cmdListHoldMaxFrames = 4;
+    public boolean experimentalChunkMaskReuse = false;
+    public int sectionArrayPoolMiB = 100;
+    public boolean experimentalOpaqueNearFirst = false;
+    public boolean experimentalChunkMaskHalfRes = false;
+
+    /** 返回经过范围修正的扩展区块请求距离。 */
+    public int getRequestDistance() {
+        return Math.clamp(this.requestDistance, MIN_REQUEST_DISTANCE, MAX_REQUEST_DISTANCE);
+    }
+
+    /** 将 LOD 半径转换为远景实体使用的方块距离。 */
+    public int getFarEntityRenderDistanceBlocks() {
+        return Math.clamp(Math.round(this.sectionRenderDistance * 32.0f * 16.0f), 64, 32768);
+    }
+
+    /** 返回有效的 LOD 构建压力档位，并修复旧配置中的越界值。 */
+    public int getRenderPressureLevel() {
+        if (this.renderPressure < 0 || this.renderPressure > 4) {
+            this.renderPressure = 2;
+        }
+        return this.renderPressure;
+    }
+
+    /** 从旧版浮点细分值反推出最接近的七档渲染精度。 */
+    public int getRenderQualityLevel() {
+        if (!Float.isFinite(this.subDivisionSize) || this.subDivisionSize <= 0) {
+            return DEFAULT_RENDER_QUALITY_LEVEL;
+        }
+        int closest = 0;
+        double distance = Double.POSITIVE_INFINITY;
+        for (int i = 0; i < RENDER_QUALITY_SIZES.length; i++) {
+            double candidate = Math.abs(Math.log(this.subDivisionSize / RENDER_QUALITY_SIZES[i]));
+            if (candidate < distance) {
+                closest = i;
+                distance = candidate;
+            }
+        }
+        return closest;
+    }
+
+    /** 将设置页档位转换回兼容旧配置格式的细分尺寸。 */
+    public void setRenderQualityLevel(int level) {
+        this.subDivisionSize = RENDER_QUALITY_SIZES[Math.clamp(level, 0, RENDER_QUALITY_SIZES.length - 1)];
+    }
+
+    /** 读取树叶 LOD 模式；未知字符串回退到平衡模式。 */
+    public LeafLodMode getLeafLodMode() {
+        if (this.leafLodMode == null) {
+            return LeafLodMode.BALANCED;
+        }
+
+        try {
+            return LeafLodMode.valueOf(this.leafLodMode.toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException ignored) {
+            return LeafLodMode.BALANCED;
+        }
+    }
+
+    public void setLeafLodMode(LeafLodMode mode) {
+        this.leafLodMode = mode.name().toLowerCase(Locale.ROOT);
+    }
+
+    // Ecliptic Seasons 只影响重新烘焙的模型视图，缓存中的体素保持季节无关。
+    public boolean eclipticSeasonsSnowLod = true;
+    public boolean eclipticSeasonsLodAutoReload = false;
+    public boolean eclipticSeasonsReloadOnSeasonChange = true;
+
+    // 世界加入时显示版本和维护信息。
+    public boolean showJoinMessage = true;
 
     public SSAO.SSAOMode getSSAOMode() {
-        if (this.ssaoMode == null) return SSAO.SSAOMode.AUTO;
+        if (this.ssaoMode == null) {
+            return SSAO.SSAOMode.AUTO;
+        }
+
         try {
             return SSAO.SSAOMode.valueOf(this.ssaoMode.toUpperCase(Locale.ROOT));
-        } catch (Exception e) { return SSAO.SSAOMode.AUTO; }
+        } catch (IllegalArgumentException ignored) {
+            return SSAO.SSAOMode.AUTO;
+        }
     }
 
     public void setSSAOMode(SSAO.SSAOMode mode) {
@@ -86,65 +214,133 @@ public class VoxyConfig {
     }
 
     private static VoxyConfig loadOrCreate() {
-        if (VoxyCommon.isAvailable()) {
-            var path = getConfigPath();
-            if (Files.exists(path)) {
-                try (FileReader reader = new FileReader(path.toFile())) {
-                    var conf = GSON.fromJson(reader, VoxyConfig.class);
-                    if (conf != null) {
-                        conf.save();
-                        return conf;
-                    } else {
-                        Logger.error("Failed to load voxy config, resetting");
-                    }
-                } catch (Exception e) {
-                    // Nothing may escape here: this runs from the static initialiser, so any throw becomes an
-                    // ExceptionInInitializerError, which leaves the class permanently unusable and takes mod
-                    // loading down with it. Gson throws unchecked on malformed values (e.g. a fractional number
-                    // in an int field), so catch broadly and fall back to defaults.
-                    Logger.error("Could not parse config, resetting", e);
-                }
-                backupUnreadableConfig(path);
-            }
-            Logger.info("Config doesnt exist, creating new");
-            var config = new VoxyConfig();
-            config.save();
-            return config;
-        } else {
+        if (!VoxyCommon.isAvailable()) {
             var config = new VoxyConfig();
             config.enabled = false;
             config.enableRendering = false;
             return config;
         }
+
+        Path path = getConfigPath();
+        if (Files.exists(path)) {
+            try (FileReader reader = new FileReader(path.toFile())) {
+                VoxyConfig config = GSON.fromJson(reader, VoxyConfig.class);
+                if (config != null) {
+                    config.sanitize();
+                    return config;
+                }
+                Logger.error("Failed to load Voxy config; resetting it");
+            } catch (IOException | RuntimeException e) {
+                Logger.error("Could not load Voxy config; resetting it", e);
+                backupInvalidConfig(path);
+            }
+        }
+
+        Logger.info("Config does not exist; creating a new one");
+        var config = new VoxyConfig();
+        config.save();
+        return config;
     }
 
-    // Moves a config we could not read aside instead of letting the reset overwrite it, so the user's
-    // settings survive for recovery and the bad file is still there to diagnose.
-    private static void backupUnreadableConfig(Path path) {
-        try {
-            Files.move(path, path.resolveSibling(path.getFileName() + ".broken"), StandardCopyOption.REPLACE_EXISTING);
-        } catch (IOException e) {
-            Logger.error("Failed to back up unreadable config", e);
+    public void sanitize() {
+        this.cmdListHoldMaxFrames = Math.clamp(this.cmdListHoldMaxFrames, 2, 60);
+        this.sectionArrayPoolMiB = Math.clamp(this.sectionArrayPoolMiB, 25, 1024);
+        WorldSection.setArrayPoolCapMiB(this.sectionArrayPoolMiB);
+        this.sectionRenderDistance = Math.clamp(this.sectionRenderDistance, 2.0f, 64.0f);
+        this.setRenderQualityLevel(this.getRenderQualityLevel());
+        this.requestDistance = Math.clamp(this.requestDistance, MIN_REQUEST_DISTANCE, MAX_REQUEST_DISTANCE);
+        // Older builds measured this percentage against one sixteenth of the LOD radius.
+        if (this.fogDistancePercent > 200) {
+            this.fogDistancePercent = Math.max(5, Math.round(this.fogDistancePercent / 16.0f));
+        }
+        this.fogDistancePercent = Math.clamp(this.fogDistancePercent, 5, 200);
+        this.skyFogDistance = Math.clamp(this.skyFogDistance, 0, 1024);
+        this.cloudDistance = Math.clamp(this.cloudDistance, 0, MAX_CLOUD_DISTANCE);
+        this.fogIntensity = Math.clamp(this.fogIntensity, 0.0f, 1.0f);
+        this.fogDensity = Math.clamp(this.fogDensity, 0.0f, 1.0f);
+        this.lodBoundaryBuffer = Math.clamp(this.lodBoundaryBuffer, 0, 4);
+        this.lodBoundaryFadeLength = Math.clamp(this.lodBoundaryFadeLength, 8, 64);
+        this.lodBoundaryInset = Math.clamp(this.lodBoundaryInset, 8, 32);
+        this.setLeafLodMode(this.getLeafLodMode());
+        this.farPlayerAnimationDistance = Math.clamp(this.farPlayerAnimationDistance, 0, 32768);
+        this.aeronauticsContraptionMaxChunks = Math.clamp(this.aeronauticsContraptionMaxChunks, 0, 192);
+        this.biomeBlendRadius = Math.clamp(this.biomeBlendRadius, 0, 7);
+        if (!"water".equals(this.biomeBlendScope) && !"water_grass".equals(this.biomeBlendScope)) {
+            this.biomeBlendScope = "water";
         }
     }
 
     public void save() {
         if (!VoxyCommon.isAvailable()) {
-            Logger.info("Not saving config since voxy is unavalible");
+            Logger.info("Not saving config since voxy is unavailable");
+            this.syncSableContraptionRenderDistance();
+            this.syncDistantTrainConfig();
             return;
         }
 
+        this.sanitize();
+        Path path = getConfigPath();
+        Path temporary = path.resolveSibling(path.getFileName() + ".tmp");
+
         try {
-            Files.writeString(getConfigPath(), GSON.toJson(this));
+            Files.createDirectories(path.getParent());
+            Files.writeString(temporary, GSON.toJson(this));
+            try {
+                Files.move(temporary, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            } catch (AtomicMoveNotSupportedException ignored) {
+                Files.move(temporary, path, StandardCopyOption.REPLACE_EXISTING);
+            }
         } catch (IOException e) {
-            Logger.error("Failed to write config file", e);
+            Logger.error("Failed to write Voxy config", e);
+            try {
+                Files.deleteIfExists(temporary);
+            } catch (IOException ignored) {
+            }
+        }
+
+        this.syncSableContraptionRenderDistance();
+        this.syncDistantTrainConfig();
+    }
+
+    private static void backupInvalidConfig(Path path) {
+        try {
+            Path backup = path.resolveSibling(path.getFileName() + ".invalid");
+            Files.move(path, backup, StandardCopyOption.REPLACE_EXISTING);
+        } catch (IOException e) {
+            Logger.error("Failed to back up invalid Voxy config", e);
         }
     }
 
+    public void syncSableContraptionRenderDistance() {
+        SableContraptionRenderDistance.updateClientConfig(
+                this.isRenderingEnabled() && this.sableLodRendering,
+                this.sectionRenderDistance,
+                this.aeronauticsContraptionMaxChunks
+        );
+    }
+
+    public void syncDistantTrainConfig() {
+        DistantTrainConfig.updateClientConfig(
+                this.isRenderingEnabled() && this.distantTrains,
+                this.createRenderDistance(this.distantTrainMaxChunks)
+        );
+        DistantTrainConfig.updateClientContraptionConfig(
+                this.isRenderingEnabled() && this.distantContraptions,
+                this.createRenderDistance(this.distantContraptionMaxChunks)
+        );
+    }
+
+    public double createLodRadius() {
+        return 32.0 * 16.0 * this.sectionRenderDistance;
+    }
+
+    public double createRenderDistance(int maxChunks) {
+        double lod = this.createLodRadius();
+        return maxChunks > 0 ? Math.min(maxChunks * 16.0, lod) : lod;
+    }
+
     private static Path getConfigPath() {
-        return FMLPaths.CONFIGDIR
-                .get()
-                .resolve("voxy-config.json");
+        return FMLPaths.CONFIGDIR.get().resolve("voxy-config.json");
     }
 
     public boolean isRenderingEnabled() {

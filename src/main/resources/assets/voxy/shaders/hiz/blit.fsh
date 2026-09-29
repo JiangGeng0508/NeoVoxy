@@ -11,7 +11,7 @@ void main() {
     vec4 depths = textureGather(depthTex, uv, 0); // Get depth values from all surrounding texels.
 
     bvec4 cv = equal(vec4(FAR), depths);
-    if (any(cv)) {//Patch holes (its very dodgy but should work :tm:, should clamp it to the first 3 levels)
+    if (any(cv)) {
         depths = mix(vec4(NEAR), depths, cv);
     }
 

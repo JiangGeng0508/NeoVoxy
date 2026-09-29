@@ -11,13 +11,6 @@ layout(local_size_x = 128) in;
 #import <voxy:lod/section.glsl>
 #import <voxy:lod/gl46/bindings.glsl>
 
-/*
-    uint  count;
-    uint  instanceCount;
-    uint  firstIndex;
-    int  baseVertex;
-    uint  baseInstance;
-    */
 
 layout(binding = TRANSLUCENT_DISTANCE_BUFFER_BINDING, std430) restrict buffer TranslucentCommandCount {
     uint[] translucentCommandData;

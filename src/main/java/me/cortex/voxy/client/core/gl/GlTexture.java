@@ -118,7 +118,7 @@ public class GlTexture extends TrackedObject {
         this.assertAllocated();
         long elemSize = switch (this.format) {
             case GL_R32UI, GL_RGBA8, GL_DEPTH24_STENCIL8, GL_R32F, GL_RG16F -> 4;
-            case GL_DEPTH_COMPONENT24 -> 4;//TODO: check this is right????
+            case GL_DEPTH_COMPONENT24 -> 4;
             case GL_DEPTH_COMPONENT32F -> 4;
             case GL_DEPTH_COMPONENT32 -> 4;
 

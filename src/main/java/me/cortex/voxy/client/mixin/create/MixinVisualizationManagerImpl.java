@@ -1,0 +1,72 @@
+package me.cortex.voxy.client.mixin.create;
+
+import dev.engine_room.flywheel.api.backend.RenderContext;
+import dev.engine_room.flywheel.impl.visualization.VisualizationManagerImpl;
+import me.cortex.voxy.client.compat.ShipBorne;
+import me.cortex.voxy.client.compat.sable.VoxySableDepthShim;
+import me.cortex.voxy.client.core.util.IrisUtil;
+import net.minecraft.world.level.LevelAccessor;
+import org.joml.Matrix4f;
+import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
+
+@Mixin(value = VisualizationManagerImpl.class, remap = false)
+public class MixinVisualizationManagerImpl {
+    @Inject(method = "supportsVisualization", at = @At("HEAD"), cancellable = true)
+    private static void voxy$bypassDuringCapture(LevelAccessor level, CallbackInfoReturnable<Boolean> cir) {
+        if (me.cortex.voxy.client.compat.create.KineticSnapshots.isCapturingOnThisThread()) {
+            cir.setReturnValue(false);
+        }
+    }
+
+    @org.spongepowered.asm.mixin.Unique
+    private boolean voxy$depthWrapped;
+
+    //Flywheel visuals reach past the block they belong to - piston poles, pulley ropes, mechanical arms.
+    //Section layers need a block or two; this one is given room for those.
+    @org.spongepowered.asm.mixin.Unique
+    private static final double FLYWHEEL_OVERHANG_BLOCKS = 32.0D;
+
+    @Inject(method = "render", at = @At("HEAD"))
+    private void voxy$beginCombinedDepth(RenderContext context, CallbackInfo ci) {
+        //Shader packs only: without one, renderToVanillaDepth already writes LOD depth into the depth
+        //buffer this pass tests against, and the wrap's five fullscreen depth passes buy nothing.
+        this.voxy$depthWrapped = false;
+        if (!IrisUtil.irisShaderPackEnabled() || IrisUtil.irisShadowActive() || !ShipBorne.anyShipPresent()) {
+            return;
+        }
+
+        //This wrap exists for ship kinetics, so it need cover no more than the ships - a world-placed
+        //visual outside them sits well inside the LOD start and gets the same vanilla depth either way.
+        var camera = context.camera().getPosition();
+        var bounds = ShipBorne.shipScreenBounds(camera.x, camera.y, camera.z,
+                new Matrix4f(context.modelView()), new Matrix4f(context.projection()), FLYWHEEL_OVERHANG_BLOCKS);
+        if (bounds.skip() != me.cortex.voxy.client.compat.sable.SableScreenBounds.Skip.NONE) {
+            if (bounds.skip() == me.cortex.voxy.client.compat.sable.SableScreenBounds.Skip.ALL_NEAR) {
+                VoxySableDepthShim.nearPassesSkipped++;
+            } else {
+                VoxySableDepthShim.offscreenPassesSkipped++;
+            }
+            return;
+        }
+
+        this.voxy$depthWrapped = true;
+        //In-place variant: Iris rebinds framebuffers inside this pass, which silently evicted the
+        //framebuffer-swap wrap - editing the target's own depth texture survives any rebinding
+        VoxySableDepthShim.beginInPlace(new Matrix4f(context.modelView()), new Matrix4f(context.projection()),
+                bounds.ndc());
+    }
+
+    //Paired off the flag rather than re-testing the begin condition, which could flip mid-render and
+    //desynchronize the begin/end nesting
+    @Inject(method = "render", at = @At("RETURN"))
+    private void voxy$endCombinedDepth(RenderContext context, CallbackInfo ci) {
+        if (this.voxy$depthWrapped) {
+            this.voxy$depthWrapped = false;
+            VoxySableDepthShim.endInPlace();
+        }
+    }
+}

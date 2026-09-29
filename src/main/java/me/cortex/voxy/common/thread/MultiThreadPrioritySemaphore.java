@@ -13,7 +13,6 @@ public class MultiThreadPrioritySemaphore {
     public static final class Block extends TrackedObject {
         private final Semaphore blockSemaphore = new Semaphore(0);//The work pool semaphore
         private final Semaphore localSemaphore = new Semaphore(0);//The local semaphore
-        //private final AtomicInteger debt = new AtomicInteger();//the debt of the work pool semphore with respect to the usage
         private final MultiThreadPrioritySemaphore man;
 
         Block(MultiThreadPrioritySemaphore man) {
@@ -30,23 +29,7 @@ public class MultiThreadPrioritySemaphore {
             this.acquire(true);
         }
         public void acquire(boolean runJob) {//Block until a permit for this block is availbe, other jobs maybe executed while we wait
-            /*
-            while (true) {
-                this.blockSemaphore.acquireUninterruptibly();//Block on all
-                if (this.localSemaphore.tryAcquire()) {//We prioritize locals first
-                    return;
-                }
-                if (runJob) {
-                    //It wasnt a local job so run
-                    this.man.tryRun(this);
-                } else {
-                    this.blockSemaphore.release(1);
-                    Thread.onSpinWait();
-                    Thread.yield();
-                }
-            }*/
 
-            //Absolutly no idea if this shitty thing functions correctly... at all, it very much probably doesnt
             while (true) {
                 if (runJob) {
                     this.blockSemaphore.acquireUninterruptibly();//Block on all
@@ -133,12 +116,6 @@ public class MultiThreadPrioritySemaphore {
         if (!this.pooledSemaphore.tryAcquire()) {//No jobs for the unified pool
             return false;
         }
-        /*
-        for (var otherBlock : this.blocks) {
-            if (otherBlock != block) {
-                block.debt.incrementAndGet();
-            }
-        }*/
         //Run the pooled job
         while (true) {
             int status = this.executor.getAsInt();

@@ -6,9 +6,6 @@ import java.util.Arrays;
 import java.util.BitSet;
 import java.util.Random;
 
-//Block occupancy, 2 lvl compacted bitset for occluding block existance
-// TODO: need to add neighboring chunk data aswell? or somehow do a linking thing where this is stored in a secondary storage
-//  where we can link them together (or store the neighbor faces seperately or something) might be out of scope for this class
 public class OccupancySet {
     private long topLvl;//4x4x4
     private final long[] bottomLvl = new long[(4*4*4)*8];

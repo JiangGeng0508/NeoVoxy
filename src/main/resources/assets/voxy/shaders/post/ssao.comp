@@ -34,13 +34,6 @@ vec4 reDeProject(vec3 pos) {
     samplePos = clamp((vec2(ivec2(samplePos*size))+0.5)*scale, vec2(0.0f), vec2(1.0f));
     view.xy = samplePos;
 
-    /*
-    vec4 depths = textureGather(depthTex, UV);
-
-    vec2 dummy;
-    vec2 frac = modf(UV*size, dummy);
-    vec2 depths2 = mix(depths.wz, depths.xy, frac.y);
-    float depth = mix(depths2.x, depths2.y, frac.x);*/
 
     float depth = texture(depthTex, view.xy).x;
 
@@ -89,8 +82,6 @@ float computeAO(vec3 uvDepth, vec3 normal) {
 
 
 #ifdef BETTER_SSAO
-//Based on photons ssao https://github.com/sixthsurge/photon/blob/40adec318ea608d9f9ba88fcc272730af0899a62/shaders/include/lighting/ao/ssao.glsl
-// used with permission
 
 #ifndef SSAO_STEPS
 #define SSAO_STEPS 12
@@ -178,19 +169,17 @@ float computeAO(vec3 uvDepth, vec3 worldNorm)
     float ao = 0.0;
 
     for (int i = 0; i < SSAO_STEPS; ++i) {
-        //TODO: note get_ssao_sample_offset(i, vec2(0.5)) is CONSTANT (its the same every frame for every sample, can move it into a const array or compute it during compile)
 
         #ifdef USE_GENERATED_SAMPLE_POINTS
         vec2 sample_uv = clamp(uvDepth.xy + sample_matrix * SAMPLE_POINTS[i], vec2(0), vec2(1));
         #else
         vec2 sample_uv = clamp(uvDepth.xy + sample_matrix*get_ssao_sample_offset(i, vec2(0.5f)), vec2(0), vec2(1));
-        //vec2 sample_uv = clamp(uvDepth.xy + sample_matrix*get_ssao_sample_offset(i, r2(int(gl_GlobalInvocationID.x*982379281+gl_GlobalInvocationID.y+18711)%8192)), vec2(0), vec2(1));
         #endif
         sample_uv = (vec2(ivec2(sample_uv*size))+0.5)*scale;
         float depth = texture(depthTex, sample_uv).x;
 
 
-        if (depth == FAR || depth == uvDepth.z) {//TODO FIXME: check depth == uvDepth.z isnt causing any other strange issues (might be better to compare the sample uv instead)
+        if (depth == FAR || depth == uvDepth.z) {
             continue;
         }
         vec3 offset_view;// = rev3d(invProj, vec3(sample_uv, depth));
@@ -210,11 +199,6 @@ float computeAO(vec3 uvDepth, vec3 worldNorm)
         offset_view -= position_view;
 
         float slen = dot(offset_view,offset_view);
-        /*
-        //TODO THIS BUT IN WORLDSPACE CHECK
-        if (slen>9.0f) {
-            continue;
-        }*/
         float rlen = inversesqrt(slen);
         float angle = dot(offset_view, viewNormal)*rlen;
         float cos_theta = clamp(angle, 0, 1);
@@ -245,7 +229,7 @@ vec3 face2norm(uint face) {
 }
 
 void main() {
-    size = imageSize(colourTexOut);//TODO: dont use imageSize as it is slow, swap for uniform
+    size = imageSize(colourTexOut);
     if (any(lessThanEqual(size, gl_GlobalInvocationID.xy))) {
         return;
     }

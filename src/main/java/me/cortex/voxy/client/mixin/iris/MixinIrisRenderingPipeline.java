@@ -47,32 +47,24 @@ public class MixinIrisRenderingPipeline implements IGetVoxyPatchData, IGetIrisVo
             var renderer = ((IGetVoxyRenderSystem) Minecraft.getInstance().levelRenderer).voxy$getRenderSystem();
             if (renderer != null) {
                 IrisUtil.CAPTURED_VIEWPORT_PARAMETERS.apply(renderer);
+                IrisUtil.CAPTURED_VIEWPORT_PARAMETERS = null;
+                IrisUtil.USED_IRIS_VIEWPORT = true;
             }
         }
     }
 
-    @Inject(method = "beginLevelRendering", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/renderer/LevelRenderer;allChanged()V", shift = At.Shift.BEFORE), remap = false)
-    private void voxy$beginBlockMaterialInitialization(CallbackInfo ci) {
-        IrisUtil.beginBlockMaterialInitialization();
-    }
-
-    @Inject(method = "beginLevelRendering", at = @At(value = "INVOKE", target = "Lnet/minecraft/client/renderer/LevelRenderer;allChanged()V", shift = At.Shift.AFTER), remap = false)
-    private void voxy$endBlockMaterialInitialization(CallbackInfo ci) {
-        IrisUtil.endBlockMaterialInitialization();
-    }
-
-    @Inject(method = "destroy", at = @At("HEAD"), remap = false)
-    private void voxy$destroyPipelineData(CallbackInfo ci) {
-        IrisVoxyRenderPipelineData data = this.pipeline;
-        if (data == null) {
+    @Inject(method = "finalizeLevelRendering", at = @At("TAIL"))
+    private void voxy$renderUnpatchedShaderFallback(CallbackInfo ci) {
+        if (this.patchData != null) {
             return;
         }
-
-        data.markIrisPipelineDestroyed();
-        if (data.thePipeline != null && Minecraft.getInstance().levelRenderer instanceof IGetVoxyRenderSystem renderer) {
-            renderer.voxy$shutdownRenderer();
+        var levelRenderer = Minecraft.getInstance().levelRenderer;
+        if (levelRenderer instanceof IGetVoxyRenderSystem access) {
+            var renderer = access.voxy$getRenderSystem();
+            if (renderer != null) {
+                renderer.renderUnpatchedIrisFallback();
+            }
         }
-        this.pipeline = null;
     }
 
     @Override

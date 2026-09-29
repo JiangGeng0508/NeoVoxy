@@ -4,27 +4,24 @@ import me.cortex.voxy.client.core.gl.Capabilities;
 import me.cortex.voxy.client.core.gl.GlBuffer;
 import me.cortex.voxy.client.core.gl.GlTexture;
 import me.cortex.voxy.client.core.model.ModelFactory;
-import me.cortex.voxy.client.core.rendering.section.geometry.BasicSectionGeometryData;
-import me.cortex.voxy.client.core.rendering.section.geometry.IGeometryData;
 import me.cortex.voxy.common.Logger;
 import me.cortex.voxy.common.util.ThreadUtils;
 import me.cortex.voxy.common.util.TrackedObject;
-import me.cortex.voxy.commonImpl.VoxyCommon;
 
 import java.util.ArrayList;
 
 import static org.lwjgl.opengl.ARBSparseBuffer.GL_SPARSE_STORAGE_BIT_ARB;
 import static org.lwjgl.opengl.GL11.GL_RGBA8;
-import static org.lwjgl.opengl.GL11C.*;
 import static org.lwjgl.opengl.GL11C.GL_NO_ERROR;
+import static org.lwjgl.opengl.GL11C.GL_OUT_OF_MEMORY;
+import static org.lwjgl.opengl.GL11C.glGetError;
 
-//System to allow reuse/recycling of render buffer/texture allocations
-// specfically the geometry buffer and texture atlas allocation
+/** 复用渲染器生命周期之间的几何缓冲和模型纹理分配。 */
 public class RenderResourceReuse {
     private static final ArrayList<GlTexture> MODEL_TEXTURE_CACHE = new ArrayList<>();
     private static final ArrayList<GlBuffer> GEOMETRY_BUFFER_CACHE = new ArrayList<>();
 
-    //Clears and frees any cached resources (used when the entire instance is shutdown)
+    /** 实例完全销毁时清空缓存，调用者必须保证没有渲染线程继续使用这些资源。 */
     public static void clearResources() {
         MODEL_TEXTURE_CACHE.forEach(TrackedObject::free);
         GEOMETRY_BUFFER_CACHE.forEach(TrackedObject::free);
@@ -34,17 +31,14 @@ public class RenderResourceReuse {
 
 
     public static GlTexture getOrCreateModelStoreTextureAtlas() {
-        GlTexture atlas = null;
         if (!MODEL_TEXTURE_CACHE.isEmpty()) {
-            atlas = MODEL_TEXTURE_CACHE.removeFirst().zero();
-        } else {
-            atlas = new GlTexture().store(GL_RGBA8,
-                        Integer.numberOfTrailingZeros(ModelFactory.MODEL_TEXTURE_SIZE),
-                        ModelFactory.MODEL_TEXTURE_SIZE*3*256,
-                        ModelFactory.MODEL_TEXTURE_SIZE*2*256)
-                    .name("ModelTextures");
+            return MODEL_TEXTURE_CACHE.removeFirst().zero();
         }
-        return atlas;
+        return new GlTexture().store(GL_RGBA8,
+                        Integer.numberOfTrailingZeros(ModelFactory.MODEL_TEXTURE_SIZE),
+                        ModelFactory.MODEL_TEXTURE_SIZE * 3 * 256,
+                        ModelFactory.MODEL_TEXTURE_SIZE * 2 * 256)
+                .name("ModelTextures");
     }
     public static void giveBackModelStoreTextureAtlas(GlTexture texture) {
         MODEL_TEXTURE_CACHE.add(texture);
@@ -54,7 +48,6 @@ public class RenderResourceReuse {
         GlBuffer buffer = null;
         if (!GEOMETRY_BUFFER_CACHE.isEmpty()) {
             buffer = GEOMETRY_BUFFER_CACHE.removeFirst();
-            //Reuse buffer, todo: probably check the geometry size and try upsize if possible
         } else {
             long capacity = getGeometryBufferSize();
             long driverMemory = -1;
@@ -63,9 +56,8 @@ public class RenderResourceReuse {
             }
 
             glGetError();//Clear any errors
-            if (!(Capabilities.INSTANCE.isNvidia&& ThreadUtils.isWindows&&Capabilities.INSTANCE.sparseBuffer)) {//This hack makes it so it doesnt crash on renderdoc
+            if (!(Capabilities.INSTANCE.isNvidia&& ThreadUtils.isWindows&&Capabilities.INSTANCE.sparseBuffer)) {
                 buffer = new GlBuffer(capacity, false);//Only do this if we are not on nvidia
-                //TODO: FIXME: TEST, see if the issue is that we are trying to zero the entire buffer, try only zeroing increments
                 // or dont zero it at all
             } else {
                 Logger.info("Running on nvidia, using workaround sparse buffer allocation");
@@ -78,14 +70,15 @@ public class RenderResourceReuse {
                         buffer.free();
                     }
                     buffer = new GlBuffer(capacity, GL_SPARSE_STORAGE_BIT_ARB);
-                    //buffer.zero();
                     error = glGetError();
                     if (error != GL_NO_ERROR) {
                         buffer.free();
-                        throw new IllegalStateException("Unable to allocate geometry buffer using workaround, got gl error " + error);
+                        throw new IllegalStateException("Unable to allocate geometry buffer using workaround, got gl error "
+                                + error + ". Failed to allocate buffer of size " + capacity);
                     }
                 } else {
-                    throw new IllegalStateException("Unable to allocate geometry buffer, got gl error " + error);
+                    throw new IllegalStateException("Unable to allocate geometry buffer, got gl error "
+                            + error + ". Failed to allocate buffer of size " + capacity);
                 }
             }
             String extra = "";

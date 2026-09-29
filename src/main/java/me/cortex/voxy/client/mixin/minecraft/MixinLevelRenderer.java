@@ -31,14 +31,12 @@ public abstract class MixinLevelRenderer implements IGetVoxyRenderSystem {
 
     @Inject(method = "allChanged()V", at = @At("RETURN"), order = 900)//We want to inject before sodium
     private void voxy$reloadVoxyRenderer(CallbackInfo ci) {
-        if (IrisUtil.isBlockMaterialInitialization()) {
-            // Iris pipeline recreation destroys the renderer together with the old pipeline, then
-            // calls allChanged() from beginLevelRendering with this flag set. If the renderer is
-            // still alive, only refresh the material mapping; if it was destroyed, recreate it,
-            // otherwise Voxy stays dead until the player manually toggles it off and on.
-            if (this.renderer != null) {
-                this.renderer.refreshModelMaterialMapping();
-                return;
+        var seasonalView = me.cortex.voxy.client.core.compat.eclipticseasons.SeasonalLod.view;
+        if (seasonalView != null) {
+            try {
+                seasonalView.clearCaches();
+            } catch (LinkageError e) {
+                me.cortex.voxy.client.core.compat.eclipticseasons.SeasonalLod.disarm(e);
             }
         }
         this.voxy$shutdownRenderer();
@@ -61,6 +59,7 @@ public abstract class MixinLevelRenderer implements IGetVoxyRenderSystem {
 
     @Override
     public void voxy$shutdownRenderer() {
+        me.cortex.voxy.client.core.compat.eclipticseasons.SeasonalSnowRefresher.cancelAndJoin();
         if (this.renderer != null) {
             this.renderer.shutdown();
             this.renderer = null;
@@ -69,7 +68,7 @@ public abstract class MixinLevelRenderer implements IGetVoxyRenderSystem {
 
     @Override
     public void voxy$createRenderer() {
-        if (this.renderer != null) throw new IllegalStateException("Cannot have multiple renderers");
+        if (this.renderer != null) return;
         if (!VoxyConfig.CONFIG.enabled) {
             Logger.info("Not creating renderer due to disabled");
             return;

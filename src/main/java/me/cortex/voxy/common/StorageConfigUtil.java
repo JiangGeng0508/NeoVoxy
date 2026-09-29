@@ -2,6 +2,7 @@ package me.cortex.voxy.common;
 
 import me.cortex.voxy.common.config.Serialization;
 import me.cortex.voxy.common.config.compressors.LZ4Compressor;
+import me.cortex.voxy.common.config.compressors.ZSTDCompressor;
 import me.cortex.voxy.common.config.section.SectionSerializationStorage;
 import me.cortex.voxy.common.config.section.SectionStorageConfig;
 import me.cortex.voxy.common.config.storage.other.CompressionStorageAdaptor;
@@ -54,6 +55,24 @@ public class StorageConfigUtil {
 
     public static SectionSerializationStorage.Config createDefaultSerializer() {
         //Create the default config
+        var baseDB = new RocksDBStorageBackend.Config();
+
+        var compressor = new ZSTDCompressor.Config();
+        compressor.compressionLevel = 1;
+
+        var compression = new CompressionStorageAdaptor.Config();
+        compression.delegate = baseDB;
+        compression.compressor = compressor;
+
+        var serializer = new SectionSerializationStorage.Config();
+        serializer.storage = compression;
+
+        return serializer;
+    }
+
+    //Dedicated servers have no lwjgl natives, so the lwjgl-backed ZSTDCompressor cannot run there.
+    //Use LZ4 for the dedicated-server section storage instead.
+    public static SectionSerializationStorage.Config createDefaultSerializerForDedicatedServer() {
         var baseDB = new RocksDBStorageBackend.Config();
 
         var compressor = new LZ4Compressor.Config();

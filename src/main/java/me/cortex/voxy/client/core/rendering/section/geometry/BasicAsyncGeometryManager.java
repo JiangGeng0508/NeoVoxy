@@ -24,7 +24,6 @@ public class BasicAsyncGeometryManager implements IGeometryManager {
 
     //Changes that need to be applied to the underlying data store to match this state
     private final IntOpenHashSet invalidatedIds = new IntOpenHashSet(1024);//Ids that need to be invalidated
-    //TODO: maybe change from it pointing to MemoryBuffer, to BuiltSection
     //Note!: the int part is an unsigned int ptr, must be scaled by GEOMETRY_ELEMENT_SIZE
     private final Int2ObjectOpenHashMap<MemoryBuffer> heapUploads = new Int2ObjectOpenHashMap<>(1024);//Uploads into the buffer at the given location
     private final IntOpenHashSet heapRemoveUploads = new IntOpenHashSet(1024);//Any removals are added here, so that it can be properly synced
@@ -83,7 +82,6 @@ public class BasicAsyncGeometryManager implements IGeometryManager {
         //Invalidate the section id
         this.invalidatedIds.add(newId);
 
-        //HierarchicalOcclusionTraverser.HACKY_SECTION_COUNT = this.allocationSet.getCount();
         return newId;
     }
 

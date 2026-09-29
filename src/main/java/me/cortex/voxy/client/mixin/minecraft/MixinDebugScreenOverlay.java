@@ -61,7 +61,6 @@ public abstract class MixinDebugScreenOverlay {
         //Voxy instance active
         voxyLines.add((vrs==null?ChatFormatting.DARK_GREEN:ChatFormatting.GREEN)+"voxy-"+VoxyCommon.MOD_VERSION);
 
-        //lines.addLineToSection();
         List<String> instanceLines = new ArrayList<>();
         instance.addDebug(instanceLines);
         voxyLines.addAll(instanceLines);

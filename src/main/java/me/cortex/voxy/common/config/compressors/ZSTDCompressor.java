@@ -48,7 +48,6 @@ public class ZSTDCompressor implements StorageCompressor {
     public MemoryBuffer decompress(MemoryBuffer saveData) {
         var decompressed = SCRATCH.get().createUntrackedUnfreeableReference();
         long size = nZSTD_decompressDCtx(DECOMPRESSION_CTX.get().ptr, decompressed.address, decompressed.size, saveData.address, saveData.size);
-        //TODO:FIXME: DONT ASSUME IT DOESNT FAIL
         return decompressed.subSize(size);
     }
 

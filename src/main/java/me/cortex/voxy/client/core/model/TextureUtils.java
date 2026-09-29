@@ -35,7 +35,6 @@ public class TextureUtils {
         } else if (mode == WRITE_CHECK_DEPTH) {
             return (data.depth()[index] >>> 8) != ((1 << 24) - 1);
         } else if (mode == WRITE_CHECK_ALPHA) {
-            //TODO:FIXME: for some reason it has an alpha of 1 even if its ment to be 0
             return ((data.colour()[index] >>> 24) & 0xff) > 1;
         }
         throw new IllegalArgumentException();
@@ -153,14 +152,11 @@ public class TextureUtils {
     private static float u2fdepth(int depth) {
         float depthF = (float) ((double) depth / ((1 << 24) - 1));
         //https://registry.khronos.org/OpenGL-Refpages/gl4/html/glDepthRange.xhtml
-        // due to this and the unsigned bullshit, believe the depth value needs to get multiplied by 2
 
         ////Shouldent be needed due to the compute bake copy
         //depthF *= 2;
-        //if (depthF > 1.00001f) {//Basicly only happens when a model goes out of bounds (thing)
         //    //System.err.println("Warning: Depth greater than 1");
         //    depthF = 1.0f;
-        //}
         return depthF;
     }
 

@@ -31,21 +31,20 @@ void main() {
     //Transform ipos with respect to the vertex corner
     ivec3 pos = (((ipos<<detail)-baseSectionPos)<<5);
 
-    //TODO maybe make the size expansion 0.5 (or maybe get rid of it all together?)
     const float EXPANSION = 1.0f;
 
     //World curvature drops the LOD mesh below this flat AABB, so expand the box downward by the
-    // drop at its farthest corner. Without this the curved boundary sections are wrongly culled as
-    // occluded by the flat vanilla chunks -> black holes in the void below them.
+    //drop at its farthest corner. Without this the curved boundary sections are wrongly culled as
+    //occluded by the flat vanilla chunks -> black holes in the void below them.
     float drop = 0.0f;
-    if (uEarthRadius > 0.0f) {
+    if (worldCurveData.x > 0.0f) {
         float s = float(1<<detail);
         vec2 minXZ = vec2(pos.xz) + (vec2(aabbOffset.xz) - EXPANSION) * s;
         vec2 maxXZ = vec2(pos.xz) + (vec2(aabbOffset.xz) + vec2(size.xz) + EXPANSION) * s;
         vec2 farXZ = mix(minXZ, maxXZ, greaterThan(abs(maxXZ), abs(minXZ)));
-        float curveDist = length(farXZ) - uVanillaEnd;
+        float curveDist = length(farXZ) - worldCurveData.y;
         if (curveDist > 0.0f) {
-            float radius = uEarthRadius + max(float(pos.y), 0.0f);
+            float radius = worldCurveData.x + max(float(pos.y), 0.0f);
             float phi = curveDist / radius;
             drop = (cos(phi) - 1.0f) * radius;
         }
@@ -71,7 +70,7 @@ void main() {
 
     //Me when data race condition between visibilityData in the vert shader and frag shader
     uint previous = visibilityData[sid]&0x7fffffffu;
-    bool wasVisibleLastFrame = previous==(frameId-1);
+    bool wasVisibleLastFrame = previous==prevBuildFrameId;
     value = (frameId&0x7fffffffu)|(uint(wasVisibleLastFrame)<<31);//Encode if it was visible last frame
 }
 

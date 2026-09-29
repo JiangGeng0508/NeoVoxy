@@ -22,7 +22,6 @@ public class DebugUtils {
                     if (engine.instanceIn != null && !engine.instanceIn.isRunning()) break;
                     long pos = positions.dequeueLong();
                     verifyTopNodeChildren(engine, WorldEngine.getX(pos), WorldEngine.getY(pos), WorldEngine.getZ(pos), attemptRepair);
-                    //if ((count - positions.size())/count)
                 }
                 if (engine.instanceIn != null && !engine.instanceIn.isRunning()) {
                     Logger.info("Verification aborted due to shutdown");
@@ -41,7 +40,6 @@ public class DebugUtils {
 
 
     public static void verifyTopNodeChildren(WorldEngine world, int X, int Y, int Z, boolean tryRepair) {
-        //TODO: can speed this up if needed by not getting the children and instead caching the previous getNonEmptyChildren result
         boolean loggedTLNPos = false;
         for (int lvl = 0; lvl < 5; lvl++) {
             for (int y = (Y<<4)>>lvl; y < ((Y+1)<<4)>>lvl; y++) {

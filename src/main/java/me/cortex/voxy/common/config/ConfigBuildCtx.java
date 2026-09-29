@@ -50,7 +50,6 @@ public class ConfigBuildCtx {
         return this;
     }
 
-    //TODO: FINISH THIS and check and test
     private static String concatPath(String a, String b) {
         if (b.contains("..")) {
             throw new IllegalStateException("Relative resolving not supported");

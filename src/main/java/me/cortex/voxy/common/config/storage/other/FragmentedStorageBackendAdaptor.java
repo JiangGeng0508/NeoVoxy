@@ -39,7 +39,6 @@ public class FragmentedStorageBackendAdaptor extends StorageBackend {
         }
     }
 
-    //TODO: reencode the key to be shifted one less OR
     // use like a mix64 to shuffle the key in getSegmentId so that
     // multiple layers of spliced storage backends can be stacked
 
@@ -53,9 +52,80 @@ public class FragmentedStorageBackendAdaptor extends StorageBackend {
         this.backends[this.getSegmentId(key)].setSectionData(key, data);
     }
 
+    //One sub-batch per backend, routed by the same segment id as setSectionData. Commit is not atomic
+    //across fragments, which is fine: sections are independent, regenerable keys.
+    @Override
+    public SectionWriteBatch createSectionWriteBatch() {
+        var subBatches = new SectionWriteBatch[this.backends.length];
+        return new SectionWriteBatch() {
+            @Override
+            public void put(long key, MemoryBuffer data) {
+                int segment = FragmentedStorageBackendAdaptor.this.getSegmentId(key);
+                var sub = subBatches[segment];
+                if (sub == null) {
+                    sub = subBatches[segment] = FragmentedStorageBackendAdaptor.this.backends[segment].createSectionWriteBatch();
+                }
+                sub.put(key, data);
+            }
+
+            @Override
+            public long dataSize() {
+                long total = 0;
+                for (var sub : subBatches) {
+                    if (sub != null) total += sub.dataSize();
+                }
+                return total;
+            }
+
+            @Override
+            public void commit() {
+                for (var sub : subBatches) {
+                    if (sub != null) sub.commit();
+                }
+            }
+
+            @Override
+            public void close() {
+                for (var sub : subBatches) {
+                    if (sub != null) sub.close();
+                }
+            }
+        };
+    }
+
     @Override
     public void deleteSectionData(long key) {
         this.backends[this.getSegmentId(key)].deleteSectionData(key);
+    }
+
+    //Routed by the same segment id as setSectionData, so a key always lands in one shard; iteration
+    //has to visit them all because a table's keys are spread across every backend.
+    @Override
+    public boolean supportsAuxTable(String table) {
+        for (var backend : this.backends) {
+            if (!backend.supportsAuxTable(table)) return false;
+        }
+        return true;
+    }
+
+    @Override
+    public void putAux(String table, long key, byte[] value) {
+        this.backends[this.getSegmentId(key)].putAux(table, key, value);
+    }
+
+    @Override
+    public byte[] getAux(String table, long key) {return this.backends[this.getSegmentId(key)].getAux(table, key);}
+
+    @Override
+    public void deleteAux(String table, long key) {
+        this.backends[this.getSegmentId(key)].deleteAux(table, key);
+    }
+
+    @Override
+    public void forEachAux(String table, AuxEntryConsumer consumer) {
+        for (var backend : this.backends) {
+            backend.forEachAux(table, consumer);
+        }
     }
 
     @Override
@@ -85,7 +155,6 @@ public class FragmentedStorageBackendAdaptor extends StorageBackend {
         for (var backend : this.backends) {
             var mappings = backend.getIdMappingsData();
             if (mappings.isEmpty()) {
-                //TODO: log a warning and attempt to replicate the data the other fragments
                 continue;
             }
             var repackaged = new Int2ObjectOpenHashMap<EqualingArray>(mappings.size());
@@ -158,7 +227,6 @@ public class FragmentedStorageBackendAdaptor extends StorageBackend {
         public StorageBackend build(ConfigBuildCtx ctx) {
             StorageBackend[] builtBackends = new StorageBackend[this.backends.size()];
             for (int i = 0; i < this.backends.size(); i++) {
-                //TODO: put each backend in a different folder?
                 builtBackends[i] = this.backends.get(i).build(ctx);
             }
             return new FragmentedStorageBackendAdaptor(builtBackends);

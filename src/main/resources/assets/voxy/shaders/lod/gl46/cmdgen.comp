@@ -25,13 +25,6 @@ layout(binding = STATISTICS_BUFFER_BINDING, std430) restrict buffer statisticsBu
 };
 #endif
 
-/*
-    uint  count;
-    uint  instanceCount;
-    uint  firstIndex;
-    int  baseVertex;
-    uint  baseInstance;
-    */
 
 layout(binding = TRANSLUCENT_DISTANCE_BUFFER_BINDING, std430) restrict buffer TranslucentCommandCount {
     uint[] translucentCommandData;
@@ -52,7 +45,20 @@ void main() {
     if (gl_GlobalInvocationID.x >= sectionCount) {
         return;
     }
-    uint sectionId = indirectLookup[gl_GlobalInvocationID.x];
+    #ifdef OPAQUE_NEAR_FIRST
+    //The traversal appends the render list one LOD level per dispatch through a single atomic
+    //counter, so the list is far-to-near BY LEVEL BLOCK (coarse nodes are the far ones; a leaf
+    //without children yet, or a region drawn at child level while its own mesh is pending, blurs
+    //that). Within a block the order is atomic-arrival and the reversal leaves it arbitrary.
+    //Walking the list backwards emits the near blocks' commands first so depth rejection drops
+    //the far fill hidden behind them. Order is a heuristic only; the depth test owns correctness,
+    //and command slots still come from the same atomic so every lane stays dense.
+    uint listIdx = (sectionCount - 1u) - gl_GlobalInvocationID.x;
+    #else
+    uint listIdx = gl_GlobalInvocationID.x;
+    #endif
+    uint sectionId = indirectLookup[listIdx];
+
     SectionMeta meta = sectionData[sectionId];
     uint detail = extractDetail(meta);
     ivec3 ipos = extractPosition(meta);
@@ -63,7 +69,8 @@ void main() {
     uint dat = visibilityData[sectionId];
 
     //if the section was visible this frame
-    bool shouldRender = (dat&0x7fffffffu) == frameId;
+    uint stamp = dat & 0x7fffffffu;
+    bool shouldRender = stamp == frameId || (stamp == visibilityGraceId && stamp != 0u);
     bool renderTemporally = (dat&0x80000000u)==0;// means, if it was not visible last frame
 
 
@@ -76,12 +83,11 @@ void main() {
 
         uint ptr = extractQuadStart(meta);
         ivec3 relative = ipos-(baseSectionPos>>detail);
-        uint drawId = gl_GlobalInvocationID.x;
+        uint drawId = listIdx;
 
         positionBuffer[drawId] = extractRawPos(meta);
         uvec4 counts = meta.b;
 
-        //TODO implicit command merging
         uint msk = 0;
         msk |= uint(((counts.y      &0xFFFFu)!=0) && (relative.y>-1))<<0;
         msk |= uint((((counts.y>>16)&0xFFFFu)!=0) && (relative.y<1 ))<<1;
@@ -101,7 +107,6 @@ void main() {
             tCmdPtr = atomicAdd(temporalOpaqueDrawCount, cmdCnt) + TEMPORAL_OFFSET;
         }
 
-        //TODO: make totalQuads also have temporal amount
         #ifdef HAS_STATISTICS
         uint totalQuads = 0;
         #endif

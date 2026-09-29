@@ -8,7 +8,6 @@ import org.jetbrains.annotations.Nullable;
 
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
-import java.util.Arrays;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.StampedLock;
 
@@ -17,7 +16,6 @@ public class ActiveSectionTracker {
     //Deserialize into the supplied section, returns true on success, false on failure
     public interface SectionLoader {int load(WorldSection section);}
 
-    //Loaded section world cache, TODO: get rid of VolatileHolder and use something more sane
     private static final class VolatileHolder <T> {
         private static final VarHandle PRE_ACQUIRE_COUNT;
         private static final VarHandle POST_ACQUIRE_COUNT;
@@ -41,7 +39,7 @@ public class ActiveSectionTracker {
 
     private final int lruSize;
     private final StampedLock lruLock = new StampedLock();
-    private final Long2ObjectLinkedOpenHashMap<WorldSection> lruSecondaryCache;//TODO: THIS NEEDS TO BECOME A GLOBAL STATIC CACHE
+    private final Long2ObjectLinkedOpenHashMap<WorldSection> lruSecondaryCache;
 
     @Nullable
     public final WorldEngine engine;
@@ -69,8 +67,36 @@ public class ActiveSectionTracker {
         return this.acquire(WorldEngine.getWorldSectionId(lvl, x, y, z), nullOnEmpty);
     }
 
+    /** Cache-only acquire for render-thread callers; it never joins an in-flight load. */
+    public WorldSection acquireIfCached(long key) {
+        int index = this.getCacheArrayIndex(key);
+        var cache = this.loadedSectionCache[index];
+        final var lock = this.locks[index];
+        long stamp = lock.readLock();
+        try {
+            VolatileHolder<WorldSection> holder = cache.get(key);
+            if (holder != null) {
+                WorldSection section = holder.obj;
+                if (section != null) {
+                    section.acquire();
+                    return section;
+                }
+                return null;
+            }
+        } finally {
+            lock.unlockRead(stamp);
+        }
+        boolean inLru;
+        long lruStamp = this.lruLock.readLock();
+        try {
+            inLru = this.lruSecondaryCache.containsKey(key);
+        } finally {
+            this.lruLock.unlockRead(lruStamp);
+        }
+        return inLru ? this.acquire(key, true) : null;
+    }
+
     public WorldSection acquire(long key, boolean nullOnEmpty) {
-        //TODO: add optional verification check to ensure this (or other critical systems) arnt being called on the render or server thread
         if (this.engine != null) this.engine.lastActiveTime = System.currentTimeMillis();
         int index = this.getCacheArrayIndex(key);
         var cache = this.loadedSectionCache[index];
@@ -81,51 +107,66 @@ public class ActiveSectionTracker {
 
         {
             long stamp = lock.readLock();
-            holder = cache.get(key);
-            if (holder != null) {//Return already loaded entry
-                section = holder.obj;
-                if (section != null) {
-                    section.acquire();
+            try {
+                holder = cache.get(key);
+                if (holder != null) {//Return already loaded entry
+                    section = holder.obj;
+                    if (section != null) {
+                        section.acquire();
+                        lock.unlockRead(stamp);
+                        stamp = 0;
+                        return section;
+                    }
                     lock.unlockRead(stamp);
-                    return section;
+                    stamp = 0;
+                } else {//Try to create holder
+                    holder = new VolatileHolder<>();
+                    long ws = lock.tryConvertToWriteLock(stamp);
+                    if (ws == 0) {//Failed to convert, unlock read and get write
+                        lock.unlockRead(stamp);
+                        stamp = lock.writeLock();
+                    } else {
+                        stamp = ws;
+                    }
+                    var eHolder = cache.putIfAbsent(key, holder);//We put if absent because on failure to convert to write, it leaves race condition
+                    lock.unlockWrite(stamp);
+                    stamp = 0;
+                    if (eHolder == null) {//We are the loader
+                        isLoader = true;
+                    } else {
+                        holder = eHolder;
+                    }
                 }
-                lock.unlockRead(stamp);
-            } else {//Try to create holder
-                holder = new VolatileHolder<>();
-                long ws = lock.tryConvertToWriteLock(stamp);
-                if (ws == 0) {//Failed to convert, unlock read and get write
-                    lock.unlockRead(stamp);
-                    stamp = lock.writeLock();
-                } else {
-                    stamp = ws;
-                }
-                var eHolder = cache.putIfAbsent(key, holder);//We put if absent because on failure to convert to write, it leaves race condition
-                lock.unlockWrite(stamp);
-                if (eHolder == null) {//We are the loader
-                    isLoader = true;
-                } else {
-                    holder = eHolder;
+            } finally {
+                if (stamp != 0) {
+                    lock.unlock(stamp);
                 }
             }
         }
 
         if (isLoader) {
             this.loadedSections.incrementAndGet();
-            long stamp2 = lock.readLock();
-            long stamp = this.lruLock.writeLock();
-            section = this.lruSecondaryCache.remove(key);
-
             WorldSection removal = null;
-            if (section == null && (!this.lruSecondaryCache.isEmpty()) && this.lruSize+100<this.lruSecondaryCache.size()+this.getLoadedCacheCount()) {//Add a self clamping lru case for when there are alot of loaded sections
-                removal = this.lruSecondaryCache.removeFirst();
-            }
+            long stamp2 = lock.readLock();
+            try {
+                long stamp = this.lruLock.writeLock();
+                try {
+                    section = this.lruSecondaryCache.remove(key);
 
-            this.lruLock.unlockWrite(stamp);
-            if (section != null) {
-                section.primeForReuse();
-                section.acquire(1);
+                    if (section == null && (!this.lruSecondaryCache.isEmpty()) && this.lruSize+100<this.lruSecondaryCache.size()+this.getLoadedCacheCount()) {//Add a self clamping lru case for when there are alot of loaded sections
+                        removal = this.lruSecondaryCache.removeFirst();
+                    }
+                } finally {
+                    this.lruLock.unlockWrite(stamp);
+                }
+                if (section != null) {
+                    section.primeForReuse();
+                    section.acquire(1);
+                }
+            } finally {
+                //Guard against leaking the shard read lock if section.acquire() throws.
+                lock.unlockRead(stamp2);
             }
-            lock.unlockRead(stamp2);
 
             if (removal != null) {
                 removal._releaseArray();
@@ -147,18 +188,15 @@ public class ActiveSectionTracker {
                 status = this.loader.load(section);
 
                 if (status < 0) {
-                    //TODO: Instead if throwing an exception do something better, like attempting to regen
-                    //throw new IllegalStateException("Unable to load section: ");
                     Logger.error("Unable to load section " + section.key + " setting to air");
                     status = 1;
                 }
 
-                //TODO: REWRITE THE section tracker _again_ to not be so shit and jank, and so that Arrays.fill is not 10% of the execution time
                 if (status == 1) {
-                    //We need to set the data to air as it is undefined state
                     int sky = 15;
                     int block = 0;
-                    Arrays.fill(section.data, Mapper.composeMappingId((byte) (sky|(block<<4)),0,0));
+                    section.setUniform(Mapper.composeMappingId((byte) (sky|(block<<4)),0,0));
+                    me.cortex.voxy.commonImpl.PerfStats.sectionUniformKept.increment();
                 }
                 section.acquire(1);
             }
@@ -166,7 +204,6 @@ public class ActiveSectionTracker {
             section.acquire(preAcquireCount);//pre acquire amount
             VolatileHolder.POST_ACQUIRE_COUNT.set(holder, preAcquireCount);
 
-            //TODO: mark if the section was loaded null
 
             VarHandle.storeStoreFence();//Do not reorder setting this object
             holder.obj = section;
@@ -177,7 +214,6 @@ public class ActiveSectionTracker {
             }
             return section;
         } else {
-            //TODO: mark the time the loading started in nanos, then here if it has been a while, spin lock, else jump back to the executing service and do work
             VarHandle.fullFence();
             while ((section = holder.obj) == null) {
                 VarHandle.fullFence();
@@ -190,13 +226,11 @@ public class ActiveSectionTracker {
                 //We managed to acquire one of the pre locks, so just return the section
                 return section;
             } else {
-                //lock.lock();
                 {//Dont think need to lock here
                     if (section.tryAcquire()) {
                         return section;
                     }
                 }
-                //lock.unlock();
 
                 //We failed everything, try get it again
                 return this.acquire(key, nullOnEmpty);
@@ -208,15 +242,23 @@ public class ActiveSectionTracker {
         if (this.engine != null) this.engine.lastActiveTime = System.currentTimeMillis();
         if (section.shouldSave()&&this.engine!=null) {
             if (section.tryAcquire()) {
+                VarHandle.loadLoadFence();
                 if (section.shouldSave()) {//If we should try enqueue
-                    if (!this.engine.saveSection(section, true, true)) {
+                    if (!this.engine.saveSection(section, false, true)) {
                         //we didnt enqueue the section in the save queue so we must unload it manually
-                        section.release(false, hints);
+                        section.release(true, hints);
+                    } else {
+                        //section is queued, and we gave it the acquired ref
+                        return;
                     }
                 } else {
-                    section.release(false, hints);//Special release
+                    //Lost the race to the save queue - retry the unload pipeline
+                    section.release(true, hints);
                 }
+            } else if (section.shouldSave()) {
+                Logger.error("Failed to acquire a section that still needs saving - this is really bad");
             }
+            return;
         }
 
         if (section.getRefCount() != 0) {
@@ -228,37 +270,31 @@ public class ActiveSectionTracker {
         final var lock = this.locks[index];
         long stamp = lock.writeLock();
         boolean shouldRetryExit = false;
-        {
+        try {
+            //A ref acquired between the earlier check and taking the shard lock means someone is
+            //using the section - bail before touching the cache
+            if (section.getRefCount() != 0) {
+                return;
+            }
             VarHandle.loadLoadFence();
             if (this.engine != null && section.shouldSave()) {//Last call for saving
                 if (section.tryAcquire()) {
                     if (!this.engine.saveSection(section, true, true)) {//not allowed to block as we are in a lock
-                        //We didnt enqueue the save here, so we must unload
-                        // but unload in a recursive
-                        VarHandle.fullFence();
-                        shouldRetryExit |= section.getRefCount()!=1;//if we arnt the only ref
-                        VarHandle.fullFence();
-                        shouldRetryExit |= section.isDirty;//or if the section is now dirty, note this must go AFTER the ref check, since you can only mark live sections as dirty
-                        section.release(false, hints);//Special
+                        //Could not enqueue while holding the shard lock: always retry the unload
+                        //pipeline (an in-lock unload would deadlock; the retry runs it unlocked)
+                        shouldRetryExit = true;
+                        section.release(false, hints);//Special: no unload here, the retry handles it
                     }
 
 
-                    //NOTE: think have since fixed this issue
-                    //In theory there can be a race condition here, where if this thread is paused
-                    // the save queue fully finishes, the state is dirty == false inSaveQueue == false
-                    // but the acquire count is at least 1
-                    //if another thread marks this chunk as dirty (it would have acquired it after the inital `section.getRefCount() != 0`
-                    // return check) and releases it, since the acquire count is still 1 (acquired here)
-                    // then it doesnt trigger a save attempt but the dirty flag is set
-                    //then this code continues and it causes badness cause its now in an invalid state
                 } else {
                     throw new IllegalStateException("Section was dirty but is also unloaded, this is very bad");
                 }
             }
 
-            //This is a painful case, we need to abort here if there was a funky thing that happened
             if (shouldRetryExit) {
                 lock.unlockWrite(stamp);
+                stamp = 0;
                 //retry
                 this.tryUnload(section, hints);
                 return;
@@ -275,33 +311,47 @@ public class ActiveSectionTracker {
                 }
                 sec = section;
             }
-        }
 
-        WorldSection aa = null;
-        if (sec != null) {
-            long stamp2 = this.lruLock.writeLock();
-            lock.unlockWrite(stamp);
-            WorldSection a = this.lruSecondaryCache.put(section.key, section);
-            if (a != null) {
-                throw new IllegalStateException("duplicate sections in cache is impossible");
+            WorldSection aa = null;
+            if (sec != null) {
+                if ((hints & WorldSection.RELEASE_HINT_DONT_CACHE) != 0) {
+                    lock.unlockWrite(stamp);
+                    stamp = 0;
+                    aa = sec;
+                } else {
+                    long stamp2 = this.lruLock.writeLock();
+                    try {
+                        lock.unlockWrite(stamp);
+                        stamp = 0;
+                        WorldSection a = this.lruSecondaryCache.put(section.key, section);
+                        if (a != null) {
+                            throw new IllegalStateException("duplicate sections in cache is impossible");
+                        }
+                        //If cache is bigger than its ment to be, remove the least recently used and free it
+                        if (this.lruSize < this.lruSecondaryCache.size()) {
+                            aa = this.lruSecondaryCache.removeFirst();
+                        }
+                    } finally {
+                        this.lruLock.unlockWrite(stamp2);
+                    }
+                }
+            } else {
+                lock.unlockWrite(stamp);
+                stamp = 0;
             }
-            //If cache is bigger than its ment to be, remove the least recently used and free it
-            if (this.lruSize < this.lruSecondaryCache.size()) {
-                aa = this.lruSecondaryCache.removeFirst();
+
+
+            if (aa != null) {
+                aa._releaseArray();
             }
-            this.lruLock.unlockWrite(stamp2);
 
-        } else {
-            lock.unlockWrite(stamp);
-        }
-
-
-        if (aa != null) {
-            aa._releaseArray();
-        }
-
-        if (sec != null) {
-            this.loadedSections.decrementAndGet();
+            if (sec != null) {
+                this.loadedSections.decrementAndGet();
+            }
+        } finally {
+            if (stamp != 0) {
+                lock.unlockWrite(stamp);
+            }
         }
     }
 

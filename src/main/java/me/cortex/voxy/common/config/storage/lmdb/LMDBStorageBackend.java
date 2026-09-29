@@ -31,7 +31,7 @@ public class LMDBStorageBackend extends StorageBackend {
     public LMDBStorageBackend(String file) {
         this.dbi = new LMDBInterface.Builder()
                 .setMaxDbs(2)
-                .open(file, 0)//MDB_NOLOCK (IF I DO THIS, must sync the db manually)// TODO: THIS
+                .open(file, 0)//MDB_NOLOCK (IF I DO THIS, must sync the db manually)
                 .fetch();
         this.dbi.setMapSize(GROW_SIZE);
         this.sectionDatabase = this.dbi.createDb("world_sections");
@@ -44,7 +44,6 @@ public class LMDBStorageBackend extends StorageBackend {
         this.dbi.setMapSize(size);
     }
 
-    //TODO: try optimize this hellscape of spagetti locking
     private <T> T resizingTransaction(Supplier<T> transaction) {
         while (true) {
             try {
@@ -90,7 +89,6 @@ public class LMDBStorageBackend extends StorageBackend {
         throw new IllegalStateException("Not yet implemented");
     }
 
-    //TODO: make batch get and updates
     @Override
     public MemoryBuffer getSectionData(long key, MemoryBuffer scratch) {
         return this.synchronizedTransaction(() -> this.sectionDatabase.transaction(MDB_RDONLY, transaction->{
@@ -105,7 +103,6 @@ public class LMDBStorageBackend extends StorageBackend {
         }));
     }
 
-    //TODO: pad data to like some alignemnt so that when the section gets saved or updated
     // it can use the same allocation
     public void setSectionData(long key, MemoryBuffer data) {
         this.resizingTransaction(() -> this.sectionDatabase.transaction(transaction->{

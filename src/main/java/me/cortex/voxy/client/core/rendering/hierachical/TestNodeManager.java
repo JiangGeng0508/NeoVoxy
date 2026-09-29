@@ -298,7 +298,6 @@ public class TestNodeManager {
 
         if (false) {
             for (int q = 0; q < ITER_COUNT; q++) {
-                //Logger.info("Iteration "+ q);
                 if (runTest(INNER_ITER_COUNT, q, seenTraces, GEO_REM, LIMIT_REQUEST_SEC_ALLOCATION)) {
                     finished.incrementAndGet();
                 }
@@ -410,7 +409,7 @@ public class TestNodeManager {
             return true;
         } catch (Exception e) {
             var trace = new ArrayList<>(List.of(e.getStackTrace()));
-            while (!trace.getLast().getMethodName().equals("runTest")) trace.removeLast();//Very hacky budget filter
+            while (!trace.getLast().getMethodName().equals("runTest")) trace.removeLast();
             synchronized (traces) {
                 if (traces.add(trace)) {
                     e.printStackTrace();

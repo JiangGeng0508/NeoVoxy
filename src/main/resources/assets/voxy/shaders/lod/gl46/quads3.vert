@@ -29,7 +29,7 @@ layout(location = 0) out flat uvec4 interData;
 #ifndef USE_NV_BARRY
 layout(location = 1) out vec2 uv;
 #endif
-out float vViewDist;
+layout(location = 2) out float boundaryDistanceSquared;
 
 #ifdef USE_NV_JANK
 #ifdef GL_NV_gpu_shader5
@@ -45,7 +45,6 @@ layout(location = 7) out flat uint quadDebug;
 
 vec2 taaShift();
 
-//TODO: add a mechanism so that some quads can ignore backface culling
 // this would help alot with stuff like crops as they would look kinda weird i think,
 // same with flowers etc
 void main() {
@@ -57,6 +56,9 @@ void main() {
 
     uint cornerId = gl_VertexID&3;
 
+    vec3 boundaryOffset = getQuadCornerPoint(quad, cornerId) - cameraSubPos;
+    boundaryDistanceSquared = dot(boundaryOffset, boundaryOffset);
+
     gl_Position =
     #ifdef USE_NV_JANK
     #ifdef GL_NV_gpu_shader5
@@ -64,11 +66,6 @@ void main() {
     #endif
     #endif
     (getQuadCornerPos(quad, cornerId));
-
-    //Horizontal distance from the camera (in blocks) for the far fade-out in the fragment shader
-    vec2 cornerMask = vec2((cornerId>>1)&1u, cornerId&1u)*quad.lodScale;
-    vec3 viewPoint = applyWorldCurvature(quad.basePoint + swizzelDataAxis(quad.axis, vec3(quad.quadSizeAddin*cornerMask, 0)));
-    vViewDist = length(viewPoint.xz - cameraSubPos.xz);
 
 
     #ifndef USE_NV_BARRY

@@ -92,6 +92,8 @@ public class WorldImporter implements IDataImporter {
     private final PalettedContainerRO<Holder<Biome>> defaultBiomeProvider;
     private final Codec<PalettedContainerRO<Holder<Biome>>> biomeCodec;
     private final Codec<PalettedContainer<BlockState>> blockStateCodec;
+    private final int minBuildHeight;
+    private final int heightmapBits;
     private final AtomicInteger estimatedTotalChunks = new AtomicInteger();//Slowly converges to the true value
     private final AtomicInteger totalChunks = new AtomicInteger();
     private final AtomicInteger chunksProcessed = new AtomicInteger();
@@ -103,6 +105,8 @@ public class WorldImporter implements IDataImporter {
 
     public WorldImporter(WorldEngine worldEngine, Level mcWorld, ServiceManager sm, BooleanSupplier runChecker) {
         this.world = worldEngine;
+        this.minBuildHeight = mcWorld.getMinBuildHeight();
+        this.heightmapBits = 32 - Integer.numberOfLeadingZeros(mcWorld.getHeight());
         this.service = sm.createService(()->new Pair<>(()->this.jobQueue.poll().run(), ()->{}), 3, "World importer", runChecker);
 
         var biomeRegistry = mcWorld.registryAccess().registryOrThrow(Registries.BIOME);
@@ -374,7 +378,6 @@ public class WorldImporter implements IDataImporter {
                 continue;
             }
 
-            //TODO: create memory copy for each section
             if (regionFile.size < ((sectorCount-1) + sectorStart) * 4096L) {
                 Logger.warn("Cannot access chunk sector as it goes out of bounds. start bytes: " + (sectorStart*4096) + " sector count: " + sectorCount + " fileSize: " + regionFile.size);
                 continue;
@@ -487,10 +490,11 @@ public class WorldImporter implements IDataImporter {
                 Logger.error("Chunk position is not located in correct region, expected: (" + regionX + ", " + regionZ+"), got: " + "(" + (x>>5) + ", " + (z>>5)+"), importing anyway");
             }
 
+            int[] surfaceHeights = decodeSurfaceHeights(chunk);
             for (var sectionE : chunk.getList("sections", Tag.TAG_COMPOUND)) {
                 var section = (CompoundTag) sectionE;
                 int y = section.getInt("Y");
-                this.importSectionNBT(x, y, z, section);
+                this.importSectionNBT(x, y, z, section, surfaceHeights);
             }
         } catch (Exception e) {
             Logger.error("Exception importing world chunk:",e);
@@ -501,7 +505,7 @@ public class WorldImporter implements IDataImporter {
 
     private static final byte[] EMPTY = new byte[0];
     private static final ThreadLocal<VoxelizedSection> SECTION_CACHE = ThreadLocal.withInitial(VoxelizedSection::createEmpty);
-    private void importSectionNBT(int x, int y, int z, CompoundTag section) {
+    private void importSectionNBT(int x, int y, int z, CompoundTag section, int[] surfaceHeights) {
         if (section.getCompound("block_states").isEmpty()) {
             return;
         }
@@ -525,7 +529,6 @@ public class WorldImporter implements IDataImporter {
 
         var blockStatesRes = blockStateCodec.parse(NbtOps.INSTANCE, section.getCompound("block_states"));
         if (!blockStatesRes.hasResultOrPartial()) {
-            //TODO: if its only partial, it means should try to upgrade the nbt format with datafixerupper probably
             return;
         }
         var blockStates = blockStatesRes.getPartialOrThrow();
@@ -541,7 +544,7 @@ public class WorldImporter implements IDataImporter {
                 biomes,
                 (bx, by, bz) -> {
                     int block = 0;
-                    int sky = 0;
+                    int sky = surfaceHeights != null && (y * 16 + by) >= surfaceHeights[bx | (bz << 4)] - 1 ? 15 : 0;
                     if (blockLight != null) {
                         block = blockLight.get(bx, by, bz);
                     }
@@ -554,5 +557,19 @@ public class WorldImporter implements IDataImporter {
 
         WorldVoxilizedSectionMipper.mipSection(csec, this.world.getMapper());
         WorldUpdater.insertUpdate(this.world, csec);
+    }
+
+    private int[] decodeSurfaceHeights(CompoundTag chunk) {
+        long[] packed = chunk.getCompound("Heightmaps").getLongArray("WORLD_SURFACE");
+        if (packed.length == 0) return null;
+        int bits = this.heightmapBits;
+        int perLong = 64 / bits;
+        if (packed.length * perLong < 256) return null;
+        long mask = (1L << bits) - 1L;
+        int[] result = new int[256];
+        for (int i = 0; i < result.length; i++) {
+            result[i] = this.minBuildHeight + (int) ((packed[i / perLong] >>> ((i % perLong) * bits)) & mask);
+        }
+        return result;
     }
 }

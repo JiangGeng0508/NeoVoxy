@@ -58,14 +58,23 @@ public class ShaderLoader {
                 throw new RuntimeException("Failed to read shader source for " + path, e);
             }
 
+            //The classpath lookup can miss assets that only exist in a resource pack (or that the
+            //loader exposes through the resource manager instead of our own classloader), so retry
+            //through the client resource manager before giving up.
             var resourceId = ResourceLocation.fromNamespaceAndPath(id.getNamespace(), "shaders/" + id.getPath());
-            var resource = Minecraft.getInstance().getResourceManager().getResource(resourceId);
-            if (resource.isPresent()) {
-                try (InputStream in = resource.get().open()) {
-                    return IOUtils.toString(in, StandardCharsets.UTF_8);
-                } catch (IOException e) {
-                    throw new RuntimeException("Failed to read shader source for " + resourceId, e);
+            try {
+                var minecraft = Minecraft.getInstance();
+                var resourceManager = minecraft == null ? null : minecraft.getResourceManager();
+                if (resourceManager != null) {
+                    var resource = resourceManager.getResource(resourceId);
+                    if (resource.isPresent()) {
+                        try (InputStream in = resource.get().open()) {
+                            return IOUtils.toString(in, StandardCharsets.UTF_8);
+                        }
+                    }
                 }
+            } catch (Throwable ignored) {
+                //Fall through to the original error; the classpath lookup is still the primary path.
             }
 
             throw new RuntimeException("Shader not found: " + path + " or " + resourceId);

@@ -12,7 +12,6 @@ public class ResizingThreadLocalMemoryBuffer {
         return new Pair<>(cleanable, ref);
     }
 
-    //TODO: make this much better
     private final ThreadLocal<Pair<Cleaner.Cleanable, MemoryBuffer>> threadLocal;
 
     public ResizingThreadLocalMemoryBuffer(long initalSize) {

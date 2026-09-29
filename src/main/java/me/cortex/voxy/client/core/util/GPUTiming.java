@@ -75,9 +75,14 @@ public class GPUTiming {
                 float time = (float) (((double)delta)/1_000_000);
                 this.timings[i-1] = Math.max(this.timings[i-1]*0.99f+time*0.01f, time);
                 this.lables[i-1] = meta[i-1];
+                //Raw per-pass time to the profiler, not the rolling max kept above: a window wants the
+                //average over its frames, and the rolling value never comes back down after a spike
+                me.cortex.voxy.commonImpl.VoxyProfile.recordGpuMillis(
+                        meta[i-1] == null ? ("pass" + (i-1)) : meta[i-1], time);
                 current = next;
             }
         });
+        me.cortex.voxy.commonImpl.VoxyProfile.noteGpuFrame();
         this.timingSet.tick();
     }
 
@@ -168,40 +173,4 @@ public class GPUTiming {
             }
         }
     }
-    /*
-    private static final class GlTimestampQuerySet extends TrackedObject {
-        private final int query = glGenQueries();
-        public final GlBuffer store;
-        public final int[] metadata;
-        public int index;
-        public GlTimestampQuerySet(int maxCount) {
-            this.store = new GlBuffer(maxCount*8L);
-            this.metadata = new int[maxCount];
-        }
-
-        public void capture(int metadata) {
-            if (this.index>this.metadata.length) {
-                throw new IllegalStateException();
-            }
-            int slot = this.index++;
-            this.metadata[slot] = metadata;
-            glQueryCounter(this.query, GL_TIMESTAMP);//This should be gpu side, so should be fast
-            glFinish();
-            glGetQueryBufferObjectui64v(this.query, this.store.id, GL_QUERY_RESULT_NO_WAIT, slot*8L);
-            glMemoryBarrier(-1);
-        }
-
-        public void download(TimingDataConsumer consumer) {
-            var meta = Arrays.copyOf(this.metadata, this.index);
-            this.index = 0;
-            //DownloadStream.INSTANCE.download(this.store, buffer->consumer.accept(meta, buffer));
-        }
-
-        @Override
-        public void free() {
-            super.free0();
-            glDeleteQueries(this.query);
-            this.store.free();
-        }
-    }*/
 }

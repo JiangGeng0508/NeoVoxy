@@ -8,7 +8,6 @@ import java.util.Random;
 //Tracks a ring and load/unload positions
 // can process N of these load/unload positions
 public class RingTracker {
-    //TODO: replace with custom map that removes elements if its mapped to 0
     private final Long2ByteOpenHashMap operations = new Long2ByteOpenHashMap(1<<13);
     private final int[] boundDist;
     private final int radius;
@@ -56,7 +55,6 @@ public class RingTracker {
 
     //Moves the center from old to new and updates the operations map
     public void moveCenter(int x, int z) {
-        //TODO, if the new center is greater than radius from current, unload all current and load all at new
         if (this.radius+1<Math.abs(x-this.centerX) || this.radius+1<Math.abs(z-this.centerZ)) {
             this.fillRing(false);
             this.centerX = x;

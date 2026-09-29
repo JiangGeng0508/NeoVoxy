@@ -1,5 +1,6 @@
 package me.cortex.voxy.client.core;
 
+import me.cortex.voxy.common.Logger;
 import me.cortex.voxy.client.core.gl.GlBuffer;
 import me.cortex.voxy.client.core.model.ModelBakerySubsystem;
 import me.cortex.voxy.client.core.rendering.Viewport;
@@ -19,9 +20,6 @@ import java.util.List;
 import java.util.function.BooleanSupplier;
 
 import static org.lwjgl.opengl.GL11.GL_DEPTH_BUFFER_BIT;
-import static org.lwjgl.opengl.GL11C.GL_VIEWPORT;
-import static org.lwjgl.opengl.GL11C.glGetIntegerv;
-import static org.lwjgl.opengl.GL11C.glViewport;
 import static org.lwjgl.opengl.GL30C.*;
 import static org.lwjgl.opengl.GL31.GL_UNIFORM_BUFFER;
 import static org.lwjgl.opengl.GL45C.*;
@@ -34,6 +32,7 @@ public class IrisVoxyRenderPipeline extends AbstractRenderPipeline {
     private final FullscreenBlit shaderDepthHackFixTransformBlit;
 
     private final GlBuffer shaderUniforms;
+    private final Matrix4f targetTransform = new Matrix4f();
 
     public IrisVoxyRenderPipeline(RenderProperties properties, IrisVoxyRenderPipelineData data, AsyncNodeManager nodeManager, NodeCleaner nodeCleaner, HierarchicalOcclusionTraverser traversal, BooleanSupplier frexSupplier) {
         super(properties, nodeManager, nodeCleaner, traversal, frexSupplier, data.shouldDeferTranslucency());
@@ -45,6 +44,8 @@ public class IrisVoxyRenderPipeline extends AbstractRenderPipeline {
 
         //Bind the drawbuffers
         var oDT = this.data.opaqueDrawTargets;
+        Logger.info("Iris LOD framebuffer: " + oDT.length + " opaque draw targets, "
+                + this.data.translucentDrawTargets.length + " translucent");
         int[] binding = new int[oDT.length];
         for (int i = 0; i < oDT.length; i++) {
             binding[i] = GL30.GL_COLOR_ATTACHMENT0+i;
@@ -118,27 +119,18 @@ public class IrisVoxyRenderPipeline extends AbstractRenderPipeline {
     @Override
     protected int setup(Viewport<?> viewport, int sourceFramebuffer, int srcWidth, int srcHeight) {
         //The fb/fbTranslucent depth textures are shared with the main camera for water SSR. Only
-        // the main viewport may resize them: a secondary pass (Vista TV) resizing them every other
-        // frame flips the depth texture size and makes the reflection sample a flickering box.
+        //the main viewport may resize them: a secondary pass (Vista TV) resizing them every other
+        //frame flips the depth texture size and makes the reflection sample a flickering box.
         if (viewport.isMainViewport) {
             this.fb.resize(viewport.width, viewport.height);
             this.fbTranslucent.resize(viewport.width, viewport.height);
-        }
-        int fbW = this.fb.getDepthTex().getWidth();
-        int fbH = this.fb.getDepthTex().getHeight();
-
-        if (false) {//TODO: only do this if shader specifies
-            //Clear the colour component
-            glBindFramebuffer(GL_FRAMEBUFFER, this.fb.framebuffer.id);
-            glClearColor(0, 0, 0, 0);
-            glClear(GL_COLOR_BUFFER_BIT);
         }
 
         if (!this.data.useViewportDims) {
             srcWidth = viewport.width;
             srcHeight = viewport.height;
         }
-        this.initDepthStencil(sourceFramebuffer, this.fb.framebuffer.id, srcWidth, srcHeight, fbW, fbH);
+        this.initDepthStencil(viewport, sourceFramebuffer, this.fb.framebuffer.id, srcWidth, srcHeight, viewport.width, viewport.height);
         return this.fb.getDepthTex().id;
     }
 
@@ -149,59 +141,48 @@ public class IrisVoxyRenderPipeline extends AbstractRenderPipeline {
             glEnable(GL_DEPTH_TEST);
             glColorMask(false, false, false, false);
             glDepthFunc(GL_ALWAYS);
-            glStencilFunc(GL_EQUAL, 0, 0xFF);//set the depth to 1 where the mask is 0
+            glStencilFunc(GL_EQUAL, 0, 0xFF);//set the depth to 1 where the mask is 0 (hook-tagged pixels keep theirs)
             this.shaderDepthHackFixTransformBlit.blit();
-            glStencilFunc(GL_EQUAL, 1, 0xFF);//revert the mask test
+            glStencilFunc(GL_EQUAL, 1, 0x1);//revert to the bit0 contract test
             glDepthFunc(this.properties.closerEqualDepthCompare());
             glColorMask(true, true, true, true);
+        } else {
+            //pixels; the setup pass stamped reprojected depth there for the hook geometry, so
+            //restore the value they expect
+            this.fb.bind();
+            this.restoreSentinelDepth();
         }
 
         glTextureBarrier();
 
         int msk = GL_DEPTH_BUFFER_BIT|GL_STENCIL_BUFFER_BIT;
-        if (true) {//TODO: make shader specified
-            if (false) {//TODO: only do this if shader specifies
-                glBindFramebuffer(GL_FRAMEBUFFER, this.fbTranslucent.framebuffer.id);
-                glClearColor(0, 0, 0, 0);
-                glClear(GL_COLOR_BUFFER_BIT);
-            }
-        } else {
-            msk |= GL_COLOR_BUFFER_BIT;
-        }
-        int bw = this.fb.getDepthTex().getWidth();
-        int bh = this.fb.getDepthTex().getHeight();
-        glBlitNamedFramebuffer(this.fb.framebuffer.id, this.fbTranslucent.framebuffer.id, 0,0, bw, bh, 0,0, bw, bh, msk, GL_NEAREST);
+        glBlitNamedFramebuffer(this.fb.framebuffer.id, this.fbTranslucent.framebuffer.id, 0,0, viewport.width, viewport.height, 0,0, viewport.width, viewport.height, msk, GL_NEAREST);
     }
 
     @Override
     protected void finish(Viewport<?> viewport, int sourceFrameBuffer, int srcWidth, int srcHeight) {
-        // Always write the LOD depth into the vanilla/gbuffer depth. Packs like ComplementaryReimagined
-        // set 'excludeLodsFromVanillaDepth' in their voxy.json, which used to suppress this and left the
-        // LOD chunks out of the pack's depth-dependent effects (e.g. water screen-space reflections).
-        // The depth transform is correct, so keep them in.
-        if (srcWidth > 0 && srcHeight > 0) {
-            int[] oldViewport = new int[4];
-            glGetIntegerv(GL_VIEWPORT, oldViewport);
-            glViewport(0, 0, srcWidth, srcHeight);
-
+        // Iris owns the source depth buffer unless the shader pack explicitly
+        // opts in to distant-horizon depth. Writing Voxy's opaque depth into it
+        // unconditionally makes several packs reject/overwrite the later LOD
+        // water composite.
+        if (this.data.renderToVanillaDepth && srcWidth == viewport.width  && srcHeight == viewport.height) {//We can only depthblit out if destination size is the same
             glColorMask(false, false, false, false);
             AbstractRenderPipeline.transformBlitDepth(this.depthBlit,
                     this.fbTranslucent.getDepthTex().id, sourceFrameBuffer,
-                    viewport, new Matrix4f(viewport.vanillaProjection).mul(viewport.modelView));
+                    viewport, this.targetTransform.set(viewport.vanillaProjection).mul(viewport.modelView));
             glColorMask(true, true, true, true);
-
-            glViewport(oldViewport[0], oldViewport[1], oldViewport[2], oldViewport[3]);
         } else {
+            if (net.neoforged.fml.ModList.get().isLoaded("create")) {
+                me.cortex.voxy.client.compat.create.DistantTrainRenderer.replayDepthToSource(
+                        this, viewport, this.fb.getDepthTex().id, sourceFrameBuffer,
+                        srcWidth, srcHeight, this.properties.closerEqualDepthCompare());
+            }
             // normally disabled by AbstractRenderPipeline but since we are skipping it we do it here
             glDisable(GL_STENCIL_TEST);
             glDisable(GL_DEPTH_TEST);
         }
     }
 
-    @Override
-    public boolean isValid() {
-        return this.data.isValid() && this.data.thePipeline == this;
-    }
 
     @Override
     public void bindUniforms() {
@@ -211,36 +192,25 @@ public class IrisVoxyRenderPipeline extends AbstractRenderPipeline {
     @Override
     public void bindUniforms(int bindingPoint) {
         if (this.shaderUniforms != null) {
-            GL30.glBindBufferBase(GL_UNIFORM_BUFFER, bindingPoint, this.shaderUniforms.id);// todo: dont randomly select this to 5
+            GL30.glBindBufferBase(GL_UNIFORM_BUFFER, bindingPoint, this.shaderUniforms.id);
         }
     }
 
     private void doBindings() {
-        if (!this.isValid()) {
-            return;
-        }
         this.bindUniforms();
         if (this.data.getSsboSet() != null) {
-            this.data.getSsboSet().bindingFunction().accept(10);
+            this.data.getSsboSet().bindingFunction().accept(FORWARDED_SSBO_BINDING_BASE);
         }
         if (this.data.getImageSet() != null) {
-            try {
-                this.data.getImageSet().bindingFunction().accept(6);
-            } catch (IllegalStateException e) {
-                if (IrisVoxyRenderPipelineData.isDestroyedRenderTargetsException(e)) {
-                    this.data.markIrisPipelineDestroyed();
-                    return;
-                }
-                throw e;
-            }
+            this.data.getImageSet().bindingFunction().accept(6);
         }
     }
     @Override
     public void setupAndBindOpaque(Viewport<?> viewport) {
         if (!viewport.isMainViewport) {
-            //Secondary pass (Vista TV): draw into the caller's already-bound target rather than
-            // our shared iris fb. The plain terrain shader + MDICSectionRenderer's own buffer
-            // bindings provide everything it needs, so don't bind the iris fb / uniforms here.
+            //Secondary pass (Vista TV): draw into the caller's already-bound target rather than our
+            //shared iris fb. The plain terrain shader + MDICSectionRenderer's own buffer bindings
+            //provide everything it needs, so don't bind the iris fb / uniforms here.
             return;
         }
         this.fb.bind();
@@ -262,7 +232,16 @@ public class IrisVoxyRenderPipeline extends AbstractRenderPipeline {
         super.addDebug(debug);
     }
 
-    private static final int UNIFORM_BINDING_POINT = 7;//TODO make ths binding point... not randomly 5
+    @Override
+    public int getSableOcclusionDepthTexture() {
+        if (this.data.renderToVanillaDepth || this.fbTranslucent.getDepthTex() == null) {
+            return 0;
+        }
+        return this.fbTranslucent.getDepthTex().id;
+    }
+
+    private static final int UNIFORM_BINDING_POINT = 7;
+    private static final int FORWARDED_SSBO_BINDING_BASE = 6;
 
     private StringBuilder buildGenericShaderHeader(AbstractSectionRenderer<?, ?> renderer, String input) {
         StringBuilder builder = new StringBuilder(input).append("\n\n\n");
@@ -274,12 +253,12 @@ public class IrisVoxyRenderPipeline extends AbstractRenderPipeline {
         }
 
         if (this.data.getSsboSet() != null) {
-            builder.append("#define BUFFER_BINDING_INDEX_BASE 10\n");//TODO: DONT RANDOMLY MAKE THIS 10
+            builder.append("#define BUFFER_BINDING_INDEX_BASE ").append(FORWARDED_SSBO_BINDING_BASE).append("\n");
             builder.append(this.data.getSsboSet().layout()).append("\n\n");
         }
 
         if (this.data.getImageSet() != null) {
-            builder.append("#define BASE_SAMPLER_BINDING_INDEX 6\n");//TODO: DONT RANDOMLY MAKE THIS 6
+            builder.append("#define BASE_SAMPLER_BINDING_INDEX 6\n");
             builder.append(this.data.getImageSet().layout()).append("\n\n");
         }
 
@@ -339,5 +318,16 @@ public class IrisVoxyRenderPipeline extends AbstractRenderPipeline {
     @Override
     public float[] getRenderScalingFactor() {
         return this.data.resolutionScale;
+    }
+
+    @Override
+    public boolean useDynamicFarPlane() {
+        return this.data.useDynamicFarPlane;
+    }
+
+
+    @Override
+    protected boolean useBoundaryGuardPass() {
+        return false;
     }
 }

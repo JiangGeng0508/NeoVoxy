@@ -23,18 +23,10 @@ import static me.cortex.voxy.common.world.WorldEngine.MAX_LOD_LAYER;
 import static me.cortex.voxy.common.world.WorldEngine.UPDATE_TYPE_BLOCK_BIT;
 
 
-//TODO FIXME: CIRTICAL ISSUE: if a node is a top level section and is empty, when a child is tried to be made it explodes
-// since all the children are empty
-//  To properly fix this, the top level nodes should only exist if there are non empty children
-// (issues related to this fix, lod updates from 0 children state to something children state, aswell as other way round)
 
 
 public class NodeManager {
     private static final boolean VERIFY_NODE_MANAGER_OPERATIONS = true;//VoxyCommon.isVerificationFlagOn("nodeManager");
-    //Assumptions:
-    // all nodes have children (i.e. all nodes have at least one child existence bit set at all times)
-    // leaf nodes always contain geometry (empty geometry counts as geometry (it just doesnt take any memory to store))
-    // All nodes except top nodes have parents
 
     //NOTE:
     // For the queue processing, will need a redirect node-value type
@@ -42,15 +34,6 @@ public class NodeManager {
 
 
 
-    //There is a very funny issue that has kinda, just resolved itself accidentally,
-    // however i wonder if i want a better solution for.
-    //That issue is, top level nodes that have no children
-    // the accidental solution, is that when the node is marked, it generates
-    // the child request,
-    // however, since there are no children in it, it sticks around, since there isnt anything to update it and invoke
-    // the finishRequest on it
-    // if the top level node ends up being updated with a child update, it should automatically solve itself
-    // as the new children are added to the already inprogress request!!!!
 
 
 
@@ -89,6 +72,7 @@ public class NodeManager {
     private final IntOpenHashSet topLevelNodeIds = new IntOpenHashSet();
     private final LongOpenHashSet topLevelNodes = new LongOpenHashSet();
     private int activeNodeRequestCount;
+    private boolean loggedLevel0Refusal;
 
     private IntConsumer topLevelNodeIdAddedCallback;
     private IntConsumer topLevelNodeIdRemovedCallback;
@@ -187,7 +171,6 @@ public class NodeManager {
         long pos = sectionResult.position;
         int nodeId = this.activeSectionMap.get(pos);
         if (nodeId == -1) {
-            //Logger.warn("Got geometry update for pos " + WorldEngine.pprintPos(pos) + " but it was not in active map, discarding!");
             sectionResult.free();
             return;
         }
@@ -198,9 +181,6 @@ public class NodeManager {
                 var request = this.singleRequests.get(nodeId&NODE_ID_MSK);
                 request.setMesh(this.uploadReplaceSection(request.getMesh(), sectionResult));
 
-                //sectionResult has a cheeky childExistence field that we can use to set the request too, this is just
-                // because processChildChange is only ever invoked when child existence changes, so we still need to
-                // populate the request somehow, it will only set it if it hasnt been set before
                 if (!request.hasChildExistenceSet()) {
                     request.setChildExistence(sectionResult.childExistence);
                 }
@@ -227,7 +207,6 @@ public class NodeManager {
             nodeId&=NODE_ID_MSK;
 
 
-            //TODO: check this is ok and correct
             if ((this.watcher.get(pos)&UPDATE_TYPE_BLOCK_BIT)==0) {
                 if (this.nodeData.isNodeGeometryInFlight(nodeId)) {
                     throw new IllegalStateException();
@@ -327,9 +306,8 @@ public class NodeManager {
 
             //We might be leaf but we still might be inflight
             if (this.nodeData.isNodeRequestInFlight(nodeId&NODE_ID_MSK)) {
-                //  Logger.error("UNFINISHED OPERATION TODO: FIXME: painful operation, needs to account for both adding and removing, need to do the same with inner node, but also create requests, or cleanup children");
                 int requestId = this.nodeData.getNodeRequest(nodeId);
-                var request = this.childRequests.get(requestId);// TODO: do not assume request is childRequest (it will probably always be)
+                var request = this.childRequests.get(requestId);
                 if (request.getPosition() != pos) throw new IllegalStateException("Request is not at pos, got " + WorldEngine.pprintPos(request.getPosition()) + " expected " + WorldEngine.pprintPos(pos));
                 {//Update the request
                     byte oldMsk = request.getMsk();
@@ -346,7 +324,7 @@ public class NodeManager {
                                 this.removeGeometryCached(cPos, meshId);
                             }
 
-                            if (this.activeSectionMap.remove(cPos) == -1) {//TODO: verify the removed section is a request type of child and the request id matches this
+                            if (this.activeSectionMap.remove(cPos) == -1) {
                                 throw new IllegalStateException("Child pos was in a request but not in active section map");
                             }
 
@@ -384,12 +362,11 @@ public class NodeManager {
             //Just need to update the child node data, nothing else
             this.nodeData.setNodeChildExistence(nodeId&NODE_ID_MSK, childExistence);
             //Need to resubmit to gpu
-            this.invalidateNode(nodeId&NODE_ID_MSK);//TODO:FIXME: Do we???
+            this.invalidateNode(nodeId&NODE_ID_MSK);
         }
     }
 
     private void updateChildSectionsInner(long pos, int nodeId, byte childExistence) {
-        //Very complex and painful operation
 
         if (childExistence == 0) {
             Logger.warn("Inner node child existence is changing to 0, this is mild bad");
@@ -412,7 +389,7 @@ public class NodeManager {
             //It is guaranteed that at this point the node has a request
             // so add the new nodes to it
             int requestId = this.nodeData.getNodeRequest(nodeId);
-            var request = this.childRequests.get(requestId);// TODO: do not assume request is childRequest (it will probably always be)
+            var request = this.childRequests.get(requestId);
             if (request.getPosition() != pos)
                 throw new IllegalStateException("Request is not at pos: got " + WorldEngine.pprintPos(pos) + " expected: " + WorldEngine.pprintPos(request.getPosition()));
 
@@ -434,7 +411,6 @@ public class NodeManager {
 
         //Update the nodes existence msk to the new one
         // this needs to be before the removal since that may invoke requestFinish, which expects updated node masks
-        //TODO: verify this
         this.nodeData.setNodeChildExistence(nodeId, childExistence);
 
         // Do removals
@@ -443,7 +419,7 @@ public class NodeManager {
             //If there is an inflight request, update it w.r.t removals
             if (this.nodeData.isNodeRequestInFlight(nodeId)) {
                 int requestId = this.nodeData.getNodeRequest(nodeId);
-                var request = this.childRequests.get(requestId);// TODO: do not assume request is childRequest (it will probably always be)
+                var request = this.childRequests.get(requestId);
                 if (request.getPosition() != pos) throw new IllegalStateException("Request is not at pos");
 
 
@@ -462,7 +438,7 @@ public class NodeManager {
                         }
 
                         int cnid = this.activeSectionMap.remove(cPos);
-                        if (cnid == -1 || (cnid&NODE_TYPE_MSK) != NODE_TYPE_REQUEST) {//TODO: verify the removed section is a request type of child and the request id matches this
+                        if (cnid == -1 || (cnid&NODE_TYPE_MSK) != NODE_TYPE_REQUEST) {
                             throw new IllegalStateException("Child pos was in a request but not in active section map");
                         }
                         if (!this.watcher.unwatch(cPos, WorldEngine.DEFAULT_UPDATE_FLAGS)) {
@@ -502,8 +478,6 @@ public class NodeManager {
                     if (childExistence != 0 && !this.nodeData.isNodeRequestInFlight(nodeId)) {
                         throw new IllegalStateException();
                     }
-                    //TODO: TRIPPLY CHECK THIS IS RIGHT
-                    //TODO: make new SENTINAL value for this!!! NodeStore.NODE_ID_MSK-1
                     // check in shader aswell!!!
 
                     this.nodeData.setAllChildrenAreLeaf(nodeId, false);//Children dont exist, therefor set them to false
@@ -514,7 +488,6 @@ public class NodeManager {
                         long cPos = makeChildPos(pos, i);
                         this.recurseRemoveNode(cPos);
                     }
-                    //this.nodeData.free(oldPtr, oldCount);
 
                 } else {
 
@@ -582,11 +555,10 @@ public class NodeManager {
                 this.invalidateNode(nodeId);
             }
 
-            //TODO: reuse requestId and obj from before (its faster)
             //Only finish the request after so that compaction of the child msk is correct
             if (this.nodeData.isNodeRequestInFlight(nodeId)) {//Also only need to do this after/if there are removals to be done
                 int requestId = this.nodeData.getNodeRequest(nodeId);
-                var request = this.childRequests.get(requestId);// TODO: do not assume request is childRequest (it will probably always be)
+                var request = this.childRequests.get(requestId);
                 if (request.getPosition() != pos) throw new IllegalStateException("Request is not at pos");
 
                 if (request.isSatisfied()) {
@@ -602,7 +574,6 @@ public class NodeManager {
                 throw new IllegalStateException();
 
             if (this.nodeData.getNodeGeometry(nodeId) == NULL_GEOMETRY_ID) {
-                //throw new IllegalStateException("leaf nodes must have geometry");
                 Logger.error("Transforming inner node to leaf node while it has null geometry");
                 if (!this.nodeData.isNodeGeometryInFlight(nodeId)) {
                     if ((this.watcher.get(pos) & UPDATE_TYPE_BLOCK_BIT) != 0) {
@@ -614,9 +585,7 @@ public class NodeManager {
                     }
                 }
                 //Set the geometry to EMPTY while the geometry update request is executing
-                //throw new IllegalStateException();
                 Logger.error("Setting geometry to EMPTY while request is inflight");
-                //TODO: figure out a better way to mark this for tracing verificaction and like less confusion
                 // (instead of like EMPTY_GEOMETRY_ID do like INFLIGHT_GEOMETRY_ID)
                 this.nodeData.setNodeGeometry(nodeId, EMPTY_GEOMETRY_ID);
             }
@@ -694,7 +663,6 @@ public class NodeManager {
             if (this.nodeData.isNodeRequestInFlight(nodeId)) {
                 //If there is an inflight request, the request and all associated data
                 int reqId = this.nodeData.getNodeRequest(nodeId);
-                //TODO: Dont assume this can only be a child request
 
                 var req = this.childRequests.get(reqId);
                 childExistence ^= req.getMsk();
@@ -789,7 +757,6 @@ public class NodeManager {
             } else {
                 //All children removed, clear marker
                 this.nodeData.setAllChildrenAreLeaf(nodeId, false);
-                //TODO: probably need this.clearId(nodeId);
                 this.invalidateNode(nodeId);
             }
         } else if (type == NODE_TYPE_REQUEST) {
@@ -829,14 +796,11 @@ public class NodeManager {
         this.nodeData.setNodePosition(id, request.getPosition());
         this.nodeData.setNodeGeometry(id, request.getMesh());
         this.nodeData.setNodeChildExistence(id, request.getChildExistence());
-        //TODO: this (or remove)
-        //this.nodeData.setNodeType();
         this.activeSectionMap.put(request.getPosition(), id|NODE_TYPE_LEAF);//Assume that the result of any single request type is a leaf node
         this.invalidateNode(id);
 
 
         //Assume that this is always a top node
-        // FIXME: DONT DO THIS
         if (!this.topLevelNodeIds.add(id)) {
             throw new IllegalStateException();
         }
@@ -867,7 +831,6 @@ public class NodeManager {
             //Invalidate parent
             this.invalidateNode(parentNodeId);
 
-            //TODO: verify things here
             return;
         }
         if (parentNodeType==NODE_TYPE_LEAF) {
@@ -892,15 +855,12 @@ public class NodeManager {
                     //This is an ok error if it happens the request with a child state should never be zero
 
 
-                    //TODO: make into warning or log error
-                    //throw new IllegalStateException("Request result with child existence of 0");
                     Logger.warn("Request result with child existence of 0, for child pos " + WorldEngine.pprintPos(childPos));
                 }
                 this.nodeData.setNodeChildExistence(childNodeId, childExistence);
                 this.nodeData.setNodeGeometry(childNodeId, request.getChildMesh(childIdx));
                 //Mark for update
                 this.invalidateNode(childNodeId);
-                //this.clearId(childNodeId);//Clear the id
 
                 //Put in map
                 int pid = this.activeSectionMap.put(childPos, childNodeId|NODE_TYPE_LEAF);
@@ -927,7 +887,6 @@ public class NodeManager {
             this.invalidateNode(parentNodeId);
             this.nodeData.setAllChildrenAreLeaf(parentNodeId, true);
 
-            //TODO: Need to set AllChildrenAreLeaf of the parent of the parent to false
             //Update the parentParent that all the children are leaf
             if (!this.topLevelNodes.contains(request.getPosition())) {
                 int ppnId = this.activeSectionMap.get(makeParentPos(request.getPosition()));
@@ -938,7 +897,6 @@ public class NodeManager {
                 this.nodeData.setAllChildrenAreLeaf(ppnId&NODE_ID_MSK, false);
             }
         } else if (parentNodeType==NODE_TYPE_INNER) {
-            //For this, only need to add the nodes to the existing child set thing (shuffle around whatever) dont ever have to remove nodes
 
             int oldChildPtr = this.nodeData.getChildPtr(parentNodeId);
             int oldChildCnt = this.nodeData.getChildPtrCount(parentNodeId);
@@ -950,9 +908,6 @@ public class NodeManager {
 
             //If the pointer is the empty ptr, dont check the count
             if (oldChildPtr != SENTINEL_EMPTY_CHILD_PTR) {
-                //Ok so technically, it _is ok_ to just add to the end of the childPtr, however, imo that is stupid
-                // and it should follow the logical allocation with respect to the 8 child indices
-                // this means, need to extract the child indices already in the ptr (or technically could use the child existance? but having both and doing verification would be good)
 
                 for (int i = 0; i < oldChildCnt; i++) {
                     if (!this.nodeData.nodeExists(i + oldChildPtr)) {
@@ -963,7 +918,6 @@ public class NodeManager {
             }
             int reqMsk = Byte.toUnsignedInt(request.getMsk());
             if ((byte) (existingChildMsk|reqMsk) != this.nodeData.getNodeChildExistence(parentNodeId)) {
-                //System.out.println(Integer.toBinaryString(Byte.toUnsignedInt(this.nodeData.getNodeChildExistence(parentNodeId))));System.out.println(Integer.toBinaryString(existingChildMsk));System.out.println(Integer.toBinaryString(reqMsk));
                     throw new IllegalStateException("node data existence state does not match pointer mask");
             }
 
@@ -994,8 +948,6 @@ public class NodeManager {
                     byte childExistence = request.getChildChildExistence(i);
                     if (childExistence == 0) {
 
-                        //TODO: make into warning or log error
-                        //throw new IllegalStateException("Request result with child existence of 0");
 
 
                     }
@@ -1066,12 +1018,11 @@ public class NodeManager {
         }
     }
 
-    //==================================================================================================================
+    private int alreadyInFlightWarnCount = 0;
+
     public void processRequest(long pos) {
         int nodeId = this.activeSectionMap.get(pos);
         if (nodeId == -1) {
-            //TODO: make into timing thing
-            //Logger.warn("Got request for pos " + WorldEngine.pprintPos(pos) + " but it was not in active map, ignoring!");
             return;
         }
         int nodeType = nodeId&NODE_TYPE_MSK;
@@ -1085,22 +1036,25 @@ public class NodeManager {
 
 
         if (WorldEngine.getLevel(pos) == 0) {
-            Logger.error("Requests cannot exist for bottom level nodes. at: " + WorldEngine.pprintPos(pos) + ". Ignoring request");
+            if (nodeType == NODE_TYPE_LEAF && this.nodeData.getNodeGeometry(nodeId) == NULL_GEOMETRY_ID) {
+                this.watcher.watch(pos, WorldEngine.UPDATE_TYPE_BLOCK_BIT);
+                return;
+            }
+            //Otherwise the GPU thinks the node is meshless while the CPU disagrees - rewriting the
+            //node uploads the CPU-side mesh pointer, which also stops the re-request
+            if (!this.loggedLevel0Refusal) {
+                this.loggedLevel0Refusal = true;
+                Logger.error("Unexpected request for bottom level node at: " + WorldEngine.pprintPos(pos) + " (logged once)");
+            }
+            this.invalidateNode(nodeId);
             return;
         }
 
-        //TODO: ADJUST AND FIX THIS TO MAKE IT REMOVE THE LAST THING IN QUEUE OR SOMETHING
-        //if (this.activeNodeRequestCount > 100 && WorldEngine.getLevel(pos) < 2) {
-            //Logger.info("Many active requests, declining request at " + WorldEngine.pprintPos(pos));
-        //    this.invalidateNode(nodeId);
-        //    return;
-        //}
 
 
 
 
 
-        //TODO:
         // Make it so that if a request is not in flight it has an invalid/null request entry
 
         // NOTE: inner nodes /w request should check they have geometry independenently of being inflight
@@ -1112,10 +1066,6 @@ public class NodeManager {
 
 
 
-        //TODO: FIXTHIS: https://discord.com/channels/973046939375505408/973046939375505411/1328785093812031489
-        // this causes things to go bad, when racing the gpu, i.e. this becomes an inner node that has geometry and there is now a request for it
-        // in this case we should not mark the node as inflight as it casuse very bad things to happen
-        // we should only mark inflight when there is actually a request
         if (nodeType == NODE_TYPE_LEAF) {
 
             if (this.nodeData.getNodeGeometry(nodeId) == NULL_GEOMETRY_ID) {
@@ -1129,7 +1079,14 @@ public class NodeManager {
 
             //Check if the node is already in-flight, if it is, dont do any processing
             if (this.nodeData.isNodeRequestInFlight(nodeId)) {
-                Logger.warn("Tried processing a node that already has a request in flight: " + nodeId + " pos: " + WorldEngine.pprintPos(pos) + " ignoring");
+                if (this.alreadyInFlightWarnCount < 20) {
+                    Logger.warn("Tried processing a node that already has a request in flight: " + nodeId + " pos: " + WorldEngine.pprintPos(pos) + " ignoring");
+                    if (++this.alreadyInFlightWarnCount == 20) {
+                        Logger.warn("Suppressing further 'request already in flight' warnings");
+                    }
+                } else {
+                    me.cortex.voxy.commonImpl.PerfStats.nodeWarnSuppressed.increment();
+                }
                 return;
             }
 
@@ -1161,7 +1118,6 @@ public class NodeManager {
         var request = new NodeChildRequest(pos);
         int requestId = this.childRequests.put(request);
 
-        //Only request against the childExistence mask, since the guarantee is that if childExistence bit is not set then that child is guaranteed to be empty
         for (int i = 0; i < 8; i++) {
             if ((childExistence&(1<<i))==0) {
                 //Dont watch or enqueue the child node cause it doesnt exist
@@ -1193,7 +1149,6 @@ public class NodeManager {
 
     //A request is received for an inner node position
     private void processInnerRequest(long pos, int nodeId) {
-        //TODO: finish
         int geo = this.nodeData.getNodeGeometry(nodeId);
         if (VERIFY_NODE_MANAGER_OPERATIONS) {
             boolean isWatchingUpdate = (this.watcher.get(pos)&UPDATE_TYPE_BLOCK_BIT)!=0;
@@ -1211,7 +1166,6 @@ public class NodeManager {
 
         if (!this.nodeData.isNodeGeometryInFlight(nodeId)) {
             if (!this.watcher.watch(pos, WorldEngine.UPDATE_TYPE_BLOCK_BIT)) {
-                //Logger.info("Node: " + nodeId + " at pos: " + WorldEngine.pprintPos(pos) + " got update request, but geometry was already being watched");
                 this.invalidateNode(nodeId);//Who knows why but just invalidate the data just to keep in sync
             } else {
                 this.nodeData.markNodeGeometryInFlight(nodeId);
@@ -1221,33 +1175,21 @@ public class NodeManager {
     //==================================================================================================================
     // Used by the cleaning system to ensure memory capacity in the geometry store
 
-    //TODO: Think plan for this is to add new flag to NodeStore to indicate if geometry mesh request is inflight
-    // this used for state verification and not emitting/assuming things
-    // e.g. current issue is if an inner node wants/needs to convert into a leaf node, but the inner node has no geometry
-    // how to deal with that?? e.g. inner node geometry gets cleared but then the childExistance gets set to 0
-    // it needs to become a leaf node
 
     public void removeNodeGeometry(long pos) {
         int nodeId = this.activeSectionMap.get(pos);
         if (nodeId == -1) {
-            //Logger.warn("Got geometry removal for pos " + WorldEngine.pprintPos(pos) + " but it was not in active map, ignoring!");
             return;
         }
         int nodeType = nodeId&NODE_TYPE_MSK;
         nodeId &= NODE_ID_MSK;
         if (nodeType == NODE_TYPE_REQUEST) {
-            //TODO: only log a specific number of times
-            //Logger.warn("Tried removing geometry for pos: " + WorldEngine.pprintPos(pos) + " but its type was a request, ignoring!");
             return;
         }
-        //this.clearId(nodeId);
 
         if (nodeType == NODE_TYPE_INNER) {
             this.clearGeometryInternal(pos, nodeId);
-        //    this.clearId(nodeId);
         } else {//NODE_TYPE_LEAF
-            //TODO: here we need to make the parent node a leaf node...
-            // TODO? think about maybe only doing it if all children of the parent are leaf nodes aswell
 
             if (this.topLevelNodes.contains(pos)) {
                 //We are asked to remove the geometry of a top level leaf node, which we cannot do
@@ -1256,8 +1198,6 @@ public class NodeManager {
                     //If its null or empty we can "ignore" the request
                 } else {
                     Logger.warn("Tried removing geometry from top level node which is not allowed, disregarding request");
-                    //TODO: probably do
-                    //this.clearId(nodeId);
                     return;
                 }
 
@@ -1276,7 +1216,6 @@ public class NodeManager {
         pId &= NODE_ID_MSK;
 
         if (false) {//Check all children are leaf nodes
-            //TODO: make a better way to do this (i.e. gpu driven)
             int cPtr = this.nodeData.getChildPtr(pId);
             if (cPtr != SENTINEL_EMPTY_CHILD_PTR) {
                 if (cPtr == -1) {
@@ -1306,8 +1245,7 @@ public class NodeManager {
             this.processRequest(pPos);//Request geometry
         } else {
             //Convert to leaf node
-            this.recurseRemoveChildNodes(pPos);//TODO: make this download/fetch the data instead of just deleting it
-            //this.clearId(pId);
+            this.recurseRemoveChildNodes(pPos);
 
             //Make node a leaf
             int old = this.activeSectionMap.put(pPos, NODE_TYPE_LEAF|pId);
@@ -1324,7 +1262,6 @@ public class NodeManager {
     private void clearGeometryInternal(long pos, int nodeId) {
         int meshId = this.nodeData.getNodeGeometry(nodeId);
 
-        //TODO: if isNodeGeometryInFlight is true and geometryId == NULL_GEOMETRY_ID, probably need to
         // unwatch from watcher and unmark
 
         if (meshId != NULL_GEOMETRY_ID && meshId != EMPTY_GEOMETRY_ID) {
@@ -1339,14 +1276,12 @@ public class NodeManager {
             this.nodeData.unmarkNodeGeometryInFlight(nodeId);//Remove geometry inflight as well, its removed
         } else {
             if (meshId == NULL_GEOMETRY_ID) {
-                //Logger.info("Tried removing geometry of internal node but geometry was null");
             }
         }
     }
 
     //==================================================================================================================
     public boolean writeChanges(GlBuffer nodeBuffer) {
-        //TODO: use like compute based copy system or something
         // since microcopies are bad
         if (this.nodeUpdates.isEmpty()) {
             return false;
@@ -1427,7 +1362,6 @@ public class NodeManager {
 
     //==================================================================================================================
 
-    //TODO: need to figure out what happens if an inner node gets marked with child existence of 0
     // it should become a leaf node
     // however, if the node doesnt have geometry attached that would put it in an invalid state so need to figure out
     // a solution for this
@@ -1435,7 +1369,7 @@ public class NodeManager {
     private int verifyRequest(long pos, int node, int cActiveExistence, LongOpenHashSet seenPositions, IntOpenHashSet seenNodes) {
         if (this.nodeData.isNodeRequestInFlight(node)) {
             int requestId = this.nodeData.getNodeRequest(node);
-            var request = this.childRequests.get(requestId);//TODO: dont assume is a child request
+            var request = this.childRequests.get(requestId);
             if (request.getPosition() != pos)
                 throw new IllegalStateException();//Request position must be this position
             int reqMsk = Byte.toUnsignedInt(request.getMsk());
@@ -1482,14 +1416,12 @@ public class NodeManager {
                 if (req.getPosition() != pos) {
                     throw new IllegalStateException();
                 }
-                //TODO
             } else {
                 int id = node&NODE_ID_MSK;
                 var req = this.childRequests.get(id);
                 if (req.getPosition() != makeParentPos(pos)) {
                     throw new IllegalStateException();
                 }
-                //TODO
             }
         } else {
             node &= NODE_ID_MSK;
@@ -1497,8 +1429,6 @@ public class NodeManager {
                 throw new IllegalStateException();
             }
 
-            //if (type != this.nodeData.getNodeType(node))
-            //    throw new IllegalStateException();
 
             if (this.nodeData.nodePosition(node) != pos) {
                 throw new IllegalStateException();
@@ -1530,21 +1460,12 @@ public class NodeManager {
                     throw new IllegalStateException();
                 //Cannot be awaiting geometry and have it
                 if (hasGeometry && awaitingGeo) {
-                    //We assume if the geometry is EMPTY, that what happened was an inner node just got convertex into a leaf node and is now awaiting its geometry
-                    //if (type != NODE_TYPE_LEAF || this.nodeData.getNodeGeometry(node) != EMPTY_GEOMETRY_ID)
-                    //    throw new IllegalStateException();
-                    //HOWEVER, what can happen is that before we recieve the geometry for the node, thus clearing the geometryInFlight
-                    // is that we get a request and childexistance change and all the children recieved,
-                    // thus causing the node to become an INNER node again ;-;
 
                     //So just... sigh, just check that the geometry is not empty...
                     if (this.nodeData.getNodeGeometry(node) != EMPTY_GEOMETRY_ID)
                         throw new IllegalStateException();
                 }
             }
-            //if (this.nodeData.getNodeType(node) != type) {
-            //    throw new IllegalStateException();
-            //}
             if (!seenNodes.add(node))
                 throw new IllegalStateException();
             if (type == NODE_TYPE_INNER) {
@@ -1555,7 +1476,6 @@ public class NodeManager {
                 if (childPtr == -1) {//Inner nodes cannot have null child ptrs
                     throw new IllegalStateException();
                 }
-                //TODO: check SENTINEL_EMPTY_CHILD_PTR
                 if (childPtr != SENTINEL_EMPTY_CHILD_PTR) {
                     boolean allChildrenLeaf = true;//childCount != 0;
                     for (int i = 0; i < childCount; i++) {
@@ -1584,7 +1504,6 @@ public class NodeManager {
                     if (this.nodeData.getAllChildrenAreLeaf(node)) {
                         throw new IllegalStateException();
                     }
-                    //TODO: verify SENTINEL_EMPTY_CHILD_PTR is valid
                     childCount = 0;
                 }
 
@@ -1612,7 +1531,6 @@ public class NodeManager {
                 }
 
                 if (WorldEngine.getLevel(pos) == 0) {
-                    //TODO: this is a specialcase
                     if (this.nodeData.isNodeRequestInFlight(node)) {//Child nodes cannot have inflight requests
                         throw new IllegalStateException();
                     }
@@ -1625,7 +1543,6 @@ public class NodeManager {
                         }
                     }
                 }
-                //TODO
 
             } else {
                 throw new IllegalStateException();
@@ -1637,13 +1554,6 @@ public class NodeManager {
         this.verifyIntegrity(null, null);
     }
     public void verifyIntegrity(LongSet watchingPosSet, IntSet nodes) {
-        //Should verify integrity of node manager, everything
-        // should traverse from top (root positions) down
-        // after it should check if there is anything it hasnt tracked, if so thats badd
-        //It should check childPtr and childPtrCount match and align with the nodeMsk
-        // verify requests and positions
-        //it should verify everything is correct and as it should be
-        // it should verify geometry exists as well for nodes that should
 
         LongOpenHashSet seenPositions = new LongOpenHashSet();
         IntOpenHashSet seenNodes = new IntOpenHashSet();

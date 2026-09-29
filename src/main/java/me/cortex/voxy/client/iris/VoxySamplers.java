@@ -11,11 +11,6 @@ public class VoxySamplers {
         if (patchData != null) {
             String[] opaqueNames = new String[]{"vxDepthTexOpaque"};
             String[] translucentNames = new String[]{"vxDepthTexTrans"};
-            /*
-            if (IrisShaderPatch.IMPERSONATE_DISTANT_HORIZONS) {
-                opaqueNames = new String[]{"vxDepthTexOpaque", "dhDepthTex1"};
-                translucentNames = new String[]{"vxDepthTexTrans", "dhDepthTex", "dhDepthTex0"};
-            }*/
 
             samplers.addDynamicSampler(TextureType.TEXTURE_2D, () -> {
                 var pipeData = ((IGetIrisVoxyPipelineData)pipeline).voxy$getPipelineData();

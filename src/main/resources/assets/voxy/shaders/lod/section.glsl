@@ -1,16 +1,4 @@
 #import <voxy:lod/pos_util.glsl>
-/*
-struct SectionMeta {
-    uint posA;
-    uint posB;
-    uint AABB;
-    uint ptr;
-    uint cntA;
-    uint cntB;
-    uint cntC;
-    uint cntD;
-};
-*/
 struct SectionMeta {
     uvec4 a;
     uvec4 b;

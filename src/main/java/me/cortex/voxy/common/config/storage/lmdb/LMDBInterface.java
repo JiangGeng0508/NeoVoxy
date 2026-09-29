@@ -117,7 +117,6 @@ public class LMDBInterface {
             mdb_dbi_close(LMDBInterface.this.env, this.dbi);
         }
 
-        //TODO: make a MDB_RDONLY varient
         public <T> T transaction(TransactionWrappedCallback<T> callback) {
             return this.transaction(0, callback);
         }
