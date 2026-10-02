@@ -1,6 +1,5 @@
 package me.cortex.voxy;
 
-import me.cortex.voxy.client.VoxyJoinMessage;
 import me.cortex.voxy.client.compat.LodPipelineHooks;
 import me.cortex.voxy.client.compat.copycat.CopycatDistantRenderer;
 import me.cortex.voxy.client.compat.create.DistantContraptionManager;
@@ -81,7 +80,6 @@ public class Voxy {
     private static void registerClientEvents(ModContainer container) {
         VoxyNeoForgeConfig.register(container);
         container.registerExtensionPoint(IConfigScreenFactory.class, ConfigurationScreen::new);
-        NeoForge.EVENT_BUS.register(VoxyJoinMessage.INSTANCE);
 
         registerEclipticSeasons();
         registerCreateClientEvents();

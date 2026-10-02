@@ -159,7 +159,7 @@ public final class FramedBlocksCompat {
                 BAKE_PLANS.computeIfAbsent(mapper, ignored -> new ConcurrentHashMap<>());
         DomumOrnamentumCompat.BakePlan cached = plans.get(blockId);
         if (cached != null) return cached;
-        ModelData data = recreateModelData(state, descriptor);
+        ModelData data = ClientModels.recreateModelData(state, descriptor);
         if (data == null || data == ModelData.EMPTY) return DomumOrnamentumCompat.BakePlan.empty();
         BlockState colourState = appearanceState(data);
         // The wrapper's render types are camo-dependent, so ask it for its complete declared set.
@@ -182,19 +182,23 @@ public final class FramedBlocksCompat {
         }
     }
 
-    private static ModelData recreateModelData(BlockState state, CompoundTag descriptor) {
-        try {
-            var level = Minecraft.getInstance().level;
-            if (level == null || !(state.getBlock() instanceof EntityBlock entityBlock)) return null;
-            BlockEntity blockEntity = entityBlock.newBlockEntity(BlockPos.ZERO, state);
-            if (blockEntity == null || !blockEntity.getClass().getName().startsWith(PACKAGE_PREFIX)) return null;
-            blockEntity.setLevel(level);
-            blockEntity.handleUpdateTag(descriptor.getCompound("block_entity").copy(), level.registryAccess());
-            Method method = MODEL_DATA_METHODS.get(blockEntity.getClass()).orElse(null);
-            Object result = method == null ? blockEntity.getModelData() : method.invoke(blockEntity, false);
-            return result instanceof ModelData modelData ? modelData : null;
-        } catch (Throwable ignored) {
-            return null;
+    // Keep ClientLevel bytecode out of the common class: the JVM verifies it even when
+    // FramedBlocks is absent and only beginSection/endSection are used on a server.
+    private static final class ClientModels {
+        private static ModelData recreateModelData(BlockState state, CompoundTag descriptor) {
+            try {
+                var level = Minecraft.getInstance().level;
+                if (level == null || !(state.getBlock() instanceof EntityBlock entityBlock)) return null;
+                BlockEntity blockEntity = entityBlock.newBlockEntity(BlockPos.ZERO, state);
+                if (blockEntity == null || !blockEntity.getClass().getName().startsWith(PACKAGE_PREFIX)) return null;
+                blockEntity.setLevel(level);
+                blockEntity.handleUpdateTag(descriptor.getCompound("block_entity").copy(), level.registryAccess());
+                Method method = MODEL_DATA_METHODS.get(blockEntity.getClass()).orElse(null);
+                Object result = method == null ? blockEntity.getModelData() : method.invoke(blockEntity, false);
+                return result instanceof ModelData modelData ? modelData : null;
+            } catch (Throwable ignored) {
+                return null;
+            }
         }
     }
 

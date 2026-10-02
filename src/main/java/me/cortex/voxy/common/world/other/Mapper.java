@@ -177,12 +177,7 @@ public class Mapper {
                 if (sentry.isVariant()) {
                     this.variantBlock2stateEntry.putIfAbsent(
                             new VariantStateKey(sentry.state, sentry.variantType, sentry.variantKey), sentry);
-                    DomumOrnamentumCompat.restoreVariant(
-                            this, sentry.id, sentry.state, sentry.variantType, sentry.variantData);
-                    me.cortex.voxy.commonImpl.compat.CreateCopycatCompat.restoreVariant(
-                            this, sentry.id, sentry.state, sentry.variantType, sentry.variantData);
-                    me.cortex.voxy.commonImpl.compat.FramedBlocksCompat.restoreVariant(
-                            this, sentry.id, sentry.state, sentry.variantType, sentry.variantData);
+                    this.restoreVariant(sentry.id, sentry);
                     continue;
                 }
 
@@ -359,6 +354,24 @@ public class Mapper {
             this.newStateCallback.accept(mapping);
         }
         return mapping.id;
+    }
+
+    /** Imports a mapping from another store without losing its block-entity appearance. */
+    public int importStateEntry(StateEntry entry) {
+        if (!entry.isVariant()) {
+            return this.getIdForBlockState(entry.state);
+        }
+        int id = this.getIdForBlockStateVariant(entry.state, entry.variantType, entry.variantKey, entry.variantData);
+        if (id != 0) this.restoreVariant(id, entry);
+        return id;
+    }
+
+    private void restoreVariant(int localId, StateEntry entry) {
+        DomumOrnamentumCompat.restoreVariant(this, localId, entry.state, entry.variantType, entry.variantData);
+        me.cortex.voxy.commonImpl.compat.CreateCopycatCompat.restoreVariant(
+                this, localId, entry.state, entry.variantType, entry.variantData);
+        me.cortex.voxy.commonImpl.compat.FramedBlocksCompat.restoreVariant(
+                this, localId, entry.state, entry.variantType, entry.variantData);
     }
 
     public int getBlockStateOpacity(long mappingId) {

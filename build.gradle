@@ -54,6 +54,10 @@ runs {
             runtime 'org.lwjgl:lwjgl-zstd:3.3.3:natives-linux'
             runtime 'org.rocksdb:rocksdbjni:10.2.1'
             runtime 'at.yawk.lz4:lz4-java:1.10.1'
+            runtime 'org.tukaani:xz:1.10'
+            runtime 'org.xerial:sqlite-jdbc:3.49.1.0'
+            runtime 'redis.clients:jedis:5.1.0'
+            runtime 'org.apache.commons:commons-pool2:2.12.0'
         }
     }
 
@@ -64,6 +68,10 @@ runs {
     server {
         systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
         argument '--nogui'
+    }
+
+    junit {
+        unitTestSource project.sourceSets.test
     }
 }
 
@@ -93,6 +101,42 @@ def extractSodiumNeoForgeModJar = tasks.register('extractSodiumNeoForgeModJar', 
         includeEmptyDirs = false
     }
     into layout.buildDirectory.dir('extracted')
+}
+
+// Sodium's bootstrap service must be discovered from mods/ before the early window.
+// Putting its outer LIBRARY JAR on userdev's classpath makes JarJar mistake it for
+// the actual nested Sodium mod. Install the original distribution for client runs,
+// preserving any Sodium version the developer has already installed.
+tasks.withType(JavaExec).configureEach {
+    if (name == 'runClient') {
+        doFirst {
+            File modsDirectory = new File(workingDir, 'mods')
+            boolean installed = modsDirectory.listFiles()?.any { File file ->
+                if (!file.name.endsWith('.jar')) return false
+                try {
+                    return new java.util.zip.ZipFile(file).withCloseable { archive ->
+                        def descriptor = archive.getEntry('META-INF/neoforge.mods.toml')
+                        if (descriptor == null) return false
+                        String metadata = archive.getInputStream(descriptor).withCloseable { it.getText('UTF-8') }
+                        // Dependency tables can also mention sodium (for example Sable's
+                        // optional compatibility). Only an actual [[mods]] entry counts.
+                        def modTables = metadata =~ /(?ms)^\h*\[\[mods\]\]\h*(?:#[^\r\n]*)?\R(.*?)(?=^\h*\[|\z)/
+                        return modTables.any { table ->
+                            (table[1] =~ /(?m)^\h*modId\h*=\h*["']sodium["']/).find()
+                        }
+                    }
+                } catch (java.util.zip.ZipException ignored) {
+                    return false
+                }
+            } ?: false
+            if (!installed) {
+                project.copy {
+                    from configurations.sodiumOuter.singleFile
+                    into modsDirectory
+                }
+            }
+        }
+    }
 }
 
 // Create ships its Ponder and Flywheel compile APIs as nested jarjar jars. Extract the exact
@@ -293,6 +337,9 @@ tasks.named('assemble') {
     dependsOn tasks.named('slimJar')
 }
 dependencies {
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.11.4'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+
     modules {
         module('org.lz4:lz4-java') {
             replacedBy('at.yawk.lz4:lz4-java', 'Voxy uses the maintained at.yawk lz4-java artifact.')
@@ -305,7 +352,6 @@ dependencies {
 
     sodiumOuter "maven.modrinth:sodium:mc1.21.1-0.8.12-neoforge"
     compileOnly files(sodiumNeoForgeModJar).builtBy(extractSodiumNeoForgeModJar)
-    localRuntime "maven.modrinth:sodium:mc1.21.1-0.8.12-neoforge"
     compileOnly "maven.modrinth:iris:1.8.0+1.21.1-neoforge"
     compileOnly "maven.modrinth:fALzjamp:LuFhm4eU"
 
@@ -382,4 +428,10 @@ tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
     options.release = 21
     options.deprecation = true
+}
+
+// Minecraft and mod classes need NeoForge's transforming classloader (testJunit).
+tasks.named('test') {
+    dependsOn 'testJunit'
+    enabled = false
 }

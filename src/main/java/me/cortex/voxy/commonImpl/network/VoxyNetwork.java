@@ -168,6 +168,8 @@ public final class VoxyNetwork {
     // ---------- registration ----------
 
     public static void register(PayloadRegistrar registrar) {
+        // Either peer may omit Voxy; only negotiate LOD sync when both support it.
+        registrar = registrar.optional();
         registrar.playToServer(HelloC2S.TYPE, HelloC2S.CODEC, VoxyNetwork::handleHelloC2S);
         registrar.playToServer(SectionRequestC2S.TYPE, SectionRequestC2S.CODEC, VoxyNetwork::handleSectionRequest);
         registrar.playToClient(HelloS2C.TYPE, HelloS2C.CODEC, VoxyNetwork::handleHelloS2C);

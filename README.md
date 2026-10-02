@@ -12,7 +12,7 @@ NeoVoxy 是面向 Minecraft 1.21.1 + NeoForge 的 Voxy 移植项目，目标是�
 
 - Minecraft: `1.21.1`
 - NeoForge: `21.1.244`
-- Mod 版本: `0.2.16-beta+neoforge`
+- Mod 版本: `0.2.17-beta+neoforge`
 - Java: `21`
 - 必需依赖: Sodium NeoForge `0.8.12+mc1.21.1` 以上
 - 可选依赖: Iris `1.8.x+1.21.1-neoforge`（启用光影时自动切换到 Iris 渲染管线）
@@ -90,8 +90,14 @@ NeoVoxy 是面向 Minecraft 1.21.1 + NeoForge 的 Voxy 移植项目，目标是�
 | Chunky       | `1.4.23`                        | 暂未发现冲突  |
 | Create       | `6.0.x+mc1.21.1`                | 兼容良好（列车 / 轨道 / 装置 / 电线等远景渲染） |
 | Create: Copycats+ / FramedBlocks / Little Tiles / Domum Ornamentum | 对应 1.21.1 版本 | 兼容良好（可选；未安装时相关选项自动隐藏） |
-| Create: Aeronautics（Sable） | `2.0.x+mc1.21.1`     | 实验性     |
+| Create: Aeronautics / Sable | Aeronautics `1.3.0` / Sable `2.0.3` | 实验性（已验证基础船体组装、保存与重载） |
 | Ecliptic Seasons | `0.15.0-rc-3-1`              | 实验性     |
+
+2026-10-02 在 NeoForge `21.1.244`、Sodium `0.8.12` 下验证了 Create `6.0.10` 与
+Aeronautics `1.3.0`（含 Simulated / Offroad）和 Sable `2.0.3`：客户端进世界、含马达 / 传动轴 /
+Levitite 的船体组装、专用服务端保存重启及客户端重载显示通过。复杂飞行、列车和远距离切换尚未覆盖。
+该组合在专用服务端启动时会记录 `ClientLevel` 的端侧检查错误；移除 Voxy 的对照测试同样出现，
+未阻止启动与保存。
 
 不确定的工作：
 
@@ -113,6 +119,10 @@ NeoVoxy 是面向 Minecraft 1.21.1 + NeoForge 的 Voxy 移植项目，目标是�
 
 使用 Gradle 运行 `.\gradlew build` 即可，产物为 `build/libs/voxy-<版本>.jar`（`assemble` 会自
 动执行 `slimJar`）。`build/intermediate-jars` 下是未裁剪的中间产物，请勿发布。
+
+`build` 同时执行 NeoForge 环境下的回归测试，也可单独运行 `.\gradlew testJunit`。
+测试覆盖可选网络通道协商、远端方块变体映射的持久化，以及季节表面标记的 ID 转换。
+`.\gradlew runClient` 会在运行目录尚未安装 Sodium 时自动放入所需版本，已有安装会保留。
 
 > 分发包内嵌 RocksDB、LWJGL ZSTD、LWJGL LMDB（含 Windows/Linux x86_64 原生库，解包在 Jar 根
 > 目录）、Jedis + commons-pool2 与 xz/sqlite-jdbc，因此默认存储、LMDB 后端、Redis 后端以及

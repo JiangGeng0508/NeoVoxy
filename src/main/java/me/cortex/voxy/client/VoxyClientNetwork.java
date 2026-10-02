@@ -8,6 +8,7 @@ import me.cortex.voxy.common.world.other.Mapper;
 import me.cortex.voxy.commonImpl.VoxyCommon;
 import me.cortex.voxy.commonImpl.WorldIdentifier;
 import me.cortex.voxy.commonImpl.network.VoxyNetwork;
+import me.cortex.voxy.commonImpl.network.LodMappingTranslator;
 import net.minecraft.client.Minecraft;
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.bus.api.SubscribeEvent;
@@ -60,6 +61,9 @@ public final class VoxyClientNetwork implements VoxyNetwork.ClientHandler {
     }
 
     private static void sendHello() {
+        if (!ServerCapabilities.lodSync() || !VoxyCommon.isAvailable()) {
+            return;
+        }
         lastHelloNanos = System.nanoTime();
         try {
             VoxyNetwork.sendToServer(new VoxyNetwork.HelloC2S(VoxyNetwork.PROTOCOL_VERSION));
@@ -71,6 +75,7 @@ public final class VoxyClientNetwork implements VoxyNetwork.ClientHandler {
     @SubscribeEvent
     public static void onLoggingOut(ClientPlayerNetworkEvent.LoggingOut event) {
         serverAuthoritative = false;
+        lastHelloNanos = 0;
         synchronized (pendingSections) {
             pendingSections.clear();
         }
@@ -84,21 +89,30 @@ public final class VoxyClientNetwork implements VoxyNetwork.ClientHandler {
     private static void onStoreMiss(long sectionKey) {
         var minecraft = Minecraft.getInstance();
         var level = minecraft.level;
-        if (level == null) {
+        var connection = minecraft.getConnection();
+        if (level == null || !ServerCapabilities.lodSync()) {
             return;
         }
+        // Misses arrive on storage workers. Recheck the captured session on the main thread
+        // so a queued request cannot be sent after logout or into another dimension/server.
+        minecraft.execute(() -> {
+            if (minecraft.level == level && minecraft.getConnection() == connection
+                    && ServerCapabilities.lodSync()) {
+                requestSection(level.dimension().location().toString(), sectionKey);
+            }
+        });
+    }
+
+    private static void requestSection(String dim, long sectionKey) {
         if (!serverAuthoritative) {
-            //Hello may have been lost (or the server started voxy later); retry it
-            // throttled so a mod-less server is not spammed with unknown packets
+            // Retry only on connections that negotiated the LOD sync protocol.
             if (System.nanoTime() - lastHelloNanos > 5_000_000_000L) {
                 sendHello();
             }
             return;
         }
-        //Only pull for the dimension the player is currently in
-        String dim = level.dimension().location().toString();
         String reqKey = dim + "#" + sectionKey;
-        if (inFlightRequests.size() > MAX_IN_FLIGHT) {
+        if (inFlightRequests.size() >= MAX_IN_FLIGHT) {
             return;
         }
         if (!inFlightRequests.add(reqKey)) {
@@ -183,7 +197,7 @@ public final class VoxyClientNetwork implements VoxyNetwork.ClientHandler {
                 var entry = Mapper.StateEntry.deserialize(serverId, entries.get(i), new boolean[1]);
                 map = grow(map, serverId);
                 serverBlockToClient.put(dim, map);
-                map[serverId] = mapper.getIdForBlockState(entry.state);
+                map[serverId] = mapper.importStateEntry(entry);
             } catch (Exception e) {
                 Logger.error("Voxy failed applying server block mapping " + serverId, e);
             }
@@ -311,20 +325,10 @@ public final class VoxyClientNetwork implements VoxyNetwork.ClientHandler {
             long[] translated = new long[lutCount];
             for (int i = 0; i < lutCount; i++) {
                 long serverLong = MemoryUtil.memGetLong(lutBase + (long) i * 8);
-                int sBlock = (int) ((serverLong >>> 27) & ((1 << 20) - 1));
-                if (sBlock == 0) {
-                    translated[i] = serverLong;//Air carries no mapping, light bits pass through
-                    continue;
-                }
-                int sBiome = (int) ((serverLong >>> 47) & 0x1FF);
-                int light = (int) ((serverLong >>> 56) & 0xFF);
-                if (blockMap == null || sBlock >= blockMap.length || blockMap[sBlock] < 0
-                        || biomeMap == null || sBiome >= biomeMap.length || biomeMap[sBiome] < 0) {
+                translated[i] = LodMappingTranslator.translate(serverLong, blockMap, biomeMap);
+                if (translated[i] == Mapper.UNKNOWN_MAPPING) {
                     return false;//Mappings not yet synced, retry later
                 }
-                translated[i] = (Integer.toUnsignedLong(light) << 56)
-                        | (Integer.toUnsignedLong(biomeMap[sBiome]) << 47)
-                        | (Integer.toUnsignedLong(blockMap[sBlock]) << 27);
             }
 
             var section = engine.acquire(payload.lvl(), payload.x(), payload.y(), payload.z());

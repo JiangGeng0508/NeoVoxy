@@ -121,8 +121,6 @@ public class VoxyConfig {
     public boolean renderFarPlayerNames = true;
     public int farPlayerAnimationDistance = 0;
     public boolean shareFarPlayerPosition = true;
-    public boolean joinMessageShown = false;
-    public boolean upgradeCleanupNoticeShown = false;
     // 实验性选项集中放在文件末段，设置页和配置迁移可统一处理。
     public boolean experimentalHiZCompute = false;
     public boolean experimentalCmdListHold = false;
@@ -193,9 +191,6 @@ public class VoxyConfig {
     public boolean eclipticSeasonsSnowLod = true;
     public boolean eclipticSeasonsLodAutoReload = false;
     public boolean eclipticSeasonsReloadOnSeasonChange = true;
-
-    // 世界加入时显示版本和维护信息。
-    public boolean showJoinMessage = true;
 
     public SSAO.SSAOMode getSSAOMode() {
         if (this.ssaoMode == null) {

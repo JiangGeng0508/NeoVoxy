@@ -2,6 +2,7 @@ package me.cortex.voxy.client;
 
 import me.cortex.voxy.compat.far.FarEntityProtocol;
 import me.cortex.voxy.commonImpl.compat.create.DistantTrainProtocol;
+import me.cortex.voxy.commonImpl.network.VoxyNetwork;
 import net.minecraft.client.Minecraft;
 import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
 
@@ -19,6 +20,13 @@ public final class ServerCapabilities {
 
     public static boolean farEntities() {
         return supports(FarEntityProtocol.HelloPayload.TYPE, FarEntityProtocol.PlayersPayload.TYPE);
+    }
+
+    public static boolean lodSync() {
+        return supports(VoxyNetwork.HelloC2S.TYPE, VoxyNetwork.HelloS2C.TYPE,
+                VoxyNetwork.SectionRequestC2S.TYPE, VoxyNetwork.SectionDataS2C.TYPE,
+                VoxyNetwork.BlockMapBatchS2C.TYPE, VoxyNetwork.BiomeMapBatchS2C.TYPE,
+                VoxyNetwork.MappingDeltaS2C.TYPE);
     }
 
     public static boolean trains() {
