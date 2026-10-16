@@ -20,6 +20,7 @@ NeoVoxy 是面向 Minecraft 1.21.1 + NeoForge 的 Voxy 移植项目，目标是�
 ## 功能范围
 
 - Sodium 渲染管线深度集成（吞并最外层 vanilla 区块环交给 LoD 渲染，消除区块交界处的水面接缝）
+- 平滑过渡按原版实际绘制的地形交接，快速移动时保留已有 LoD 为未就绪的地形补位
 - Voxy LoD 区块的加载、保存与渲染（GPU 驱动的 MDIC 渲染后端、HiZ 遮挡剔除、SSAO）
 - 世界曲率（地球曲率）模拟，参照 Distant Horizons 实现
 - 集成服/局域网主机的**远处区块后台生成**（Distant Generation），持续向 LoD 商店灌入地形
@@ -31,6 +32,7 @@ NeoVoxy 是面向 Minecraft 1.21.1 + NeoForge 的 Voxy 移植项目，目标是�
   激光、Create: Aeronautics（Sable 船载）、FramedBlocks、Little Tiles、Domum Ornamentum、
   Ecliptic Seasons 季节雪线与冻结水面，均可单独开关并设置各自的 LoD 距离
 - 远景信标光柱、放置式动力机械的远处剔除等原版扩展
+- Create 机壳连接纹理：根据已保存的 LoD 邻居计算连接，支持跨区段边角与方块修改后的刷新；旧缓存无需删除
 - `/voxy reload`
 - `/voxy import world <name>`
 - `/voxy import bobby <name>`
@@ -122,6 +124,7 @@ Levitite 的船体组装、专用服务端保存重启及客户端重载显示�
 
 `build` 同时执行 NeoForge 环境下的回归测试，也可单独运行 `.\gradlew testJunit`。
 测试覆盖可选网络通道协商、远端方块变体映射的持久化，以及季节表面标记的 ID 转换。
+同时验证区块批量保存后可重新读取，避免过期的“不存在”缓存使已保存的 LoD 被误判为缺失。
 `.\gradlew runClient` 会在运行目录尚未安装 Sodium 时自动放入所需版本，已有安装会保留。
 
 > 分发包内嵌 RocksDB、LWJGL ZSTD、LWJGL LMDB（含 Windows/Linux x86_64 原生库，解包在 Jar 根

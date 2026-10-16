@@ -1,5 +1,6 @@
 package me.cortex.voxy.client.core.rendering.building;
 
+import me.cortex.voxy.client.compat.create.CreateConnectedTextures;
 import me.cortex.voxy.client.core.model.IdNotYetComputedException;
 import me.cortex.voxy.client.core.model.ModelFactory;
 import me.cortex.voxy.client.core.model.ModelQueries;
@@ -27,6 +28,7 @@ public class RenderDataFactory {
 
     private final WorldEngine world;
     private final ModelFactory modelMan;
+    private final CreateConnectedTextures connectedTextures = new CreateConnectedTextures();
 
     private final long[] sectionData = new long[32*32*32*2];
     private final long[] neighboringFaces = new long[32*32*6];
@@ -2408,6 +2410,7 @@ public class RenderDataFactory {
 
         //Prepare everything
         long[] rawSection = section.materialize();
+        rawSection = this.connectedTextures.substitute(this.world, section, rawSection);
         var seasonalView = me.cortex.voxy.client.core.compat.eclipticseasons.SeasonalLod.view;
         if (seasonalView != null) {
             try {
@@ -2423,7 +2426,10 @@ public class RenderDataFactory {
         }
         int neighborMskAndFlags = this.prepareSectionData(rawSection);
         if ((neighborMskAndFlags&(1<<31))!=0) {//We failed to get everything so throw exception
-            throw new IdNotYetComputedException(neighborMskAndFlags&((1<<20)-1), true);
+            var missing = new IdNotYetComputedException(neighborMskAndFlags&((1<<20)-1), true);
+            // Request all contextual variants together; they do not exist in the stored section.
+            missing.substitutedSection = rawSection;
+            throw missing;
         }
         int neighborMsk = neighborMskAndFlags&0b11_11_11;
         int flags = neighborMskAndFlags>>>6;

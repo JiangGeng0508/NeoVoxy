@@ -3,6 +3,7 @@ package me.cortex.voxy.client.core.model.bakery;
 import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
+import me.cortex.voxy.client.compat.create.CreateConnectedTextures;
 import me.cortex.voxy.client.config.VoxyConfig;
 import me.cortex.voxy.client.core.compat.eclipticseasons.SeasonalLod;
 import me.cortex.voxy.client.core.model.ModelFactory;
@@ -158,7 +159,8 @@ public class SoftwareModelTextureBakery {
         }
         this.conservativeCulling |= !plan.isEmpty();
         BlockState modelState = plan.modelState() == null ? state : plan.modelState();
-        ModelData modelData = plan.modelData();
+        ModelData modelData = CreateConnectedTextures.modelData(
+                this.mapper, blockId, plan.modelData());
         var model = Minecraft.getInstance()
                 .getModelManager()
                 .getBlockModelShaper()

@@ -77,16 +77,6 @@ bool useLavaBoundary() {
     return ((interData.x >> 7u) & 1u) == 1u;
 }
 
-bool useIndependentWaterBoundary() {
-    return ((interData.w >> 11u) & 1u) == 1u;
-}
-
-bool useOriginalLeafHandoff() {
-    // Keep the long-standing balanced-leaf marker as a compatibility fallback for a model buffer
-    // produced immediately before a renderer/resource reload, while bit 12 covers every leaf mode.
-    return useBalancedLeafCutout() || ((interData.w >> 12u) & 1u) == 1u;
-}
-
 bool useCoarseFluidProxy() {
     return ((interData.w >> 13u) & 1u) == 1u;
 }
@@ -178,13 +168,6 @@ void main() {
         discard;
         return;
     }
-    if (circularLodBoundaryEnabled > 0.5
-            && !useIndependentWaterBoundary()
-            && !useOriginalLeafHandoff()
-            && boundaryDistanceSquared < lodBoundaryFadeStart * lodBoundaryFadeStart) {
-        discard;
-        return;
-    }
     //Tile is the tile we are in
     vec2 tile;
     #ifdef USE_NV_BARRY
@@ -243,8 +226,10 @@ void main() {
         return;
     }
 
-    // Opaque terrain follows the exact circular stencil handoff. Translucent
-    // terrain intentionally retains Sodium's section mask so water does not
+    // Opaque terrain follows the depth-derived stencil handoff, including inside
+    // fadeStart. Distance alone does not mean vanilla meshes are ready: pixels
+    // without vanilla depth must keep their LOD fallback during fast movement.
+    // Translucent terrain intentionally retains Sodium's section mask so water does not
     // gain a second circular boundary on top of its vanilla square edge.
     #ifdef TRANSLUCENT
     const bool useChunkBounds = true;

@@ -5,6 +5,7 @@ public class IdNotYetComputedException extends RuntimeException {
     public final boolean isIdBlockId;
     public int auxBitMsk;
     public long[] auxData;
+    public long[] substitutedSection;
     public IdNotYetComputedException(int id, boolean isIdBlockId) {
         super(null, null, false, false);
         this.id = id;

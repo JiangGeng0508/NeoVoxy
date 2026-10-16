@@ -287,7 +287,8 @@ public class Mapper {
         return this.stateEntryForRenderId(blockId).state;
     }
 
-    private StateEntry stateEntryForRenderId(int blockId) {
+    /** Resolves the base state and variant descriptor, including seasonal render-only IDs. */
+    public StateEntry stateEntryForRenderId(int blockId) {
         if (blockId < this.blockId2stateEntry.size()) {
             return this.blockId2stateEntry.get(blockId);
         }

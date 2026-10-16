@@ -207,6 +207,15 @@ public class RenderGenerationService {
                     }
                 }
 
+                if (e.substitutedSection != null) {
+                    for (long voxel : e.substitutedSection) {
+                        int id = Mapper.getBlockId(voxel);
+                        if (id != 0 && !this.modelBakery.factory.hasModelForBlockId(id) && seenMissedIds.add(id)) {
+                            this.modelBakery.requestBlockBake(id);
+                        }
+                    }
+                }
+
                 if (task.hasDoneModelRequestOuter || task.hasDoneModelRequestInner) {
                     MESH_FAILED_COUNTER.incrementAndGet();
                 }

@@ -1,6 +1,7 @@
 package me.cortex.voxy.common.config.section;
 
 import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
+import it.unimi.dsi.fastutil.longs.LongArrayList;
 import it.unimi.dsi.fastutil.longs.LongLinkedOpenHashSet;
 import me.cortex.voxy.common.Logger;
 import me.cortex.voxy.common.config.ConfigBuildCtx;
@@ -24,6 +25,7 @@ public class SectionSerializationStorage extends SectionStorage {
 
     private final StorageBackend backend;
     private final LongLinkedOpenHashSet missingSections = new LongLinkedOpenHashSet();
+    private long missingCacheGeneration;
     public SectionSerializationStorage(StorageBackend storageBackend) {
         this.backend = storageBackend;
     }
@@ -31,8 +33,12 @@ public class SectionSerializationStorage extends SectionStorage {
     private static final ThreadLocalMemoryBuffer MEMORY_CACHE = new ThreadLocalMemoryBuffer(BIGGEST_SERIALIZED_SECTION_SIZE + 1024);
 
     public int loadSection(WorldSection into) {
-        if (this.isKnownMissing(into.key)) {
-            return 1;
+        long generation;
+        synchronized (this.missingSections) {
+            if (MISS_CACHE_SIZE > 0 && this.missingSections.contains(into.key)) {
+                return 1;
+            }
+            generation = this.missingCacheGeneration;
         }
         var data = this.backend.getSectionData(into.key, MEMORY_CACHE.get().createUntrackedUnfreeableReference());
         if (data != null) {
@@ -58,27 +64,23 @@ public class SectionSerializationStorage extends SectionStorage {
                     Logger.error("Voxy section miss listener failed", e);
                 }
             }
-            this.rememberMissing(into.key);
+            this.rememberMissing(into.key, generation);
             // the response should be put into the local db so that future data can just use that
             // the server can also send arbitrary updates to the client for arbitrary lods
             return 1;
         }
     }
 
-    private boolean isKnownMissing(long key) {
-        if (MISS_CACHE_SIZE <= 0) {
-            return false;
-        }
-        synchronized (this.missingSections) {
-            return this.missingSections.contains(key);
-        }
-    }
-
-    private void rememberMissing(long key) {
+    private void rememberMissing(long key, long generation) {
         if (MISS_CACHE_SIZE <= 0) {
             return;
         }
         synchronized (this.missingSections) {
+            // A save may have published this section after the backend read but
+            // before we got here. Do not restore a stale miss after invalidation.
+            if (generation != this.missingCacheGeneration) {
+                return;
+            }
             if (this.missingSections.addAndMoveToFirst(key)) {
                 while (this.missingSections.size() > MISS_CACHE_SIZE) {
                     this.missingSections.removeLastLong();
@@ -98,7 +100,12 @@ public class SectionSerializationStorage extends SectionStorage {
 
     /** Clears the negative cache for a section supplied from elsewhere (e.g. server sync). */
     public void forgetMissingSection(long key) {
-        this.forgetMissing(key);
+        if (MISS_CACHE_SIZE > 0) {
+            synchronized (this.missingSections) {
+                this.missingCacheGeneration++;
+                this.missingSections.remove(key);
+            }
+        }
     }
 
 
@@ -131,7 +138,7 @@ public class SectionSerializationStorage extends SectionStorage {
     public void saveSection(WorldSection section) {
         var saveData = SaveLoadSystem3.serialize(section);
         this.backend.setSectionData(section.key, saveData);
-        this.forgetMissing(section.key);
+        this.forgetMissingSection(section.key);
         //Note that savedData isnt freed (the save system uses a cache)
     }
 
@@ -139,15 +146,32 @@ public class SectionSerializationStorage extends SectionStorage {
     public SectionSaveBatch createSaveBatch() {
         var inner = this.backend.createSectionWriteBatch();
         return new SectionSaveBatch() {
+            private final LongArrayList savedKeys = new LongArrayList();
+
             @Override
             public void add(WorldSection section) {
                 //Serialise here, exactly where saveSection would have: the serializer returns a
                 //thread-local scratch buffer, so the batch must consume it before this returns
                 inner.put(section.key, SaveLoadSystem3.serialize(section));
+                this.savedKeys.add(section.key);
             }
 
             @Override public long dataSize() { return inner.dataSize(); }
-            @Override public void commit() { inner.commit(); }
+            @Override
+            public void commit() {
+                inner.commit();
+                // SectionSavingService uses batches even for a single section.
+                // Invalidate only once the backend has made those writes visible.
+                if (MISS_CACHE_SIZE > 0 && !this.savedKeys.isEmpty()) {
+                    synchronized (missingSections) {
+                        missingCacheGeneration++;
+                        for (int i = 0; i < this.savedKeys.size(); i++) {
+                            missingSections.remove(this.savedKeys.getLong(i));
+                        }
+                    }
+                }
+                this.savedKeys.clear();
+            }
             @Override public void close() { inner.close(); }
         };
     }

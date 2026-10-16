@@ -164,6 +164,23 @@ public class SectionUpdateRouter implements ISectionWatcher {
         }
     }
 
+    /** Face, edge and corner dependencies of a connected-texture model. */
+    public void triggerNeighborRemesh(WorldSection section, int mask, boolean diagonals) {
+        for (int y = -1; y <= 1; y++) {
+            if (y != 0 && (mask & (y < 0 ? 1 : 2)) == 0) continue;
+            for (int x = -1; x <= 1; x++) {
+                if (x != 0 && (mask & (x < 0 ? 4 : 8)) == 0) continue;
+                for (int z = -1; z <= 1; z++) {
+                    if (z != 0 && (mask & (z < 0 ? 16 : 32)) == 0) continue;
+                    int axes = Math.abs(x) + Math.abs(y) + Math.abs(z);
+                    if (axes == 0 || (!diagonals && axes != 1)) continue;
+                    this.triggerRemesh(WorldEngine.getWorldSectionId(section.lvl,
+                            section.x + x, section.y + y, section.z + z));
+                }
+            }
+        }
+    }
+
     private static int getSliceIndex(long value) {
         value = (value ^ value >>> 30) * -4658895280553007687L;
         value = (value ^ value >>> 27) * -7723592293110705685L;
