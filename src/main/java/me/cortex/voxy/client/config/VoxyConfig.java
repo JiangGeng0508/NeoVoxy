@@ -34,6 +34,10 @@ public class VoxyConfig {
     }
 
     // 配置范围和渲染精度档位是设置界面的共享来源。
+    // 内部距离乘以 32 为 Minecraft 区块半径；0.625 对应 20 区块。
+    public static final float MIN_SECTION_RENDER_DISTANCE = 0.625f;
+    public static final float MAX_SECTION_RENDER_DISTANCE = 64.0f;
+    public static final float DEFAULT_SECTION_RENDER_DISTANCE = 16.0f;
     public static final int MIN_REQUEST_DISTANCE = 8;
     public static final int MAX_REQUEST_DISTANCE = 48;
     public static final int MAX_CLOUD_DISTANCE = 128;
@@ -54,7 +58,7 @@ public class VoxyConfig {
     public boolean enabled = true;
     public boolean enableRendering = true;
     public boolean ingestEnabled = true;
-    public float sectionRenderDistance = 16;
+    public float sectionRenderDistance = DEFAULT_SECTION_RENDER_DISTANCE;
     public boolean sableLodRendering = true;
     // 可选模组的总开关和距离上限；0 表示使用完整 LOD 半径。
     public int aeronauticsContraptionMaxChunks = 0;
@@ -241,7 +245,8 @@ public class VoxyConfig {
         this.cmdListHoldMaxFrames = Math.clamp(this.cmdListHoldMaxFrames, 2, 60);
         this.sectionArrayPoolMiB = Math.clamp(this.sectionArrayPoolMiB, 25, 1024);
         WorldSection.setArrayPoolCapMiB(this.sectionArrayPoolMiB);
-        this.sectionRenderDistance = Math.clamp(this.sectionRenderDistance, 2.0f, 64.0f);
+        this.sectionRenderDistance = Math.clamp(this.sectionRenderDistance,
+                MIN_SECTION_RENDER_DISTANCE, MAX_SECTION_RENDER_DISTANCE);
         this.setRenderQualityLevel(this.getRenderQualityLevel());
         this.requestDistance = Math.clamp(this.requestDistance, MIN_REQUEST_DISTANCE, MAX_REQUEST_DISTANCE);
         // Older builds measured this percentage against one sixteenth of the LOD radius.

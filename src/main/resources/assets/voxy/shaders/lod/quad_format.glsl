@@ -78,7 +78,8 @@ uint extractFace(ivec2 quad) {
 }
 
 uint extractStateId(ivec2 quad) {
-    return Eu32v(quad, 6, 26)|(Eu32v(quad, 14, 32)<<6);
+    // Model IDs occupy 16 bits; the next four hold fluid shape or biome palette data.
+    return Eu32v(quad, 6, 26)|(Eu32v(quad, 10, 32)<<6);
 }
 
 uint extractBiomeId(ivec2 quad) {

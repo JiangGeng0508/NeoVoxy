@@ -22,10 +22,13 @@ import net.neoforged.neoforge.client.event.ClientTickEvent;
 import org.joml.Matrix4f;
 
 import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.function.Supplier;
 
 import static org.lwjgl.opengl.GL11C.GL_ALWAYS;
 import static org.lwjgl.opengl.GL11C.GL_CULL_FACE;
@@ -46,16 +49,25 @@ import static org.lwjgl.opengl.GL30C.glBindVertexArray;
 /** 使用 Domum 的真实烘焙模型绘制远景网格，避免六面代理模型丢失瓦片形状。 */
 public final class DomumDistantRenderer implements LodPipelineHooks.Renderer {
     private static final int MAX_BAKES_PER_TICK = 1;
+    private static final double PREFETCH_BLOCKS = 64.0;
+    private static final long BAKE_RETRY_MS = 1000;
     private static volatile DomumDistantRenderer active;
 
     private final ConcurrentLinkedQueue<Update> updates = new ConcurrentLinkedQueue<>();
     private final Map<Long, Entry> sections = new HashMap<>();
+    private final ArrayList<Entry> drawable = new ArrayList<>();
+    private boolean drawableDirty;
     private final ArrayDeque<Long> bakeQueue = new ArrayDeque<>();
     private final HashSet<Long> queued = new HashSet<>();
     private SectionStorage storage;
     private ClientLevel level;
     private int lastScanX = Integer.MIN_VALUE;
     private int lastScanZ = Integer.MIN_VALUE;
+    private int lastScanY = Integer.MIN_VALUE;
+    private double lastScanRange = -1;
+    private long nextRetryMs = Long.MAX_VALUE;
+    private final it.unimi.dsi.fastutil.longs.LongOpenHashSet pendingUpdates =
+            new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
 
     // ---- 生命周期、队列与绘制 -----------------------------------------
 
@@ -88,36 +100,76 @@ public final class DomumDistantRenderer implements LodPipelineHooks.Renderer {
         var camera = mc.gameRenderer.getMainCamera().getPosition();
         double maxDistance = VoxyConfig.CONFIG.createRenderDistance(VoxyConfig.CONFIG.distantDomumMaxChunks);
         if (!VoxyConfig.CONFIG.distantDomum) return;
-        double maxDistanceSq = maxDistance * maxDistance;
-        int cx = ((int) Math.floor(camera.x)) >> 4;
-        int cz = ((int) Math.floor(camera.z)) >> 4;
-        if (this.lastScanX == Integer.MIN_VALUE || Math.abs(cx - this.lastScanX) >= 4
-                || Math.abs(cz - this.lastScanZ) >= 4) {
-            this.lastScanX = cx;
-            this.lastScanZ = cz;
-            double farSq = (maxDistance + 256.0) * (maxDistance + 256.0);
-            for (var item : this.sections.entrySet()) {
-                Entry entry = item.getValue();
-                double distanceSq = distanceSq(item.getKey(), camera.x, camera.y, camera.z);
-                if (entry.mesh == null && distanceSq <= maxDistanceSq && this.queued.add(item.getKey())) {
-                    this.bakeQueue.add(item.getKey());
-                } else if (entry.mesh != null && distanceSq > farSq) {
-                    entry.mesh.free();
-                    entry.mesh = null;
-                }
-            }
-        }
-
+        long now = System.currentTimeMillis();
+        refreshCandidates(camera.x, camera.y, camera.z, maxDistance, now);
+        double prepareDistance = maxDistance + PREFETCH_BLOCKS;
+        double maxDistanceSq = prepareDistance * prepareDistance;
         for (int baked = 0; baked < MAX_BAKES_PER_TICK && !this.bakeQueue.isEmpty();) {
             long key = this.bakeQueue.removeFirst();
             this.queued.remove(key);
             Entry entry = this.sections.get(key);
-            if (entry == null || entry.mesh != null || distanceSq(key, camera.x, camera.y, camera.z) > maxDistanceSq) {
+            if (entry == null || !entry.needsBake || entry.retryAtMs > now
+                    || distanceSq(key, camera.x, camera.y, camera.z) > maxDistanceSq) {
                 continue;
             }
-            entry.mesh = bake(key, entry.blocks, engine.getMapper(), mc.level);
+            rebuild(entry, now, () -> bake(key, entry.blocks, engine.getMapper(), mc.level));
             baked++;
         }
+    }
+
+    private void refreshCandidates(double cameraX, double cameraY, double cameraZ, double maxDistance, long now) {
+        double prepareDistance = maxDistance + PREFETCH_BLOCKS;
+        double maxDistanceSq = prepareDistance * prepareDistance;
+        int cx = ((int) Math.floor(cameraX)) >> 4;
+        int cy = ((int) Math.floor(cameraY)) >> 4;
+        int cz = ((int) Math.floor(cameraZ)) >> 4;
+        if (this.lastScanX == Integer.MIN_VALUE || Math.abs(cx - this.lastScanX) >= 4
+                || Math.abs(cy - this.lastScanY) >= 4 || Math.abs(cz - this.lastScanZ) >= 4
+                || maxDistance != this.lastScanRange || now >= this.nextRetryMs) {
+            this.lastScanX = cx;
+            this.lastScanY = cy;
+            this.lastScanZ = cz;
+            this.lastScanRange = maxDistance;
+            this.nextRetryMs = Long.MAX_VALUE;
+            double farSq = (maxDistance + 256.0) * (maxDistance + 256.0);
+            for (var item : this.sections.entrySet()) {
+                Entry entry = item.getValue();
+                double distanceSq = distanceSq(item.getKey(), cameraX, cameraY, cameraZ);
+                if (entry.needsBake && distanceSq <= maxDistanceSq) {
+                    if (entry.retryAtMs <= now) {
+                        if (this.queued.add(item.getKey())) this.bakeQueue.add(item.getKey());
+                    } else {
+                        this.nextRetryMs = Math.min(this.nextRetryMs, entry.retryAtMs);
+                    }
+                } else if (entry.mesh != null && distanceSq > farSq) {
+                    entry.mesh.free();
+                    entry.mesh = null;
+                    entry.needsBake = true;
+                    this.drawableDirty = true;
+                }
+            }
+        }
+    }
+
+    private void rebuild(Entry entry, long now, Supplier<DistantMesh> baker) {
+        try {
+            var replacement = baker.get();
+            if (replacement != null) {
+                // Publish a successfully uploaded mesh before retiring the old one.
+                var previous = entry.mesh;
+                entry.mesh = replacement;
+                entry.needsBake = false;
+                entry.retryAtMs = 0;
+                this.drawableDirty = true;
+                if (previous != null) previous.free();
+                return;
+            }
+        } catch (RuntimeException | Error error) {
+            Logger.error("Baking Domum Ornamentum detailed LOD mesh", error);
+        }
+        // Missing bake plans and failed uploads are provisional. Retry even with a stationary camera.
+        entry.retryAtMs = now + BAKE_RETRY_MS;
+        this.nextRetryMs = Math.min(this.nextRetryMs, entry.retryAtMs);
     }
 
     @SubscribeEvent
@@ -134,27 +186,28 @@ public final class DomumDistantRenderer implements LodPipelineHooks.Renderer {
                 || !VoxyConfig.CONFIG.distantDomum) return;
         Minecraft mc = Minecraft.getInstance();
         if (mc.level == null || mc.level != this.level) return;
+        refreshDrawable();
+        if (this.drawable.isEmpty()) return;
         pipeline.setupAndBindOpaque(viewport);
 
-        double vanillaReach = Math.max(0.0, mc.options.getEffectiveRenderDistance() * 16.0 - 14.0);
-        double handoffSq = vanillaReach * vanillaReach;
+        double handoffSq = me.cortex.voxy.client.compat.SectionHandoff.distanceSquared();
         double maxDistance = VoxyConfig.CONFIG.createRenderDistance(VoxyConfig.CONFIG.distantDomumMaxChunks);
         double maxDistanceSq = maxDistance * maxDistance;
         boolean bound = false;
         var transform = new Matrix4f();
         try {
-            for (var item : this.sections.entrySet()) {
-                Entry entry = item.getValue();
-                if (entry.mesh == null) continue;
-                long key = item.getKey();
+            for (Entry entry : this.drawable) {
+                long key = entry.key;
                 double ox = BlockPos.getX(key) * 16.0;
                 double oy = BlockPos.getY(key) * 16.0;
                 double oz = BlockPos.getZ(key) * 16.0;
                 double dx = ox + 8.0 - viewport.cameraX;
                 double dy = oy + 8.0 - viewport.cameraY;
                 double dz = oz + 8.0 - viewport.cameraZ;
-                double nearSq = dx * dx + dz * dz;
-                if (nearSq < handoffSq || dx * dx + dy * dy + dz * dz > maxDistanceSq) continue;
+                if (dx * dx + dy * dy + dz * dz > maxDistanceSq) continue;
+                if (me.cortex.voxy.client.compat.SectionHandoff.insideBoundary(dx, dz, 12.0, handoffSq)
+                        && me.cortex.voxy.client.compat.SectionHandoff.vanillaOwns(
+                        BlockPos.getX(key), BlockPos.getY(key), BlockPos.getZ(key))) continue;
                 if (!DistantVisibility.isBoxVisible(viewport, ox - 4, oy - 4, oz - 4,
                         ox + 20, oy + 20, oz + 20)) continue;
                 if (!bound) {
@@ -187,29 +240,44 @@ public final class DomumDistantRenderer implements LodPipelineHooks.Renderer {
     }
 
     private void drainUpdates(int limit) {
+        this.pendingUpdates.clear();
         for (int applied = 0; applied < limit;) {
             Update update = this.updates.poll();
-            if (update == null) return;
-            if (update.storage != this.storage) continue;
+            if (update == null) break;
             applied++;
-            install(update.key, this.storage.getAux(DomumOrnamentumCompat.DISGUISE_TABLE, update.key), true);
+            if (update.storage != this.storage) continue;
+            this.pendingUpdates.add(update.key);
+        }
+        for (var iterator = this.pendingUpdates.iterator(); iterator.hasNext();) {
+            long key = iterator.nextLong();
+            install(key, this.storage.getAux(DomumOrnamentumCompat.DISGUISE_TABLE, key), true);
         }
     }
 
     private void install(long key, byte[] value, boolean urgent) {
         int[] pairs = decode(value);
-        Entry old = this.sections.remove(key);
-        if (old != null && old.mesh != null) old.mesh.free();
-        this.queued.remove(key);
-        this.bakeQueue.remove(key);
-        if (pairs.length == 0) return;
-
-        this.sections.put(key, new Entry(pairs));
+        Entry old = this.sections.get(key);
+        if (old != null && Arrays.equals(old.blocks, pairs)) return;
+        if (pairs.length == 0) {
+            this.sections.remove(key);
+            if (old != null && old.mesh != null) old.mesh.free();
+            this.queued.remove(key);
+            this.bakeQueue.remove(key);
+            this.drawableDirty = true;
+            return;
+        }
+        if (old == null) this.sections.put(key, new Entry(key, pairs));
+        else {
+            old.blocks = pairs;
+            old.needsBake = true;
+            old.retryAtMs = 0;
+        }
 
         Minecraft mc = Minecraft.getInstance();
-        if (mc.level == this.level) {
+        if (mc != null && mc.level != null && mc.level == this.level) {
             var camera = mc.gameRenderer.getMainCamera().getPosition();
-            double maxDistance = VoxyConfig.CONFIG.createRenderDistance(VoxyConfig.CONFIG.distantDomumMaxChunks);
+            double maxDistance = VoxyConfig.CONFIG.createRenderDistance(VoxyConfig.CONFIG.distantDomumMaxChunks)
+                    + PREFETCH_BLOCKS;
             if (distanceSq(key, camera.x, camera.y, camera.z) <= maxDistance * maxDistance
                     && this.queued.add(key)) {
                 if (urgent) this.bakeQueue.addFirst(key);
@@ -261,10 +329,9 @@ public final class DomumDistantRenderer implements LodPipelineHooks.Renderer {
                         tint, plan.modelData());
             }
             return builder.build();
-        } catch (Throwable t) {
+        } catch (RuntimeException | Error t) {
             builder.discard();
-            Logger.error("Baking Domum Ornamentum detailed LOD mesh", t);
-            return null;
+            throw t;
         }
     }
 
@@ -275,21 +342,39 @@ public final class DomumDistantRenderer implements LodPipelineHooks.Renderer {
         return dx * dx + dy * dy + dz * dz;
     }
 
+    private void refreshDrawable() {
+        if (!this.drawableDirty) return;
+        this.drawable.clear();
+        for (Entry entry : this.sections.values()) {
+            if (entry.mesh != null) this.drawable.add(entry);
+        }
+        this.drawableDirty = false;
+    }
+
     private void clearMeshes() {
         for (Entry entry : this.sections.values()) if (entry.mesh != null) entry.mesh.free();
         this.sections.clear();
+        this.drawable.clear();
+        this.drawableDirty = false;
         this.bakeQueue.clear();
         this.queued.clear();
-        this.lastScanX = this.lastScanZ = Integer.MIN_VALUE;
+        this.lastScanX = this.lastScanY = this.lastScanZ = Integer.MIN_VALUE;
+        this.lastScanRange = -1;
+        this.nextRetryMs = Long.MAX_VALUE;
+        this.pendingUpdates.clear();
     }
 
     private record Update(SectionStorage storage, long key) {}
 
     private static final class Entry {
-        final int[] blocks;
+        final long key;
+        int[] blocks;
+        boolean needsBake = true;
+        long retryAtMs;
         DistantMesh mesh;
 
-        Entry(int[] blocks) {
+        Entry(long key, int[] blocks) {
+            this.key = key;
             this.blocks = blocks;
         }
     }

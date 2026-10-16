@@ -352,6 +352,8 @@ dependencies {
 
     sodiumOuter "maven.modrinth:sodium:mc1.21.1-0.8.12-neoforge"
     compileOnly files(sodiumNeoForgeModJar).builtBy(extractSodiumNeoForgeModJar)
+    // Exercise the real Sodium menu bindings in config persistence tests.
+    testImplementation files(sodiumNeoForgeModJar).builtBy(extractSodiumNeoForgeModJar)
     compileOnly "maven.modrinth:iris:1.8.0+1.21.1-neoforge"
     compileOnly "maven.modrinth:fALzjamp:LuFhm4eU"
 

@@ -3,6 +3,7 @@ package me.cortex.voxy.client.compat.create;
 import com.simibubi.create.Create;
 import com.simibubi.create.content.trains.entity.CarriageContraptionEntity;
 import dev.engine_room.flywheel.api.visualization.VisualizationManager;
+import me.cortex.voxy.client.compat.SectionHandoff;
 import net.minecraft.client.Minecraft;
 import net.minecraft.world.phys.Vec3;
 
@@ -10,7 +11,6 @@ import java.util.UUID;
 
 public final class TrainHandover {
     public static final double CREATE_TRACKING_CAP = 224;
-    private static final long LIVE_REACQUIRE_NANOS = 250_000_000L;
 
     private TrainHandover() {}
 
@@ -48,24 +48,27 @@ public final class TrainHandover {
         if (mc.level == null) {
             return false;
         }
+        var track = DistantTrainManager.track(trainId, carriageIndex, mc.level.dimension().location());
+        if (track == null) return false;
+        if (track.handoff.evaluated(SectionHandoff.frameId())) return track.handoff.liveOwns();
         var train = Create.RAILWAYS.sided(mc.level).trains.get(trainId);
         if (train == null || carriageIndex < 0 || carriageIndex >= train.carriages.size()) {
-            return false;
+            return resolveLiveOwnership(track, null, cam, flywheelRendering);
         }
         var dimensional = train.carriages.get(carriageIndex).getDimensionalIfPresent(mc.level.dimension());
         var entity = dimensional == null ? null : dimensional.entity.get();
-        var track = DistantTrainManager.track(trainId, carriageIndex, mc.level.dimension().location());
-        if (track == null) {
-            return false;
-        }
         return resolveLiveOwnership(track, entity, cam, flywheelRendering);
     }
 
     private static boolean resolveLiveOwnership(DistantTrainManager.CarriageTrack track,
                                                 CarriageContraptionEntity entity, Vec3 cam,
                                                 boolean flywheelRendering) {
+        long frame = SectionHandoff.frameId();
+        if (track.handoff.evaluated(frame)) return track.handoff.liveOwns();
+        // Reacquire one chunk inside the boundary to avoid toggling while moving along its edge.
+        double range = track.handoff.handoverRange(handoverDist());
         boolean ready = entity != null
-                && !beyondLive(entity.position(), cam)
+                && entity.position().distanceToSqr(cam) <= range * range
                 && entity.isAlive()
                 && entity.getContraption() != null
                 && entity.validForRender
@@ -73,30 +76,7 @@ public final class TrainHandover {
                 && (flywheelRendering
                     ? FlywheelVisuals.hasVisual(entity)
                     : Minecraft.getInstance().levelRenderer.isSectionCompiled(entity.blockPosition()));
-        long now = System.nanoTime();
-        if (!ready) {
-            track.liveOwnershipKnown = true;
-            track.liveOwns = false;
-            track.liveEligibleSinceNanos = 0;
-            return false;
-        }
-        if (!track.liveOwnershipKnown) {
-            track.liveOwnershipKnown = true;
-            track.liveOwns = true;
-            return true;
-        }
-        if (track.liveOwns) {
-            return true;
-        }
-        if (track.liveEligibleSinceNanos == 0) {
-            track.liveEligibleSinceNanos = now;
-            return false;
-        }
-        if (now - track.liveEligibleSinceNanos < LIVE_REACQUIRE_NANOS) {
-            return false;
-        }
-        track.liveOwns = true;
-        track.liveEligibleSinceNanos = 0;
-        return true;
+        // Vanilla, Flywheel and LOD must not cross the wait threshold at different times in one frame.
+        return track.handoff.update(frame, SectionHandoff.frameTimeNanos(), ready);
     }
 }

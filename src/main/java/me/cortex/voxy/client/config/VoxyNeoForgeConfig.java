@@ -30,10 +30,12 @@ public class VoxyNeoForgeConfig {
             .comment("Enable automatic chunk data ingestion for LOD generation")
             .define("ingestEnabled", true);
 
-    private static final ModConfigSpec.IntValue SECTION_RENDER_DISTANCE = BUILDER
+    private static final ModConfigSpec.DoubleValue SECTION_RENDER_DISTANCE = BUILDER
             .comment("LOD section render distance (multiplied by 32 for actual chunk distance)",
-                     "Example: 16 = 512 chunks render distance")
-            .defineInRange("sectionRenderDistance", 16, 2, 64);
+                     "Range: 0.625-64 = 20-2048 chunks. Default: 16 = 512 chunks.",
+                     "Fractional values are supported; 0.0625 equals the Sodium menu's 2-chunk step.")
+            .defineInRange("sectionRenderDistance", (double) VoxyConfig.DEFAULT_SECTION_RENDER_DISTANCE,
+                    VoxyConfig.MIN_SECTION_RENDER_DISTANCE, VoxyConfig.MAX_SECTION_RENDER_DISTANCE);
 
     private static final ModConfigSpec.IntValue SERVICE_THREADS = BUILDER
             .comment("Number of background threads for LOD processing",
@@ -236,7 +238,7 @@ public class VoxyNeoForgeConfig {
         VoxyConfig.CONFIG.enabled = ENABLED.get();
         VoxyConfig.CONFIG.enableRendering = ENABLE_RENDERING.get();
         VoxyConfig.CONFIG.ingestEnabled = INGEST_ENABLED.get();
-        VoxyConfig.CONFIG.sectionRenderDistance = SECTION_RENDER_DISTANCE.get();
+        VoxyConfig.CONFIG.sectionRenderDistance = SECTION_RENDER_DISTANCE.get().floatValue();
         VoxyConfig.CONFIG.serviceThreads = SERVICE_THREADS.get();
         VoxyConfig.CONFIG.subDivisionSize = SUB_DIVISION_SIZE.get().floatValue();
         VoxyConfig.CONFIG.useEnvironmentalFog = USE_ENVIRONMENTAL_FOG.get();
@@ -290,7 +292,7 @@ public class VoxyNeoForgeConfig {
         ENABLED.set(VoxyConfig.CONFIG.enabled);
         ENABLE_RENDERING.set(VoxyConfig.CONFIG.enableRendering);
         INGEST_ENABLED.set(VoxyConfig.CONFIG.ingestEnabled);
-        SECTION_RENDER_DISTANCE.set((int) VoxyConfig.CONFIG.sectionRenderDistance);
+        SECTION_RENDER_DISTANCE.set((double) VoxyConfig.CONFIG.sectionRenderDistance);
         SERVICE_THREADS.set(VoxyConfig.CONFIG.serviceThreads);
         SUB_DIVISION_SIZE.set((double) VoxyConfig.CONFIG.subDivisionSize);
         USE_ENVIRONMENTAL_FOG.set(VoxyConfig.CONFIG.useEnvironmentalFog);
@@ -363,8 +365,8 @@ public class VoxyNeoForgeConfig {
         return INGEST_ENABLED.get();
     }
 
-    public static int getSectionRenderDistance() {
-        return SECTION_RENDER_DISTANCE.get();
+    public static float getSectionRenderDistance() {
+        return SECTION_RENDER_DISTANCE.get().floatValue();
     }
 
     public static int getServiceThreads() {

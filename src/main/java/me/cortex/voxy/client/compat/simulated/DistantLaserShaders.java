@@ -1,5 +1,6 @@
 package me.cortex.voxy.client.compat.simulated;
 
+import me.cortex.voxy.client.compat.create.DistantShaders;
 import me.cortex.voxy.client.core.AbstractRenderPipeline;
 import me.cortex.voxy.client.core.gl.shader.Shader;
 import me.cortex.voxy.client.core.gl.shader.ShaderLoader;
@@ -28,7 +29,7 @@ final class DistantLaserShaders {
                     if (fragment == null) fragment = pipeline.patchOpaqueShader(null, source);
                     if (fragment != null) {
                         patched = Shader.make().define("PATCHED_SHADER").define("TRANSLUCENT")
-                                .add(ShaderType.VERTEX, "voxy:compat/distant.vert")
+                                .addSource(ShaderType.VERTEX, DistantShaders.patchedVertex(pipeline))
                                 .addSource(ShaderType.FRAGMENT, fragment)
                                 .compile().name("distant_laser_patched");
                     }

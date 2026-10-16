@@ -70,5 +70,6 @@ bool modelIsCreateTrack(BlockModel model) {
 }
 
 float modelFluidHeight(BlockModel model) {
-    return float((model.flagsA >> 8u) & 31u) / 9.0;
+    // Height occupies bits 8..11; bit 12 marks fluid models.
+    return float((model.flagsA >> 8u) & 15u) / 9.0;
 }

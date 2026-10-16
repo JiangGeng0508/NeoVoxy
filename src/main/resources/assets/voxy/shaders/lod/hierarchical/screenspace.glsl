@@ -89,6 +89,16 @@ void setupScreenspace(in UnpackedNode node) {
     P001 += dropOffset;
     P101 += dropOffset;
 
+    // Test the curvature-expanded corners before dividing. A box crossing the camera plane
+    // needs conservative bounds and subdivision, not an invalid projection or a Hi-Z rejection.
+    if (min(min(min(P000.w, P100.w), min(P001.w, P101.w)),
+            min(min(P010.w, P110.w), min(P011.w, P111.w))) <= 0.0001f) {
+        _screenSize = minSSS + 1.0f;
+        _minBB = vec3(0);
+        _maxBB = vec3(1);
+        return;
+    }
+
     //Perspective divide + convert to screenspace (i.e. range 0->1 if within viewport)
     vec3 p000 = NDC2SCREEN(P000.xyz/P000.w);
     vec3 p100 = NDC2SCREEN(P100.xyz/P100.w);

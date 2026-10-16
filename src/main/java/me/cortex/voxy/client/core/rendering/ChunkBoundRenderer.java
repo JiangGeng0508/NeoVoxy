@@ -53,6 +53,30 @@ public class ChunkBoundRenderer {
     private int[] visibleSections = new int[INIT_MAX_SECTION_COUNT*2];
     private int count;
     private boolean changed;
+    private final VisibleSectionIndex handoffSections = new VisibleSectionIndex();
+
+    /** Reuses the mask's uploaded draw set, rather than all loaded or built sections. */
+    public boolean containsVisibleSection(long pos) {
+        return this.handoffSections.contains(this.contentGeneration, this.uploadedSections, this.uploadedCount, pos);
+    }
+
+    static final class VisibleSectionIndex {
+        private int generation = -1;
+        private final it.unimi.dsi.fastutil.longs.LongOpenHashSet sections =
+                new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
+
+        boolean contains(int generation, int[] uploadedSections, int uploadedCount, long pos) {
+            if (this.generation != generation) {
+                this.sections.clear();
+                for (int i = 0; i < uploadedCount; i += 2) {
+                    this.sections.add(Integer.toUnsignedLong(uploadedSections[i])
+                            | ((long) uploadedSections[i + 1] << 32));
+                }
+                this.generation = generation;
+            }
+            return this.sections.contains(pos);
+        }
+    }
 
     //Half-res mask: box dilation in mask pixels (a half-res texel's sample point sits up to half a
     //viewport pixel from the pixels it covers) and the slope-scaled depth offset, also in mask

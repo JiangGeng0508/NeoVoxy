@@ -56,7 +56,7 @@ NeoVoxy 是面向 Minecraft 1.21.1 + NeoForge 的 Voxy 移植项目，目标是�
 | `enabled` | `true` | 完全启用或禁用 Voxy |
 | `enable_rendering` | `true` | 启用或禁用 Voxy 渲染 |
 | `ingest_enabled` | `true` | 将新区块转换为 LoD 数据 |
-| `section_render_distance` | `16` | LoD 渲染距离（区块） |
+| `section_render_distance` | `16` | LoD 半径的内部值，乘以 32 为区块数；范围 `0.625–64`（20–2048 区块），默认 512 区块；GUI 每次调整 2 区块 |
 | `use_environmental_fog` | `true` | 环境雾（远距离雾） |
 | `fog_intensity` / `fog_density` | `1.0` / `0.0` | 环境雾强度与密度 |
 | `sky_fog_distance` | `96` | 天空雾距离（区块） |

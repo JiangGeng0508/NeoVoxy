@@ -150,7 +150,8 @@ public class VoxyConfigMenu implements ConfigEntryPoint {
                                         "voxy:render_distance",
                                         Component.translatable("voxy.config.general.renderDistance"),
                                         ()->Math.round(cfg.sectionRenderDistance*16), v->cfg.sectionRenderDistance=((float)v)/16,
-                                        new Range(10, 64*16, 1))
+                                        new Range(Math.round(VoxyConfig.MIN_SECTION_RENDER_DISTANCE * 16),
+                                                Math.round(VoxyConfig.MAX_SECTION_RENDER_DISTANCE * 16), 1))
                                         .setFormatter(v->Component.literal(Integer.toString(v*2)))
                                         .setPostChangeRunner(c->{
                                             var vrsh = (IGetVoxyRenderSystem)Minecraft.getInstance().levelRenderer;
