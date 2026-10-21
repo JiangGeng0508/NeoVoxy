@@ -323,7 +323,7 @@ public final class DistantTrainRenderer implements LodPipelineHooks.Renderer {
                 transform.set(viewport.MVP).mul(draw.model).get(lodTransform);
                 glUniformMatrix4fv(8, false, lodTransform);
                 DistantShaders.uploadTransform(transform.set(sourceViewProjection).mul(draw.model));
-                draw.mesh.draw(draw.level, draw.blend);
+                draw.mesh.drawDepth(draw.level, draw.blend);
             }
         }
         glBindVertexArray(0);

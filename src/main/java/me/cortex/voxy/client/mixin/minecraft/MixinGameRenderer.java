@@ -14,6 +14,7 @@ public class MixinGameRenderer {
     @Inject(method = "renderLevel", at = @At("HEAD"))
     private void voxy$beginHandoffFrame(net.minecraft.client.DeltaTracker deltaTracker, CallbackInfo ci) {
         me.cortex.voxy.client.compat.SectionHandoff.beginFrame();
+        me.cortex.voxy.client.compat.create.DistantMesh.beginFrame();
     }
 
     @WrapMethod(method = "getDepthFar()F")

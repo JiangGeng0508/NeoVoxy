@@ -9,6 +9,51 @@ import static org.junit.jupiter.api.Assertions.*;
 /** Adapted reference GPU checks, using the actual shipped vertex shader. */
 @EnabledIfSystemProperty(named="voxy.verifyMeshGpu", matches="true")
 class DistantMeshLodGpuTest {
+    @Test void frameStatisticsMatchGpuSubmissionsCullingAndDepthReplay() throws Exception {
+        int shader = compile(GL_VERTEX_SHADER, resource("distant.vert")), program = glCreateProgram();
+        glAttachShader(program, shader); glLinkProgram(program);
+        assertNotEquals(0, glGetProgrami(program, GL_LINK_STATUS), glGetProgramInfoLog(program));
+        int query = glGenQueries();
+        var builder = DistantPolylineLodTest.builder(DistantPolylineLodTest.curve());
+        var mesh = builder.buildPolyline();
+        try {
+            glUseProgram(program); glEnable(GL_RASTERIZER_DISCARD);
+            var projection = new org.joml.Matrix4f().perspective((float)Math.toRadians(70), 16f / 9, .1f, 50000);
+            var main = new me.cortex.voxy.client.core.rendering.NativeLodSelection();
+            var secondary = new me.cortex.voxy.client.core.rendering.NativeLodSelection();
+            main.update(projection, projection, 1920, 1080, 0, 0, 0, 256, 96);
+            secondary.update(projection, projection, 256, 128, 0, 0, 0, 256, 96);
+            glUniformMatrix4fv(0, false, projection.get(new float[16]));
+            DistantMesh.beginFrame();
+            glBeginQuery(GL_PRIMITIVES_GENERATED, query);
+            mesh.drawAt(main, 0, 0, -32);
+            assertEquals(0, mesh.lastDrawLevel());
+            mesh.drawAt(secondary, 0, 0, -2048);
+            assertTrue(mesh.lastDrawLevel() > 0);
+            int coarseLevel = mesh.lastDrawLevel();
+            mesh.drawTranslucent(main, new org.joml.Matrix4f(projection).translate(0, 0, -4096).scale(.000001f), 1920, 1080);
+            var beforeReplay = DistantMesh.frameStatistics();
+            mesh.drawDepth(coarseLevel, 0);
+            glEndQuery(GL_PRIMITIVES_GENERATED);
+            var stats = DistantMesh.frameStatistics();
+            assertEquals(glGetQueryObjecti(query, GL_QUERY_RESULT), stats.submittedTriangles());
+            assertEquals(mesh.quadCount() * 2L * 4, stats.fullDetailTriangles());
+            assertEquals(2, stats.coarseDraws()); assertEquals(1, stats.detailedDraws()); assertEquals(1, stats.culledDraws());
+            assertEquals(stats.submittedTriangles() - beforeReplay.submittedTriangles(), stats.depthReplayTriangles());
+            assertEquals(0, beforeReplay.depthReplayTriangles(), "snapshots remain immutable");
+            assertThrows(IllegalArgumentException.class, () -> mesh.draw(-1, 0));
+            assertEquals(stats, DistantMesh.frameStatistics(), "invalid calls must not count as submitted draws");
+            var debug = new java.util.ArrayList<String>(); DistantMesh.addDebug(debug);
+            assertTrue(debug.getFirst().contains(stats.submittedTriangles() + "/" + stats.fullDetailTriangles()));
+            DistantMesh.beginFrame();
+            assertEquals(new DistantMesh.FrameStatistics(0, 0, 0, 0, 0, 0), DistantMesh.frameStatistics(), "an empty frame clears stale data");
+            assertEquals(GL_NO_ERROR, glGetError());
+        } finally {
+            mesh.free(); builder.discard(); glDisable(GL_RASTERIZER_DISCARD); glUseProgram(0);
+            glDeleteQueries(query); glDeleteProgram(program); glDeleteShader(shader); DistantMesh.beginFrame();
+        }
+    }
+
     @Test void beaconAndLaserKeepShapeAndAttributesWithPlainZeroAndNonzeroTaa() throws Exception {
         var laserBake = me.cortex.voxy.client.compat.simulated.DistantLaserRenderer.class.getDeclaredMethod("bakeUnitBeam");
         laserBake.setAccessible(true);

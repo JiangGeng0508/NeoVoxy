@@ -29,6 +29,31 @@ import static org.lwjgl.opengl.GL45C.glVertexArrayVertexBuffer;
 public final class DistantMesh {
     public static final int STRIDE = 32;
 
+    // Render-thread counters across all dedicated-mesh passes/views in renderLevel.
+    // Terrain and native Sable geometry do not use DistantMesh and are not counted.
+    private static long submittedTriangles, fullDetailTriangles, depthReplayTriangles;
+    private static int coarseDraws, detailedDraws, culledDraws;
+
+    public record FrameStatistics(long submittedTriangles, long fullDetailTriangles,
+                                  int coarseDraws, int detailedDraws, int culledDraws,
+                                  long depthReplayTriangles) {}
+
+    public static void beginFrame() {
+        submittedTriangles = fullDetailTriangles = depthReplayTriangles = 0;
+        coarseDraws = detailedDraws = culledDraws = 0;
+    }
+
+    public static FrameStatistics frameStatistics() {
+        return new FrameStatistics(submittedTriangles, fullDetailTriangles, coarseDraws,
+                detailedDraws, culledDraws, depthReplayTriangles);
+    }
+
+    public static void addDebug(java.util.List<String> lines) {
+        lines.add("Distant mesh triangles submitted/full: " + submittedTriangles + "/" + fullDetailTriangles
+                + " (all passes, depth replay " + depthReplayTriangles + ")");
+        lines.add("Distant mesh draws coarse/full/culled: " + coarseDraws + "/" + detailedDraws + "/" + culledDraws);
+    }
+
     private static int sharedIndexBuffer;
     private static int sharedIndexQuadCapacity;
 
@@ -210,13 +235,26 @@ public final class DistantMesh {
     }
 
     private boolean skipSubpixel(NativeLodSelection selection, Matrix4fc transform, int width, int height) {
-        return DistantMeshLod.isSubpixel(transform, this.minX, this.minY, this.minZ,
+        boolean skip = DistantMeshLod.isSubpixel(transform, this.minX, this.minY, this.minZ,
                 this.maxX, this.maxY, this.maxZ, width, height,
                 selection.visibilityPixels, selection.fullDetailDistance);
+        if (skip) {
+            fullDetailTriangles += this.quadCount * 2L;
+            culledDraws++;
+        }
+        return skip;
     }
 
     /** 深度回放必须复用颜色阶段的级别和变形进度。 */
     public void draw(int level, float blend) {
+        this.draw(level, blend, false);
+    }
+
+    public void drawDepth(int level, float blend) {
+        this.draw(level, blend, true);
+    }
+
+    private void draw(int level, float blend, boolean depthReplay) {
         if (this.freed) throw new IllegalStateException("Mesh has been freed");
         if (level < 0 || level > this.grids.length || !Float.isFinite(blend) || blend < 0 || blend > 1) {
             throw new IllegalArgumentException("Invalid mesh LOD level or blend");
@@ -241,6 +279,10 @@ public final class DistantMesh {
         int count = level == 0 ? this.quadCount * 6 : this.lodCounts[level - 1];
         glBindVertexArray(this.vao);
         glDrawElements(GL_TRIANGLES, count, GL_UNSIGNED_INT, level == 0 || this.coarseVbo != 0 ? 0 : this.lodOffsets[level - 1]);
+        submittedTriangles += count / 3;
+        fullDetailTriangles += this.quadCount * 2L;
+        if (level == 0) detailedDraws++; else coarseDraws++;
+        if (depthReplay) depthReplayTriangles += count / 3;
     }
 
     public void free() {

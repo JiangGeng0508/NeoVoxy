@@ -1,0 +1,63 @@
+// Opt-in client benchmark; see scripts/model-lod-benchmark/README.md.
+allprojects {
+    afterEvaluate {
+        sourceSets.main.java.srcDir 'scripts/model-lod-benchmark/src'
+        boolean shaders = project.findProperty('benchmarkShaders') == 'true'
+        def world = file(project.findProperty('benchmarkWorld') ?: '.agents/work/verification/server/smoke-world')
+        def profileDir = layout.buildDirectory.dir('reports/model-lod-benchmark/' + (shaders ? 'iris' : 'sodium'))
+        runs.named('client') {
+            workingDirectory profileDir
+            systemProperty 'forge.logging.console.level', 'info'
+            systemProperty 'voxy.benchmarkShaders', shaders.toString()
+            argument '--quickPlaySingleplayer'; argument 'benchmark-world'
+            argument '--width'; argument '1920'; argument '--height'; argument '1080'
+        }
+        configurations.create('benchmarkIris') { transitive = false }
+        dependencies.add('benchmarkIris', "maven.modrinth:iris:${iris_version}+${minecraft_version}-neoforge")
+        tasks.withType(JavaExec).configureEach {
+            if (name != 'runClient') return
+            doFirst {
+                if (!new File(world, 'level.dat').isFile()) throw new GradleException('Pass -PbenchmarkWorld=<existing world directory>')
+                def dir = profileDir.get().asFile
+                dir.mkdirs()
+                // Start each run from the same source snapshot. Source saves are read-only.
+                def targetWorld = new File(dir, 'saves/benchmark-world').canonicalFile
+                def reportRoot = layout.buildDirectory.dir('reports/model-lod-benchmark').get().asFile.canonicalFile
+                if (!targetWorld.toPath().startsWith(reportRoot.toPath()) || targetWorld == reportRoot) {
+                    throw new GradleException('Benchmark save must remain inside build/reports/model-lod-benchmark')
+                }
+                def sourcePath = world.canonicalFile.toPath()
+                if (sourcePath.startsWith(targetWorld.toPath()) || targetWorld.toPath().startsWith(sourcePath)) {
+                    throw new GradleException('Source world and disposable world must not contain each other')
+                }
+                def shaderPack = file('run/client/shaderpacks/ComplementaryReimagined_r5.8.1.zip')
+                if (shaders && !shaderPack.isFile()) throw new GradleException('Missing ' + shaderPack)
+                // Remove stale success evidence before launching a new run.
+                ['results.json', 'preview-full.png', 'preview-lod.png'].each { new File(dir, it).delete() }
+                delete(targetWorld)
+                copy { from world; into new File(dir, 'saves/benchmark-world'); exclude 'voxy/**', 'session.lock' }
+                copy { from configurations.createOuter.singleFile; into new File(dir, 'mods') }
+                new File(dir, 'options.txt').text = 'renderDistance:4\nsimulationDistance:5\nmaxFps:260\nenableVsync:false\npauseOnLostFocus:false\nfov:0.5\n'
+                new File(dir, 'config').mkdirs()
+                if (shaders) {
+                    copy { from configurations.benchmarkIris.singleFile; into new File(dir, 'mods') }
+                    copy { from shaderPack; into new File(dir, 'shaderpacks') }
+                    new File(dir, 'shaderpacks/ComplementaryReimagined_r5.8.1.zip.txt').text = '# Benchmark: pack defaults, no option overrides\n'
+                    new File(dir, 'config/iris.properties').text = 'enableShaders=true\nshaderPack=ComplementaryReimagined_r5.8.1.zip\n'
+                }
+                def digest = java.security.MessageDigest.getInstance('SHA-256')
+                new File(dir, 'source-world.json').text = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson([
+                    source: world.absolutePath,
+                    levelDatSha256: digest.digest(new File(world, 'level.dat').bytes).encodeHex().toString(),
+                    shaders: shaders, resolution: [1920, 1080], renderDistance: 4,
+                    minecraft: minecraft_version, neoforge: neo_version, sodium: sodium_version,
+                    iris: shaders ? iris_version : null, create: '6.0.10',
+                    shaderPack: shaders ? shaderPack.name : null,
+                    shaderPackSha256: shaders ? digest.digest(shaderPack.bytes).encodeHex().toString() : null,
+                    shaderOptions: shaders ? 'pack defaults' : null,
+                    benchmarkSourceSha256: digest.digest(file('scripts/model-lod-benchmark/src/me/cortex/voxy/client/compat/create/ModelLodBenchmark.java').bytes).encodeHex().toString()
+                ]))
+            }
+        }
+    }
+}
