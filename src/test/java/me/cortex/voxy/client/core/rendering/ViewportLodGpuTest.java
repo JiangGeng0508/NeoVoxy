@@ -7,37 +7,26 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
-import org.lwjgl.opengl.GL;
+import me.cortex.voxy.testing.GpuTestContext;
 
 import static org.junit.jupiter.api.Assertions.*;
-import static org.lwjgl.glfw.GLFW.*;
 import static org.lwjgl.opengl.GL45C.*;
 
 /** Real Viewport/ViewportSelector updates with their depth targets and Hi-Z shader objects. */
 @EnabledIfSystemProperty(named = "voxy.verifyScreenspaceGpu", matches = "true")
 class ViewportLodGpuTest {
-    private static long window;
+    private static GpuTestContext context;
 
     @BeforeAll
     static void openContext() {
-        assertTrue(glfwInit());
-        glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
-        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
-        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 6);
-        glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-        window = glfwCreateWindow(32, 32, "Voxy viewport LOD verification", 0, 0);
-        assertNotEquals(0L, window);
-        glfwMakeContextCurrent(window);
-        GL.createCapabilities();
-        System.out.println("Viewport LOD GPU: " + glGetString(GL_RENDERER));
+        context = GpuTestContext.open("ViewportLodGpuTest");
     }
 
     @AfterAll
     static void closeContext() {
-        GL.setCapabilities(null);
-        glfwMakeContextCurrent(0);
-        glfwDestroyWindow(window);
-        glfwTerminate();
+        if (context == null) return;
+        context.close();
+        context = null;
     }
 
     @Test

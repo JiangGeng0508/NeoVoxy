@@ -1,0 +1,179 @@
+import com.sun.source.tree.*
+import com.sun.source.util.JavacTask
+import com.sun.source.util.TreePathScanner
+import com.sun.source.util.Trees
+import groovy.transform.CompileStatic
+
+import javax.tools.Diagnostic
+import javax.tools.DiagnosticCollector
+import javax.tools.JavaFileObject
+import javax.tools.ToolProvider
+import java.nio.charset.StandardCharsets
+
+// Parse only: no Minecraft dependencies, annotation processing or class generation.
+// Using Java's syntax tree avoids treating comments, example strings or a dynamic
+// prefix as a complete key. It also decodes escaped literals and constant joins.
+@CompileStatic
+class VoxyLangSourceScanner extends TreePathScanner<Void, Void> {
+    final Map<String, Set<String>> requested = new TreeMap<>()
+    final Set<String> dynamic = new TreeSet<>()
+    private CompilationUnitTree unit
+    private Trees trees
+    private File root
+
+    static VoxyLangSourceScanner read(File root, List<File> sources) {
+        def compiler = ToolProvider.systemJavaCompiler
+        if (compiler == null) throw new GradleException('checkLangKeys requires a JDK, not a JRE')
+        def diagnostics = new DiagnosticCollector<JavaFileObject>()
+        def scanner = new VoxyLangSourceScanner(root: root)
+        compiler.getStandardFileManager(diagnostics, Locale.ROOT, StandardCharsets.UTF_8).withCloseable { manager ->
+            JavacTask parser = (JavacTask) compiler.getTask(null, manager, diagnostics,
+                    ['-proc:none'], null, manager.getJavaFileObjectsFromFiles(sources))
+            scanner.trees = Trees.instance(parser)
+            for (def parsed : parser.parse()) {
+                scanner.unit = (CompilationUnitTree) parsed
+                scanner.scan(scanner.unit, null)
+            }
+        }
+        def errors = diagnostics.diagnostics.findAll { it.kind == Diagnostic.Kind.ERROR }
+        if (!errors.isEmpty()) {
+            throw new GradleException('Cannot parse Java sources for checkLangKeys:\n' + errors.join('\n'))
+        }
+        return scanner
+    }
+
+    private String location(Tree tree) {
+        long offset = trees.sourcePositions.getStartPosition(unit, tree)
+        String path = root.toPath().relativize(new File(unit.sourceFile.toUri()).toPath()).toString()
+        return path.replace('\\', '/') + ':' + unit.lineMap.getLineNumber(offset)
+    }
+
+    private void requireKey(String key, Tree tree) {
+        if (!requested.containsKey(key)) requested.put(key, new TreeSet<String>())
+        requested.get(key).add(location(tree))
+    }
+
+    private static boolean ownedKey(String key) {
+        return key.startsWith('voxy.') || indirectKey(key)
+    }
+
+    private static boolean indirectKey(String key) {
+        // These namespaces are also passed through KeyMapping and message helpers.
+        return key.startsWith('key.voxy.') || key == 'key.categories.voxy' || key.startsWith('message.voxy.')
+    }
+
+    private static String constantString(ExpressionTree expression) {
+        if (expression instanceof LiteralTree) {
+            Object value = ((LiteralTree) expression).value
+            return value instanceof String ? (String) value : null
+        }
+        if (expression instanceof ParenthesizedTree) {
+            return constantString(((ParenthesizedTree) expression).expression)
+        }
+        if (expression instanceof BinaryTree && expression.kind == Tree.Kind.PLUS) {
+            String left = constantString(((BinaryTree) expression).leftOperand)
+            String right = constantString(((BinaryTree) expression).rightOperand)
+            return left != null && right != null ? left + right : null
+        }
+        return null
+    }
+
+    @Override
+    Void visitMethodInvocation(MethodInvocationTree node, Void unused) {
+        ExpressionTree select = node.methodSelect
+        String name = select instanceof MemberSelectTree ? ((MemberSelectTree) select).identifier.toString()
+                : select instanceof IdentifierTree ? ((IdentifierTree) select).name.toString() : ''
+        if (name in ['translatable', 'translatableWithFallback'] && !node.arguments.isEmpty()) {
+            String key = constantString(node.arguments.get(0))
+            if (key == null) dynamic.add(location(node))
+            else if (ownedKey(key)) requireKey(key, node)
+        }
+        return super.visitMethodInvocation(node, unused)
+    }
+
+    @Override
+    Void visitLiteral(LiteralTree node, Void unused) {
+        ExpressionTree expression = node
+        def parent = currentPath.parentPath
+        while (parent != null && (parent.leaf.kind == Tree.Kind.PLUS || parent.leaf instanceof ParenthesizedTree)) {
+            expression = (ExpressionTree) parent.leaf
+            parent = parent.parentPath
+        }
+        String key = constantString(expression)
+        if (key != null && indirectKey(key)) requireKey(key, expression)
+        return super.visitLiteral(node, unused)
+    }
+}
+
+tasks.register('checkLangKeys') {
+    group = 'verification'
+    description = 'Checks required locales, language key parity and static Voxy translation references.'
+    def langDirectory = layout.projectDirectory.dir('src/main/resources/assets/voxy/lang')
+    def javaDirectory = layout.projectDirectory.dir('src/main/java')
+    def languageFiles = fileTree(langDirectory).matching { include '*.json' }
+    def javaSources = fileTree(javaDirectory).matching { include '**/*.java' }
+    def reportFile = layout.buildDirectory.file('reports/lang-keys/check.json')
+    // Empty/missing trees are checked below, so even those failures update the report.
+    inputs.files(languageFiles).withPropertyName('languageFiles')
+    inputs.files(javaSources).withPropertyName('javaSources')
+    outputs.file(reportFile)
+    outputs.upToDateWhen { false }
+
+    doLast {
+        def report = [state: 'checking', locales: [:], requested: [:], dynamicReferences: [], problems: []]
+        def writeReport = {
+            def destination = reportFile.get().asFile
+            destination.parentFile.mkdirs()
+            destination.setText(groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(report)) + '\n', 'UTF-8')
+        }
+        writeReport()
+        def problems = report.problems
+        def files = languageFiles.files.sort { it.name }
+        ['en_us.json', 'zh_cn.json'].each { required ->
+            if (!files.any { it.name == required }) problems << "Required locale is missing: ${required}"
+        }
+        def keysByFile = [:]
+        files.each { source ->
+            try {
+                def entries = new groovy.json.JsonSlurper().parse(source, 'UTF-8')
+                if (!(entries instanceof Map) || entries.isEmpty()) {
+                    problems << "${source.name}: expected a non-empty JSON object of translations"
+                    return
+                }
+                entries.each { key, value ->
+                    if (!(value instanceof String) || value.trim().isEmpty()) {
+                        problems << "${source.name}: ${key} must have a non-empty string translation"
+                    }
+                }
+                keysByFile[source.name] = entries.keySet() as Set
+                report.locales[source.name] = entries.size()
+            } catch (Exception exception) {
+                problems << "${source.name}: invalid JSON: ${exception.message}"
+            }
+        }
+        def sources = javaSources.files.sort()
+        if (sources.isEmpty()) {
+            problems << 'No Java sources found for translation reference checks'
+        } else {
+            try {
+                def scanner = VoxyLangSourceScanner.read(projectDir, sources)
+                report.requested = scanner.requested
+                report.dynamicReferences = scanner.dynamic
+            } catch (Exception exception) {
+                problems << exception.message
+            }
+        }
+        def union = keysByFile.values().flatten() as Set
+        keysByFile.each { name, keys ->
+            (union - keys).sort().each { key -> problems << "${name}: missing key present in another locale: ${key}" }
+            (report.requested.keySet() - keys).sort().each { key ->
+                problems << "${name}: missing static key ${key} (${report.requested[key].join(', ')})"
+            }
+        }
+        report.state = problems.isEmpty() ? 'passed' : 'failed'
+        writeReport()
+        if (!problems.isEmpty()) throw new GradleException('Translation key check failed:\n  ' + problems.join('\n  '))
+        logger.lifecycle("Language keys OK: ${report.locales}, ${report.requested.size()} static keys checked; " +
+                "${report.dynamicReferences.size()} dynamic calls require manual review. Report: ${reportFile.get().asFile}")
+    }
+}

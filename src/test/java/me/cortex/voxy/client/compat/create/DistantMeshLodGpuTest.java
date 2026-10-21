@@ -1,9 +1,8 @@
 package me.cortex.voxy.client.compat.create;
-import org.lwjgl.opengl.GL;
+import me.cortex.voxy.testing.GpuTestContext;
 import org.lwjgl.system.MemoryUtil;
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
-import static org.lwjgl.glfw.GLFW.*;
 import static org.lwjgl.opengl.GL45C.*;
 import static org.junit.jupiter.api.Assertions.*;
 /** Adapted reference GPU checks, using the actual shipped vertex shader. */
@@ -287,24 +286,18 @@ class DistantMeshLodGpuTest {
         } finally { builder.discard(); }
     }
 
-    private static long window;
+    private static GpuTestContext context;
     @BeforeAll static void openContext() {
-        assertTrue(glfwInit());
-        glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
-        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
-        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 6);
-        glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-        window=glfwCreateWindow(32,32,"mesh-lod-verification",0,0);
-        assertNotEquals(0L,window);
-        glfwMakeContextCurrent(window); GL.createCapabilities();
-        System.out.println("Mesh LOD GPU: " + glGetString(GL_RENDERER));
+        context = GpuTestContext.open("DistantMeshLodGpuTest");
     }
     @AfterAll static void closeContext() throws Exception {
+        if (context == null) return;
         var buffer=DistantMesh.class.getDeclaredField("sharedIndexBuffer");
         var capacity=DistantMesh.class.getDeclaredField("sharedIndexQuadCapacity");
         buffer.setAccessible(true); capacity.setAccessible(true);
         glDeleteBuffers(buffer.getInt(null)); buffer.setInt(null,0); capacity.setInt(null,0);
-        GL.setCapabilities(null); glfwMakeContextCurrent(0); glfwDestroyWindow(window); glfwTerminate();
+        context.close();
+        context = null;
     }
     private static String resource(String name) throws Exception {
         try (var input=DistantMeshLodGpuTest.class.getResourceAsStream("/assets/voxy/shaders/compat/"+name)) {

@@ -11,7 +11,7 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
-import org.lwjgl.opengl.GL;
+import me.cortex.voxy.testing.GpuTestContext;
 
 import java.nio.ByteBuffer;
 import java.util.List;
@@ -20,30 +20,21 @@ import java.util.function.Supplier;
 
 import static me.cortex.voxy.testing.Reflect.*;
 import static org.junit.jupiter.api.Assertions.*;
-import static org.lwjgl.glfw.GLFW.*;
 import static org.lwjgl.opengl.GL45C.*;
 
 /** Optional real-driver checks; enable voxy.verifyMeshGpu on the test JVM. */
 @EnabledIfSystemProperty(named = "voxy.verifyMeshGpu", matches = "true")
 class MeshReplacementGpuTest {
-    private static long window;
+    private static GpuTestContext context;
 
     @BeforeAll
     static void openContext() {
-        assertTrue(glfwInit());
-        glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
-        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
-        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 6);
-        glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-        window = glfwCreateWindow(32, 32, "Voxy mesh replacement verification", 0, 0);
-        assertNotEquals(0L, window);
-        glfwMakeContextCurrent(window);
-        GL.createCapabilities();
-        System.out.println("Mesh replacement GPU: " + glGetString(GL_RENDERER));
+        context = GpuTestContext.open("MeshReplacementGpuTest");
     }
 
     @AfterAll
     static void closeContext() throws Exception {
+        if (context == null) return;
         // DistantMesh's shared index buffer belongs to the GL context too.
         var field = DistantMesh.class.getDeclaredField("sharedIndexBuffer");
         field.setAccessible(true);
@@ -52,10 +43,8 @@ class MeshReplacementGpuTest {
         var capacity = DistantMesh.class.getDeclaredField("sharedIndexQuadCapacity");
         capacity.setAccessible(true);
         capacity.setInt(null, 0);
-        GL.setCapabilities(null);
-        glfwMakeContextCurrent(0);
-        glfwDestroyWindow(window);
-        glfwTerminate();
+        context.close();
+        context = null;
     }
 
     @Test

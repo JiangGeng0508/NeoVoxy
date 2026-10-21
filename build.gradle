@@ -446,8 +446,70 @@ tasks.named('processTestResources', ProcessResources).configure {
     }
 }
 
+apply from: 'scripts/check-lang-keys.gradle'
+
 // Minecraft and mod classes need NeoForge's transforming classloader (testJunit).
+// Keep check wired directly to the real suite; test remains a convenient alias.
+tasks.named('check') {
+    dependsOn 'testJunit', 'checkLangKeys'
+}
+
 tasks.named('test') {
     dependsOn 'testJunit'
     enabled = false
+}
+
+// NeoGradle registers this task after project evaluation.
+def verifyGpu = providers.gradleProperty('verifyGpu').map { value ->
+    if (!(value in ['true', 'false'])) throw new GradleException('verifyGpu must be true or false')
+    value.toBoolean()
+}.getOrElse(false)
+
+tasks.withType(Test).configureEach {
+    if (name != 'testJunit') return
+    description = 'Runs regression tests in the NeoForge environment (GPU checks are opt-in).'
+    ignoreFailures = false
+    failOnNoDiscoveredTests = true
+    filter.failOnNoMatchingTests = true
+    if (verifyGpu) {
+        systemProperty 'voxy.verifyMeshGpu', 'true'
+        systemProperty 'voxy.verifyScreenspaceGpu', 'true'
+        systemProperty 'voxy.verifyTerrainGpu', 'true'
+    }
+    // GLFW contexts are process-global; suites must run on the same thread in sequence.
+    systemProperty 'junit.jupiter.execution.parallel.enabled', 'false'
+    def gpuRequested = { ['voxy.verifyMeshGpu', 'voxy.verifyScreenspaceGpu', 'voxy.verifyTerrainGpu']
+            .any { systemProperties[it]?.toString() == 'true' } }
+    // The GPU/driver is not a Gradle input: never reuse hardware verification results.
+    outputs.upToDateWhen { !gpuRequested() }
+    outputs.doNotCacheIf('GPU verification must run on the current driver') { gpuRequested() }
+    def runStatusFile = layout.buildDirectory.file("test-results/${name}-run.json")
+    outputs.file(runStatusFile)
+    def runStatus = [:]
+    doFirst {
+        runStatus = [state: 'running', startedAtMillis: System.currentTimeMillis(), gpuRequested: gpuRequested()]
+        runStatusFile.get().asFile.parentFile.mkdirs()
+        runStatusFile.get().asFile.text = groovy.json.JsonOutput.toJson(runStatus)
+        logger.lifecycle(gpuRequested() ? 'GPU checks requested: unavailable contexts/extensions fail the test run.'
+                : 'GPU checks NOT RUN: opt in with -PverifyGpu=true (JUnit reports them as skipped).')
+    }
+    doLast {
+        // Test's action throws on assertion/worker failure, so only successful runs reach here.
+        runStatus.state = 'passed'
+        runStatus.completedAtMillis = System.currentTimeMillis()
+        runStatusFile.get().asFile.text = groovy.json.JsonOutput.toJson(runStatus)
+    }
+    afterSuite { descriptor, result ->
+        if (descriptor.parent == null) logger.lifecycle("${name}: ${result.testCount} tests, " +
+                "${result.successfulTestCount} passed, ${result.failedTestCount} failed, ${result.skippedTestCount} skipped")
+    }
+    testLogging {
+        events 'failed', 'skipped'
+        exceptionFormat = 'full'
+    }
+    onOutput { descriptor, event ->
+        if (event.message.startsWith('GPU_ENV ') || event.message.startsWith('GPU_CHECKS ')) {
+            logger.lifecycle(event.message.trim())
+        }
+    }
 }

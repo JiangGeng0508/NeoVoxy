@@ -135,9 +135,13 @@ Levitite 的船体组装、专用服务端保存重启及客户端重载显示�
 使用 Gradle 运行 `.\gradlew build` 即可，产物为 `build/libs/voxy-<版本>.jar`（`assemble` 会自
 动执行 `slimJar`）。`build/intermediate-jars` 下是未裁剪的中间产物，请勿发布。
 
-`build` 同时执行 NeoForge 环境下的回归测试，也可单独运行 `.\gradlew testJunit`。
-测试覆盖可选网络通道协商、远端方块变体映射的持久化，以及季节表面标记的 ID 转换。
-同时验证区块批量保存后可重新读取，避免过期的“不存在”缓存使已保存的 LoD 被误判为缺失。
+`check` 直接依赖 NeoForge 环境下的 `testJunit` 回归测试和 `checkLangKeys` 语言检查，`build` 通过
+`check` 执行；中英缺键、静态翻译键缺失或测试失败都会使构建失败。语言检查可单独运行 `.\gradlew checkLangKeys`。
+也可单独运行 `.\gradlew testJunit`。测试覆盖区段坐标编码、交接、RocksDB 生命周期、模型 LoD、
+网络请求与负缓存、映射持久化、连接纹理和 Mipper。普通运行明确跳过需要 OpenGL 的可选检查；
+使用 `.\gradlew build -PverifyGpu=true` 启用 GPU 回归，或用
+`.\gradlew testJunit -PverifyGpu=true --tests '*GpuTest'` 只运行 GPU 检查；旧 init 脚本入口仍可使用。
+测试命令、覆盖映射和报告路径见 [自动验证说明](docs/testing.md)。
 `.\gradlew runClient` 会在运行目录尚未安装 Sodium 时自动放入所需版本，已有安装会保留。
 
 > 分发包内嵌 RocksDB、LWJGL ZSTD、LWJGL LMDB（含 Windows/Linux x86_64 原生库，解包在 Jar 根

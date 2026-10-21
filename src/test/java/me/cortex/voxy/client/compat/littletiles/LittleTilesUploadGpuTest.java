@@ -6,7 +6,7 @@ import me.cortex.voxy.commonImpl.compat.littletiles.LittleTilesCompat;
 import me.cortex.voxy.commonImpl.compat.littletiles.LittleTilesStore;
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
-import org.lwjgl.opengl.GL;
+import me.cortex.voxy.testing.GpuTestContext;
 
 import java.util.ArrayList;
 import java.util.Map;
@@ -15,26 +15,16 @@ import java.util.Set;
 
 import static me.cortex.voxy.testing.Reflect.*;
 import static org.junit.jupiter.api.Assertions.*;
-import static org.lwjgl.glfw.GLFW.*;
 import static org.lwjgl.opengl.GL45C.*;
 
 /** Exercises the real CPU bake, paired GPU upload and asynchronous result ownership. */
 @EnabledIfSystemProperty(named = "voxy.verifyMeshGpu", matches = "true")
 class LittleTilesUploadGpuTest {
-    private static long window;
+    private static GpuTestContext context;
     private final LittleTilesDistantRenderer renderer = new LittleTilesDistantRenderer();
 
     @BeforeAll static void openContext() {
-        assertTrue(glfwInit());
-        glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
-        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
-        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 6);
-        glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-        window = glfwCreateWindow(32, 32, "LittleTiles upload verification", 0, 0);
-        assertNotEquals(0, window);
-        glfwMakeContextCurrent(window);
-        GL.createCapabilities();
-        System.out.println("LittleTiles upload GPU: " + glGetString(GL_RENDERER) + " / " + glGetString(GL_VERSION));
+        context = GpuTestContext.open("LittleTilesUploadGpuTest");
     }
 
     @AfterEach void cleanup() throws Exception {
@@ -44,16 +34,15 @@ class LittleTilesUploadGpuTest {
     }
 
     @AfterAll static void closeContext() throws Exception {
+        if (context == null) return;
         for (String name : new String[]{"sharedIndexBuffer", "sharedIndexQuadCapacity"}) {
             var field = DistantMesh.class.getDeclaredField(name);
             field.setAccessible(true);
             if (name.equals("sharedIndexBuffer")) glDeleteBuffers(field.getInt(null));
             field.setInt(null, 0);
         }
-        GL.setCapabilities(null);
-        glfwMakeContextCurrent(0);
-        glfwDestroyWindow(window);
-        glfwTerminate();
+        context.close();
+        context = null;
     }
 
     @Test void completedBakeUploadsBothLayersAndSnapshotReplacementFreesEveryLodBuffer() throws Exception {
