@@ -1,0 +1,7 @@
+// Optional OpenGL 4.6 checks: gradlew testJunit -I scripts/enable-mesh-gpu-tests.gradle
+allprojects {
+    tasks.withType(org.gradle.api.tasks.testing.Test).configureEach {
+        systemProperty 'voxy.verifyMeshGpu', 'true'
+        systemProperty 'voxy.verifyScreenspaceGpu', 'true'
+    }
+}

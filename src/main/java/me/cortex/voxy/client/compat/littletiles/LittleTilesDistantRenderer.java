@@ -256,7 +256,8 @@ public final class LittleTilesDistantRenderer implements LodPipelineHooks.Render
                 transform.set(viewport.MVP).translate((float) (ox - viewport.cameraX),
                         (float) (oy - viewport.cameraY), (float) (oz - viewport.cameraZ));
                 DistantShaders.uploadTransform(transform);
-                mesh.draw();
+                if (translucent) mesh.drawTranslucent(viewport, transform);
+                else mesh.drawAt(viewport, ox, oy, oz);
             }
             if (bound) {
                 glBindVertexArray(0);
@@ -273,10 +274,12 @@ public final class LittleTilesDistantRenderer implements LodPipelineHooks.Render
     // ---- CPU 烘焙与材质采样 -------------------------------------------
 
     private static CpuMeshes bake(LittleTilesCompat.SectionSnapshot snapshot, MaterialSample[] materials) {
-        var occupied = new it.unimi.dsi.fastutil.ints.IntOpenHashSet(snapshot.cells().size() * 2);
-        for (var cell : snapshot.cells()) occupied.add(cell.coordinate());
-        var opaqueBuilder = new DistantMeshBuilder();
-        var translucentBuilder = new DistantMeshBuilder();
+        var occupied = new it.unimi.dsi.fastutil.ints.Int2IntOpenHashMap(snapshot.cells().size() * 2);
+        occupied.defaultReturnValue(-1);
+        for (var cell : snapshot.cells()) occupied.put(cell.coordinate(), cell.material());
+        var opaqueBuilder = new DistantMeshBuilder(true);
+        var translucentBuilder = DistantMeshBuilder.translucent();
+        DistantMeshBuilder.CpuMesh opaque = null;
         try {
             for (var cell : snapshot.cells()) {
                 int coordinate = cell.coordinate();
@@ -287,20 +290,28 @@ public final class LittleTilesDistantRenderer implements LodPipelineHooks.Render
                 var builder = material.translucent ? translucentBuilder : opaqueBuilder;
                 int sky = (cell.light() >>> 4) & 15;
                 int block = Math.max(cell.light() & 15, material.emission);
-                if (x == 0 || !occupied.contains(coordinate - 1)) face(builder, Direction.WEST, x0,y0,z0,x1,y1,z1,material,sky,block);
-                if (x == 127 || !occupied.contains(coordinate + 1)) face(builder, Direction.EAST, x0,y0,z0,x1,y1,z1,material,sky,block);
-                if (y == 0 || !occupied.contains(coordinate - (1 << 14))) face(builder, Direction.DOWN, x0,y0,z0,x1,y1,z1,material,sky,block);
-                if (y == 127 || !occupied.contains(coordinate + (1 << 14))) face(builder, Direction.UP, x0,y0,z0,x1,y1,z1,material,sky,block);
-                if (z == 0 || !occupied.contains(coordinate - (1 << 7))) face(builder, Direction.NORTH, x0,y0,z0,x1,y1,z1,material,sky,block);
-                if (z == 127 || !occupied.contains(coordinate + (1 << 7))) face(builder, Direction.SOUTH, x0,y0,z0,x1,y1,z1,material,sky,block);
+                if (x == 0 || !hidesFace(occupied.get(coordinate - 1), cell.material(), materials)) face(builder, Direction.WEST, x0,y0,z0,x1,y1,z1,material,sky,block);
+                if (x == 127 || !hidesFace(occupied.get(coordinate + 1), cell.material(), materials)) face(builder, Direction.EAST, x0,y0,z0,x1,y1,z1,material,sky,block);
+                if (y == 0 || !hidesFace(occupied.get(coordinate - (1 << 14)), cell.material(), materials)) face(builder, Direction.DOWN, x0,y0,z0,x1,y1,z1,material,sky,block);
+                if (y == 127 || !hidesFace(occupied.get(coordinate + (1 << 14)), cell.material(), materials)) face(builder, Direction.UP, x0,y0,z0,x1,y1,z1,material,sky,block);
+                if (z == 0 || !hidesFace(occupied.get(coordinate - (1 << 7)), cell.material(), materials)) face(builder, Direction.NORTH, x0,y0,z0,x1,y1,z1,material,sky,block);
+                if (z == 127 || !hidesFace(occupied.get(coordinate + (1 << 7)), cell.material(), materials)) face(builder, Direction.SOUTH, x0,y0,z0,x1,y1,z1,material,sky,block);
             }
-            return new CpuMeshes(opaqueBuilder.assemble(), translucentBuilder.assemble());
+            opaque = opaqueBuilder.assemble();
+            return new CpuMeshes(opaque, translucentBuilder.assemble());
         } catch (Throwable t) {
+            if (opaque != null) opaque.free();
             opaqueBuilder.discard();
             translucentBuilder.discard();
             Logger.error("Baking LittleTiles LOD mesh", t);
             return null;
         }
+    }
+
+    private static boolean hidesFace(int neighbor, int material, MaterialSample[] materials) {
+        // Glass must not remove the solid surface behind it. Distinct transparent
+        // materials also retain their interface; identical ones share an interior.
+        return neighbor >= 0 && (!materials[neighbor].translucent || neighbor == material);
     }
 
     private static void face(DistantMeshBuilder b, Direction d, float x0,float y0,float z0,float x1,float y1,float z1,
@@ -431,6 +442,7 @@ public final class LittleTilesDistantRenderer implements LodPipelineHooks.Render
                 materials = prepareMaterials(entry.snapshot);
             } catch (Throwable t) {
                 Logger.error("Preparing LittleTiles LOD materials", t);
+                this.candidatesDirty = true;
                 continue;
             }
             int generation = this.worldGeneration;
@@ -462,9 +474,33 @@ public final class LittleTilesDistantRenderer implements LodPipelineHooks.Render
                 if (entry != null && !entry.hasMesh()) this.candidatesDirty = true;
                 continue;
             }
-            entry.opaqueMesh = DistantMeshBuilder.upload(result.mesh == null ? null : result.mesh.opaque);
-            entry.translucentMesh = DistantMeshBuilder.upload(result.mesh == null ? null : result.mesh.translucent);
+            try {
+                // A failed worker bake must be queued again even if the camera stays still.
+                if (result.mesh == null) this.candidatesDirty = true;
+                else upload(entry, result.mesh);
+            } catch (RuntimeException | Error failure) {
+                this.candidatesDirty = true;
+                Logger.error("Uploading LittleTiles LOD meshes", failure);
+            }
             uploaded++;
+        }
+    }
+
+    private static void upload(Entry entry, CpuMeshes cpu) {
+        if (cpu == null) return;
+        DistantMesh opaque = null, translucent = null;
+        try {
+            opaque = DistantMeshBuilder.upload(cpu.opaque);
+            translucent = DistantMeshBuilder.upload(cpu.translucent);
+            entry.closeMeshes();
+            entry.opaqueMesh = opaque;
+            entry.translucentMesh = translucent;
+        } catch (RuntimeException | Error failure) {
+            if (opaque != null) opaque.free();
+            if (translucent != null) translucent.free();
+            throw failure;
+        } finally {
+            cpu.free();
         }
     }
 

@@ -1,6 +1,8 @@
 package me.cortex.voxy.commonImpl.network;
 
 import net.minecraft.network.ConnectionProtocol;
+import net.minecraft.network.Connection;
+import net.minecraft.network.protocol.PacketFlow;
 import net.minecraft.resources.ResourceLocation;
 import net.neoforged.neoforge.network.negotiation.NegotiableNetworkComponent;
 import net.neoforged.neoforge.network.negotiation.NetworkComponentNegotiator;
@@ -10,6 +12,9 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.lang.reflect.Proxy;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -47,5 +52,37 @@ class VoxyNetworkTest {
         var result = NetworkComponentNegotiator.negotiate(channels, channels);
         assertTrue(result.success());
         assertEquals(7, result.components().size());
+    }
+
+    @Test
+    void staleConnectionCannotDeliverHelloOrTerrainAfterReconnect() throws Exception {
+        var handlerField = VoxyNetwork.class.getDeclaredField("clientHandler");
+        handlerField.setAccessible(true);
+        var original = (VoxyNetwork.ClientHandler) handlerField.get(null);
+        var oldConnection = new Connection(PacketFlow.CLIENTBOUND);
+        var newConnection = new Connection(PacketFlow.CLIENTBOUND);
+        var current = new AtomicReference<>(oldConnection);
+        var delivered = new AtomicInteger();
+        var handler = (VoxyNetwork.ClientHandler) Proxy.newProxyInstance(
+                VoxyNetwork.ClientHandler.class.getClassLoader(), new Class[]{VoxyNetwork.ClientHandler.class},
+                (proxy, method, args) -> {
+                    if (method.getName().equals("acceptsConnection")) return args[0] == current.get();
+                    delivered.incrementAndGet();
+                    return null;
+                });
+        try {
+            VoxyNetwork.setClientHandler(handler);
+            VoxyNetwork.dispatchClient(oldConnection, h -> h.handleHello(new VoxyNetwork.HelloS2C(1)));
+            assertEquals(1, delivered.get());
+            current.set(newConnection);
+            VoxyNetwork.dispatchClient(oldConnection, h -> h.handleHello(new VoxyNetwork.HelloS2C(1)));
+            VoxyNetwork.dispatchClient(oldConnection, h -> h.handleSectionData(
+                    new VoxyNetwork.SectionDataS2C("minecraft:overworld", 0, 0, 0, 0, new byte[0])));
+            assertEquals(1, delivered.get());
+            VoxyNetwork.dispatchClient(newConnection, h -> h.handleHello(new VoxyNetwork.HelloS2C(1)));
+            assertEquals(2, delivered.get());
+        } finally {
+            VoxyNetwork.setClientHandler(original);
+        }
     }
 }

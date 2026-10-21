@@ -8,6 +8,7 @@ import me.cortex.voxy.common.Logger;
 import me.cortex.voxy.common.StorageConfigUtil;
 import me.cortex.voxy.common.config.ConfigBuildCtx;
 import me.cortex.voxy.common.config.section.SectionStorage;
+import me.cortex.voxy.common.config.section.SectionSerializationStorage;
 import me.cortex.voxy.common.config.section.SectionStorageConfig;
 import me.cortex.voxy.commonImpl.ImportManager;
 import me.cortex.voxy.commonImpl.VoxyInstance;
@@ -78,7 +79,11 @@ public class VoxyClientInstance extends VoxyInstance {
         ctx.setProperty(ConfigBuildCtx.PLAYER_UUID,
                 Minecraft.getInstance().getUser().getProfileId().toString().replace(':', '-'));
         ctx.pushPath(ConfigBuildCtx.DEFAULT_STORAGE_PATH);
-        return this.config.sectionStorageConfig.build(ctx);
+        var storage = this.config.sectionStorageConfig.build(ctx);
+        if (storage instanceof SectionSerializationStorage serializer) {
+            serializer.setMissListener(VoxyClientNetwork.missListener(identifier.key.location().toString()));
+        }
+        return storage;
     }
 
     public Path getStorageBasePath() {

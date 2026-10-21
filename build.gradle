@@ -94,7 +94,7 @@ def sodiumNeoForgeModJar = layout.buildDirectory.file('extracted/sodium-neoforge
 
 def extractSodiumNeoForgeModJar = tasks.register('extractSodiumNeoForgeModJar', Copy) {
     from({ zipTree(configurations.sodiumOuter.singleFile) }) {
-        include 'META-INF/jarjar/net.caffeinemc.sodium-neoforge-0.8.12+mc1.21.1-mod.jar'
+        include "META-INF/jarjar/net.caffeinemc.sodium-neoforge-${sodium_version}+mc${minecraft_version}-mod.jar"
         eachFile { details ->
             details.path = 'sodium-neoforge-mod.jar'
         }
@@ -350,11 +350,11 @@ dependencies {
         exclude group: 'org.lz4', module: 'lz4-java'
     }
 
-    sodiumOuter "maven.modrinth:sodium:mc1.21.1-0.8.12-neoforge"
+    sodiumOuter "maven.modrinth:sodium:mc${minecraft_version}-${sodium_version}-neoforge"
     compileOnly files(sodiumNeoForgeModJar).builtBy(extractSodiumNeoForgeModJar)
     // Exercise the real Sodium menu bindings in config persistence tests.
     testImplementation files(sodiumNeoForgeModJar).builtBy(extractSodiumNeoForgeModJar)
-    compileOnly "maven.modrinth:iris:1.8.0+1.21.1-neoforge"
+    compileOnly "maven.modrinth:iris:${iris_version}+${minecraft_version}-neoforge"
     compileOnly "maven.modrinth:fALzjamp:LuFhm4eU"
 
     // === Optional mod integration compile-time APIs (all optional at runtime) ===
@@ -414,6 +414,8 @@ tasks.withType(ProcessResources).configureEach {
             minecraft_version_range: minecraft_version_range,
             neo_version            : neo_version,
             loader_version_range   : loader_version_range,
+            sodium_version_range   : sodium_version_range,
+            iris_version_range     : iris_version_range,
             mod_id                 : mod_id,
             mod_name               : mod_name,
             mod_license            : mod_license,
@@ -430,6 +432,18 @@ tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
     options.release = 21
     options.deprecation = true
+}
+
+// Read real mesh fixtures from the same pinned Create JAR used to compile the mod.
+// Test resources stay out of the distribution; missing resources fail the regression tests.
+tasks.named('processTestResources', ProcessResources).configure {
+    from({ zipTree(configurations.createOuter.singleFile) }) {
+        include 'assets/create/models/block/track/tie.obj'
+        include 'assets/create/models/block/track/segment_left.obj'
+        include 'assets/create/models/block/track/segment_right.obj'
+        eachFile { details -> details.path = 'fixtures/create/track/' + details.name }
+        includeEmptyDirs = false
+    }
 }
 
 // Minecraft and mod classes need NeoForge's transforming classloader (testJunit).

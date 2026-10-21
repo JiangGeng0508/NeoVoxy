@@ -1,6 +1,6 @@
 # NeoVoxy
 
-NeoVoxy 是面向 Minecraft 1.21.1 + NeoForge 的 Voxy 移植项目，目标是在 NeoForge 环境中提供 Voxy 强大的远距离（LoD）渲染能力。本分支不依赖信雅互联，强制依赖只有 Sodium `0.8.12+mc1.21.1` 以上。
+NeoVoxy 是面向 Minecraft 1.21.1 + NeoForge 的 Voxy 移植项目，目标是在 NeoForge 环境中提供 Voxy 强大的远距离（LoD）渲染能力。本分支不依赖信雅互联，客户端必需 Sodium NeoForge `>=0.8.12, <0.9`（Minecraft 1.21.1 构建）；专用服务端不需要 Sodium 或 Iris。
 
 项目主要参考 [voxy](https://github.com/M4G4MED/voxy)，并针对 NeoForge 1.21.1 做了适配。当前仍处于 beta 验证阶段。
 
@@ -14,8 +14,14 @@ NeoVoxy 是面向 Minecraft 1.21.1 + NeoForge 的 Voxy 移植项目，目标是�
 - NeoForge: `21.1.244`
 - Mod 版本: `0.2.17-beta+neoforge`
 - Java: `21`
-- 必需依赖: Sodium NeoForge `0.8.12+mc1.21.1` 以上
-- 可选依赖: Iris `1.8.x+1.21.1-neoforge`（启用光影时自动切换到 Iris 渲染管线）
+- 客户端必需依赖: Sodium NeoForge `>=0.8.12, <0.9`，编译基线 `mc1.21.1-0.8.12-neoforge`
+- 客户端可选依赖: Iris NeoForge `>=1.8.14-beta.1`，编译基线 `1.8.14-beta.1+1.21.1-neoforge`（启用光影时自动切换到 Iris 渲染管线）
+
+上述范围是安装约束，均需选择 Minecraft 1.21.1 / NeoForge 构建；具体验证范围见下文。
+Voxy 使用 Sodium 的配置 API、内部区段渲染类及 mixin，暂将上界限制为 `<0.9`，
+跨次版本需重新适配和验证。Iris 的安装下限不代表其后每个版本都已验证。
+Iris `1.8.12` 发布包仍引用 Sodium 已移除的 `SodiumGameOptions`，与本项目所需的 Sodium
+`0.8.12` 组合加载失败，因此不再列为支持版本。
 
 ## 功能范围
 
@@ -23,9 +29,10 @@ NeoVoxy 是面向 Minecraft 1.21.1 + NeoForge 的 Voxy 移植项目，目标是�
 - 平滑过渡按原版实际绘制的地形交接，快速移动时保留已有 LoD 为未就绪的地形补位
 - Voxy LoD 区块的加载、保存与渲染（GPU 驱动的 MDIC 渲染后端、HiZ 遮挡剔除、SSAO）
 - 世界曲率（地球曲率）模拟，参照 Distant Horizons 实现
-- 集成服/局域网主机的**远处区块后台生成**（Distant Generation），持续向 LoD 商店灌入地形
+- 集成服/局域网主机的**远处区块后台生成**（Distant Generation），默认关闭；开启后持续向 LoD 存储写入地形
 - 世界导入（World / Bobby / Raw / Zip / Current / Distant Horizons SQLite）
 - 单人世界与服务器世界的本地 LoD 数据路径管理
+- 专用服务器地形同步（两端安装 Voxy）：握手后从服务端拉取已有 LoD；握手等待或请求窗口满时保留请求并重试，缓存服务端确认的缺失结果以减少重复请求
 - Iris 光影兼容（光影包可通过 `voxy.json` 提供 LoD 片元着色器补丁）
 - 远处实体渲染：远距离玩家 / 载具快照渲染（服务端同样安装 Voxy 时可用）
 - 模组联动：Create（列车 / 轨道 / 装置 / 动力网格电线）、Create: Copycats+、Create: Simulated
@@ -56,27 +63,27 @@ NeoVoxy 是面向 Minecraft 1.21.1 + NeoForge 的 Voxy 移植项目，目标是�
 | `enabled` | `true` | 完全启用或禁用 Voxy |
 | `enable_rendering` | `true` | 启用或禁用 Voxy 渲染 |
 | `ingest_enabled` | `true` | 将新区块转换为 LoD 数据 |
-| `section_render_distance` | `16` | LoD 半径的内部值，乘以 32 为区块数；范围 `0.625–64`（20–2048 区块），默认 512 区块；GUI 每次调整 2 区块 |
+| `section_render_distance` | `16` | LoD 半径的内部值，乘以 32 为区块数、乘以 512 为方块数；范围 `0.625–64`（20–2048 区块），默认 512 区块（8192 方块）；GUI 每次调整 2 区块 |
 | `use_environmental_fog` | `true` | 环境雾（远距离雾） |
 | `fog_intensity` / `fog_density` | `1.0` / `0.0` | 环境雾强度与密度 |
-| `sky_fog_distance` | `96` | 天空雾距离（区块） |
-| `ssao_mode` | `auto` | SSAO 模式（auto/basic/better/best） |
+| `sky_fog_distance` | `96` | 天空雾结束距离（方块） |
+| `ssao_mode` | `auto`（省略时） | SSAO 模式（auto/basic/better/best） |
 | `earth_curve_ratio` | `0` | 世界曲率倍率；`0` 关闭，`50-5000` 开启（值越大曲率越明显） |
-| `distant_gen_enabled` | `true` | 集成服远处区块后台生成 |
+| `distant_gen_enabled` | `false` | 远处区块后台生成，仅单人/局域网主机生效；安装 Groundwork 时自动停用内置生成 |
 | `distant_gen_radius` | `96` | 后台生成半径（区块） |
-| `distant_gen_max_inflight` | `16` | 同时生成的区块数量 |
+| `distant_gen_max_in_flight` | `16` | 同时生成的区块数量 |
 | `distant_gen_max_mspt` | `45` | 生成时的服务器 MSPT 上限 |
 | `distant_beacons` / `distant_beacon_max_chunks` | `true` / `0` | 远景信标光柱与距离上限（0 = 跟随 LoD 半径） |
 | `distant_trains` / `distant_tracks` / `distant_contraptions` | `true` | Create 列车 / 轨道 / 装置的远处渲染 |
 | `distant_kinetics` | `true` | 剔除超出渲染距离的放置式动力机械部件 |
 | `distant_copycats` / `distant_framed_blocks` / `distant_little_tiles` / `distant_domum` | `true` | 各装饰方块的远处专用网格 |
-| `distant_powergrid_wires` / `distant_simulated_lasers` | `true` | PowerGrid 悬垂电线 / Simulated 激光的远处渲染 |
+| `distant_power_grid_wires` / `distant_simulated_lasers` | `true` | PowerGrid 悬垂电线 / Simulated 激光的远处渲染 |
 | `enable_far_player_rendering` / `enable_far_vehicle_rendering` | `true` | 远距离玩家 / 载具快照渲染 |
 | `render_far_player_names` | `true` | 远景玩家代理的名牌显示 |
 
 ### 运行时开关
 
-- `/voxy distantgen`：查看/暂停/恢复/重置远处区块生成
+- `/voxy distantgen`：查看/暂停/恢复/重置远处区块生成；`resume` 只解除暂停，仍需在配置中开启后台生成
 - `/voxy debug`：输出信标 / 列车 / 动力学 / 雾 / 性能等调试信息（`capture` 可抓取性能采样）
 
 ## 兼容性
@@ -85,8 +92,8 @@ NeoVoxy 是面向 Minecraft 1.21.1 + NeoForge 的 Voxy 移植项目，目标是�
 
 | 模组名称         | 版本                              | 兼容状态    |
 | ------------ | ------------------------------- | ------- |
-| Sodium       | `mc1.21.1-0.8.12-neoforge`      | 兼容良好    |
-| Iris         | `1.8.x+1.21.1-neoforge`         | 基本可用    |
+| Sodium       | `mc1.21.1-0.8.12-neoforge`      | 编译基线；客户端验证见下文 |
+| Iris         | `1.8.14-beta.1+1.21.1-neoforge` | 编译基线；客户端验证见下文 |
 | ReForgedPlay | `0.3`                           | 兼容良好    |
 | Lithium      | `mc1.21.1-0.15.4-neoforge`      | 暂未发现冲突  |
 | Chunky       | `1.4.23`                        | 暂未发现冲突  |
@@ -94,6 +101,12 @@ NeoVoxy 是面向 Minecraft 1.21.1 + NeoForge 的 Voxy 移植项目，目标是�
 | Create: Copycats+ / FramedBlocks / Little Tiles / Domum Ornamentum | 对应 1.21.1 版本 | 兼容良好（可选；未安装时相关选项自动隐藏） |
 | Create: Aeronautics / Sable | Aeronautics `1.3.0` / Sable `2.0.3` | 实验性（已验证基础船体组装、保存与重载） |
 | Ecliptic Seasons | `0.15.0-rc-3-1`              | 实验性     |
+
+2026-10-18 在 Minecraft `1.21.1`、NeoForge `21.1.244`、Java `21.0.10`、RTX 4060 Laptop GPU
+下验证 Sodium `0.8.12`，以及搭配 Iris `1.8.14-beta.1` 的无光影和
+Complementary Reimagined `r5.8.1` 场景：进入隔离测试世界、运行 240 tick、LoD 管线初始化
+及正常退出均通过。光影场景确认使用 `IrisVoxyRenderPipeline`。这覆盖客户端加载与渲染启动，
+不代表所有光影包、联动模组或长时间游玩都已验收。
 
 2026-10-02 在 NeoForge `21.1.244`、Sodium `0.8.12` 下验证了 Create `6.0.10` 与
 Aeronautics `1.3.0`（含 Simulated / Offroad）和 Sable `2.0.3`：客户端进世界、含马达 / 传动轴 /
@@ -135,7 +148,7 @@ Levitite 的船体组装、专用服务端保存重启及客户端重载显示�
 ## 安装
 
 1. 将构建的 Jar 放入实例的 `mods` 目录。
-2. 同时安装 Sodium NeoForge `0.8.12+mc1.21.1` 或更新版本。
+2. 客户端同时安装 Minecraft 1.21.1 对应的 Sodium NeoForge `>=0.8.12, <0.9`；需要光影时另装对应的 Iris NeoForge `>=1.8.14-beta.1`。专用服务端无需安装这两项。
 3. 使用 Minecraft `1.21.1`、NeoForge `21.1.244` 版本启动。
 
 ## 已知问题

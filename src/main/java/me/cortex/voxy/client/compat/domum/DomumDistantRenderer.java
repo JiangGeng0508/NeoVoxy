@@ -225,7 +225,7 @@ public final class DomumDistantRenderer implements LodPipelineHooks.Renderer {
                 transform.set(viewport.MVP).translate((float) (ox - viewport.cameraX),
                         (float) (oy - viewport.cameraY), (float) (oz - viewport.cameraZ));
                 DistantShaders.uploadTransform(transform);
-                entry.mesh.draw();
+                entry.mesh.drawAt(viewport, ox, oy, oz);
             }
             if (bound) {
                 glBindVertexArray(0);
@@ -298,7 +298,8 @@ public final class DomumDistantRenderer implements LodPipelineHooks.Renderer {
     private static DistantMesh bake(long key, int[] blocks,
                                     me.cortex.voxy.common.world.other.Mapper mapper, ClientLevel level) {
         int sx = BlockPos.getX(key), sy = BlockPos.getY(key), sz = BlockPos.getZ(key);
-        var builder = new DistantMeshBuilder();
+        // Mixed transparent layers keep full geometry through the builder's layer guard.
+        var builder = new DistantMeshBuilder(true);
         try {
             var blockRenderer = Minecraft.getInstance().getBlockRenderer();
             var colors = Minecraft.getInstance().getBlockColors();

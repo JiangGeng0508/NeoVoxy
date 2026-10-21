@@ -1,26 +1,30 @@
 package me.cortex.voxy.client;
 
 import me.cortex.voxy.common.Logger;
+import me.cortex.voxy.client.config.VoxyConfig;
 import me.cortex.voxy.common.config.section.SectionSerializationStorage;
-import me.cortex.voxy.common.config.section.SectionStorage;
 import me.cortex.voxy.common.world.WorldEngine;
+import me.cortex.voxy.common.world.WorldSection;
 import me.cortex.voxy.common.world.other.Mapper;
 import me.cortex.voxy.commonImpl.VoxyCommon;
 import me.cortex.voxy.commonImpl.WorldIdentifier;
 import me.cortex.voxy.commonImpl.network.VoxyNetwork;
 import me.cortex.voxy.commonImpl.network.LodMappingTranslator;
 import net.minecraft.client.Minecraft;
+import net.minecraft.network.Connection;
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.neoforge.client.event.ClientPlayerNetworkEvent;
+import net.neoforged.neoforge.client.event.ClientTickEvent;
 import org.lwjgl.system.MemoryUtil;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-import java.util.Set;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -39,9 +43,9 @@ public final class VoxyClientNetwork implements VoxyNetwork.ClientHandler {
     /** Server-local -> client-local id translation, isolated per dimension. Main thread only. */
     private static final java.util.Map<String, int[]> serverBlockToClient = new ConcurrentHashMap<>();
     private static final java.util.Map<String, int[]> serverBiomeToClient = new ConcurrentHashMap<>();
-    private static final List<VoxyNetwork.SectionDataS2C> pendingSections = new ArrayList<>();
-    private static final Set<String> inFlightRequests = ConcurrentHashMap.newKeySet();
-    private static final int MAX_IN_FLIGHT = 512;
+    private static final Map<LodSectionRequests.Request, VoxyNetwork.SectionDataS2C> pendingSections = new LinkedHashMap<>();
+    private static final int MAX_PENDING_PAYLOADS = 1024;
+    private static volatile LodSectionRequests sectionRequests = new LodSectionRequests();
     private static volatile long lastHelloNanos;
 
     public static boolean isServerAuthoritative() {
@@ -50,7 +54,12 @@ public final class VoxyClientNetwork implements VoxyNetwork.ClientHandler {
 
     public static void init() {
         VoxyNetwork.setClientHandler(new VoxyClientNetwork());
-        SectionSerializationStorage.MISS_LISTENER = VoxyClientNetwork::onStoreMiss;
+    }
+
+    @Override
+    public boolean acceptsConnection(Connection connection) {
+        var current = Minecraft.getInstance().getConnection();
+        return current != null && current.getConnection() == connection && connection.isConnected();
     }
 
     // ---------- connection lifecycle ----------
@@ -61,7 +70,7 @@ public final class VoxyClientNetwork implements VoxyNetwork.ClientHandler {
     }
 
     private static void sendHello() {
-        if (!ServerCapabilities.lodSync() || !VoxyCommon.isAvailable()) {
+        if (Minecraft.getInstance().hasSingleplayerServer() || !ServerCapabilities.lodSync() || !VoxyCommon.isAvailable()) {
             return;
         }
         lastHelloNanos = System.nanoTime();
@@ -76,55 +85,60 @@ public final class VoxyClientNetwork implements VoxyNetwork.ClientHandler {
     public static void onLoggingOut(ClientPlayerNetworkEvent.LoggingOut event) {
         serverAuthoritative = false;
         lastHelloNanos = 0;
-        synchronized (pendingSections) {
-            pendingSections.clear();
-        }
-        inFlightRequests.clear();
+        sectionRequests.close();
+        sectionRequests = new LodSectionRequests();
+        pendingSections.clear();
         serverBlockToClient.clear();
         serverBiomeToClient.clear();
     }
 
     // ---------- store miss -> pull ----------
 
-    private static void onStoreMiss(long sectionKey) {
-        var minecraft = Minecraft.getInstance();
-        var level = minecraft.level;
-        var connection = minecraft.getConnection();
-        if (level == null || !ServerCapabilities.lodSync()) {
-            return;
-        }
-        // Misses arrive on storage workers. Recheck the captured session on the main thread
-        // so a queued request cannot be sent after logout or into another dimension/server.
-        minecraft.execute(() -> {
-            if (minecraft.level == level && minecraft.getConnection() == connection
-                    && ServerCapabilities.lodSync()) {
-                requestSection(level.dimension().location().toString(), sectionKey);
+    static SectionSerializationStorage.ISectionMissListener missListener(String dimension) {
+        var requests = sectionRequests;
+        // Bind the dimension at storage creation, not by reading the current world on a
+        // storage worker. Minecraft may not expose its connection yet during world/store
+        // creation: check availability when notified, rather than permanently omitting
+        // the listener. Old stores/workers retain only their closed session queue.
+        return sectionKey -> {
+            // Integrated servers register these channels but have no VoxyServerInstance.
+            var minecraft = Minecraft.getInstance();
+            if (requests == sectionRequests && (minecraft == null
+                    || (!minecraft.hasSingleplayerServer()
+                        && (minecraft.getConnection() == null || ServerCapabilities.lodSync())))) {
+                requests.request(dimension, sectionKey);
             }
-        });
+        };
     }
 
-    private static void requestSection(String dim, long sectionKey) {
-        if (!serverAuthoritative) {
-            // Retry only on connections that negotiated the LOD sync protocol.
-            if (System.nanoTime() - lastHelloNanos > 5_000_000_000L) {
+    @SubscribeEvent
+    public static void onClientTick(ClientTickEvent.Post event) {
+        var level = Minecraft.getInstance().level;
+        if (level == null || Minecraft.getInstance().hasSingleplayerServer()
+                || !VoxyCommon.isAvailable() || !VoxyConfig.CONFIG.enabled || !ServerCapabilities.lodSync()) return;
+        long now = System.nanoTime();
+        // Both handshake and mapping recovery must progress even if the local negative
+        // cache (or the active-section cache) prevents further store misses.
+        if (!serverAuthoritative || !pendingSections.isEmpty()) {
+            if (now - lastHelloNanos >= LodSectionRequests.RETRY_NANOS) {
                 sendHello();
             }
-            return;
         }
-        String reqKey = dim + "#" + sectionKey;
-        if (inFlightRequests.size() >= MAX_IN_FLIGHT) {
-            return;
+        if (serverAuthoritative && pendingSections.size() < MAX_PENDING_PAYLOADS) {
+            sectionRequests.pump(level.dimension().location().toString(), now, VoxyClientNetwork::sendSectionRequest);
         }
-        if (!inFlightRequests.add(reqKey)) {
-            return;
-        }
+    }
+
+    private static boolean sendSectionRequest(LodSectionRequests.Request request) {
+        long sectionKey = request.sectionKey();
         try {
-            VoxyNetwork.sendToServer(new VoxyNetwork.SectionRequestC2S(dim,
+            VoxyNetwork.sendToServer(new VoxyNetwork.SectionRequestC2S(request.dimension(),
                     WorldEngine.getLevel(sectionKey), WorldEngine.getX(sectionKey),
                     WorldEngine.getY(sectionKey), WorldEngine.getZ(sectionKey)));
+            return true;
         } catch (Exception e) {
             Logger.error("Voxy failed requesting section from server", e);
-            inFlightRequests.remove(reqKey);
+            return false;
         }
     }
 
@@ -140,7 +154,6 @@ public final class VoxyClientNetwork implements VoxyNetwork.ClientHandler {
         //NOTE: translation maps are per-dimension and intentionally kept: a hello is also
         // sent on dimension resync, and other dimensions' maps stay valid. Pending sections
         // are retried instead of dropped so untranslatable ones survive a resync.
-        inFlightRequests.clear();
         retryPending();
         Logger.info("Voxy server sync enabled, local ingest suspended");
     }
@@ -224,32 +237,48 @@ public final class VoxyClientNetwork implements VoxyNetwork.ClientHandler {
 
     @Override
     public void handleSectionData(VoxyNetwork.SectionDataS2C payload) {
-        inFlightRequests.remove(payload.dimension() + "#" + WorldEngine.getWorldSectionId(
+        acceptSectionData(payload);
+    }
+
+    private static void acceptSectionData(VoxyNetwork.SectionDataS2C payload) {
+        var request = new LodSectionRequests.Request(payload.dimension(), WorldEngine.getWorldSectionId(
                 payload.lvl(), payload.x(), payload.y(), payload.z()));
+        pendingSections.remove(request);
         if (payload.data().length == 0) {
+            sectionRequests.complete(request, true);
             return;//Server has no data for this section
         }
-        if (!injectSection(payload)) {
-            synchronized (pendingSections) {
-                if (pendingSections.size() < 1024) {
-                    pendingSections.add(payload);
+        sectionRequests.hold(request);
+        InjectionResult result;
+        try {
+            result = injectSection(payload);
+        } catch (Exception e) {
+            // World lookup/creation may fail before the decoder acquires its buffers.
+            // Do not leave this request held forever without a retained payload.
+            Logger.error("Voxy failed preparing server section injection", e);
+            result = InjectionResult.RETRY;
+        }
+        switch (result) {
+            case APPLIED -> sectionRequests.complete(request, false);
+            case WAIT_FOR_MAPPINGS -> {
+                if (pendingSections.size() < MAX_PENDING_PAYLOADS) {
+                    pendingSections.put(request, payload);
+                } else {
+                    // Retain the key when the payload buffer fills; pull again after
+                    // mappings arrive instead of losing it behind the local miss cache.
+                    sectionRequests.retry(request, System.nanoTime());
                 }
             }
+            case RETRY -> sectionRequests.retry(request, System.nanoTime());
         }
     }
 
     private static void retryPending() {
-        synchronized (pendingSections) {
-            if (pendingSections.isEmpty()) {
-                return;
-            }
-            var retry = new ArrayList<>(pendingSections);
-            pendingSections.clear();
-            for (var payload : retry) {
-                if (!injectSection(payload) && pendingSections.size() < 1024) {
-                    pendingSections.add(payload);
-                }
-            }
+        if (pendingSections.isEmpty()) return;
+        var retry = new ArrayList<>(pendingSections.values());
+        pendingSections.clear();
+        for (var payload : retry) {
+            acceptSectionData(payload);
         }
     }
 
@@ -267,34 +296,32 @@ public final class VoxyClientNetwork implements VoxyNetwork.ClientHandler {
         return engine == null ? null : engine.getMapper();
     }
 
+    private enum InjectionResult { APPLIED, WAIT_FOR_MAPPINGS, RETRY }
+
     /**
      * Translates server-local ids to local ids and writes the section into the local engine.
-     * Returns false when server mappings needed for translation have not arrived yet.
+     * Distinguishes successful application, missing mappings and transient failures.
      */
-    private static boolean injectSection(VoxyNetwork.SectionDataS2C payload) {
+    private static InjectionResult injectSection(VoxyNetwork.SectionDataS2C payload) {
         var minecraft = Minecraft.getInstance();
-        if (!minecraft.isSameThread()) {
-            minecraft.execute(() -> handleSectionDataStatic(payload));
-            return true;
-        }
         var level = minecraft.level;
         if (level == null || !level.dimension().location().toString().equals(payload.dimension())) {
-            return true;//Stale section for another dimension, drop
+            return InjectionResult.RETRY;//Pull again when this dimension becomes active.
         }
         var wid = WorldIdentifier.of(level);
         if (wid == null) {
-            return true;
+            return InjectionResult.RETRY;
         }
         var engine = wid.getOrCreateEngine();
         if (engine == null || !engine.isLive()) {
-            return true;
+            return InjectionResult.RETRY;
         }
 
         long expectedKey = WorldEngine.getWorldSectionId(payload.lvl(), payload.x(), payload.y(), payload.z());
         byte[] data = payload.data();
         if (data.length < 16 + 32 * 32 * 32 * 2) {
             Logger.error("Voxy got truncated section from server");
-            return true;
+            return InjectionResult.RETRY;
         }
 
         ByteBuffer direct = null;
@@ -307,14 +334,14 @@ public final class VoxyClientNetwork implements VoxyNetwork.ClientHandler {
             long key = MemoryUtil.memGetLong(base);
             if (key != expectedKey) {
                 Logger.error("Voxy server section key mismatch, dropping");
-                return true;
+                return InjectionResult.RETRY;
             }
             long metadata = MemoryUtil.memGetLong(base + 8);
             int lutCount = (int) (metadata & 0xFFFF);
             byte childMask = (byte) ((metadata >>> 16) & 0xFF);
-            if (data.length != 16 + 32 * 32 * 32 * 2 + (long) lutCount * 8) {
+            if (lutCount == 0 || data.length != 16 + 32 * 32 * 32 * 2 + (long) lutCount * 8) {
                 Logger.error("Voxy got malformed section from server");
-                return true;
+                return InjectionResult.RETRY;
             }
             long shortsBase = base + 16;
             long lutBase = shortsBase + 32 * 32 * 32 * 2L;
@@ -327,7 +354,16 @@ public final class VoxyClientNetwork implements VoxyNetwork.ClientHandler {
                 long serverLong = MemoryUtil.memGetLong(lutBase + (long) i * 8);
                 translated[i] = LodMappingTranslator.translate(serverLong, blockMap, biomeMap);
                 if (translated[i] == Mapper.UNKNOWN_MAPPING) {
-                    return false;//Mappings not yet synced, retry later
+                    return InjectionResult.WAIT_FOR_MAPPINGS;
+                }
+            }
+
+            // Validate before touching the live section. A malformed response must not
+            // publish a partially written section or be acknowledged as complete.
+            for (int i = 0; i < WorldSection.SECTION_VOLUME; i++) {
+                if (Short.toUnsignedInt(MemoryUtil.memGetShort(shortsBase + (long) i * 2)) >= lutCount) {
+                    Logger.error("Voxy got invalid section palette index from server");
+                    return InjectionResult.RETRY;
                 }
             }
 
@@ -353,24 +389,13 @@ public final class VoxyClientNetwork implements VoxyNetwork.ClientHandler {
                 serializer.forgetMissingSection(section.key);
             }
             engine.markActive();
-            return true;
+            return InjectionResult.APPLIED;
         } catch (Exception e) {
             Logger.error("Voxy failed injecting server section", e);
-            return true;
+            return InjectionResult.RETRY;
         } finally {
             if (direct != null) {
                 MemoryUtil.memFree(direct);
-            }
-        }
-    }
-
-    private static void handleSectionDataStatic(VoxyNetwork.SectionDataS2C payload) {
-        //Re-entry from another thread via minecraft.execute: instance dispatch not needed, call inject directly
-        if (!injectSection(payload)) {
-            synchronized (pendingSections) {
-                if (pendingSections.size() < 1024) {
-                    pendingSections.add(payload);
-                }
             }
         }
     }

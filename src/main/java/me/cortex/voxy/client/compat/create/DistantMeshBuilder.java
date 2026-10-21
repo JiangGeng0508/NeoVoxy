@@ -18,12 +18,42 @@ import java.util.function.Predicate;
 public final class DistantMeshBuilder {
     private ByteBuffer buffer;
     private int vertexCount;
+    private boolean allowLod;
+    private boolean mergeTranslucent;
     private final Vector4f scratch = new Vector4f();
     private final org.joml.Vector3f normalScratch = new org.joml.Vector3f();
     private final RandomSource random = RandomSource.create(42);
 
     public DistantMeshBuilder() {
+        // Existing callers include translucent and thin geometry. Opt in when their
+        // renderer also selects coarse draws; building unused levels wastes bake time.
+        this(false);
+    }
+
+    /** Enable only for opaque geometry suitable for planar collapse or a voxel shell. */
+    public DistantMeshBuilder(boolean allowLod) {
+        this.allowLod = allowLod;
         this.buffer = MemoryUtil.memAlloc(64 * 1024);
+    }
+
+    /** Keep layer order and attributes, allowing only adjacent coplanar affine merges. */
+    public static DistantMeshBuilder translucent() {
+        var builder = new DistantMeshBuilder(false);
+        builder.mergeTranslucent = true;
+        return builder;
+    }
+
+    /** Mixed or unknown render layers must retain their original topology and order. */
+    public void preserveGeometry() {
+        this.allowLod = false;
+        this.mergeTranslucent = false;
+    }
+
+    private void checkBlockLayer(RenderType layer) {
+        if (this.allowLod && layer != RenderType.solid()
+                && layer != RenderType.cutout() && layer != RenderType.cutoutMipped()) {
+            this.preserveGeometry();
+        }
     }
 
     // ---- 顶点写入 ------------------------------------------------------
@@ -44,6 +74,7 @@ public final class DistantMeshBuilder {
 
     public void rawVertex(float x, float y, float z, float u, float v, int skyLight, int blockLight,
                           float shade, int face, int tintRgb, int alpha, int customId) {
+        if (this.allowLod && alpha < 255) this.preserveGeometry();
         this.ensure(DistantMesh.STRIDE);
         if (x < this.minX) this.minX = x;
         if (y < this.minY) this.minY = y;
@@ -83,6 +114,7 @@ public final class DistantMeshBuilder {
                            net.neoforged.neoforge.client.model.data.ModelData modelData) {
         this.random.setSeed(42);
         for (var layer : model.getRenderTypes(state, this.random, modelData)) {
+            this.checkBlockLayer(layer);
             for (Direction direction : Direction.values()) {
                 if (faceHidden != null && faceHidden.test(direction)) {
                     continue;
@@ -112,6 +144,7 @@ public final class DistantMeshBuilder {
                                 ToIntFunction<BakedQuad> tintResolver,
                                 net.neoforged.neoforge.client.model.data.ModelData modelData,
                                 Predicate<Direction> faceHidden) {
+        this.checkBlockLayer(layer);
         this.random.setSeed(42);
         for (Direction direction : Direction.values()) {
             if (faceHidden != null && faceHidden.test(direction)) {
@@ -235,6 +268,7 @@ public final class DistantMeshBuilder {
     public static final class CpuMesh {
         private ByteBuffer buffer;
         public final int quadCount;
+        private DistantMeshLod lod;
         public float minX, minY, minZ, maxX, maxY, maxZ;
 
         private CpuMesh(ByteBuffer buffer, int quadCount) {
@@ -243,19 +277,30 @@ public final class DistantMeshBuilder {
         }
 
         public int byteSize() {
-            return this.buffer == null ? 0 : this.buffer.limit();
+            return this.buffer == null ? 0 : this.buffer.limit() + (int) this.lod.byteSize();
         }
 
         public void free() {
             if (this.buffer != null) {
                 MemoryUtil.memFree(this.buffer);
                 this.buffer = null;
+                this.lod = null;
             }
         }
     }
 
     //Hands the assembled buffer over; returns null for empty meshes. No GL, safe off the render thread.
     public CpuMesh assemble() {
+        try {
+            return this.assemble0();
+        } catch (RuntimeException | Error failure) {
+            this.discard();
+            throw failure;
+        }
+    }
+
+    private CpuMesh assemble0() {
+        if (this.buffer == null) return null;
         int quadCount = this.vertexCount / 4;
         if (quadCount == 0) {
             MemoryUtil.memFree(this.buffer);
@@ -265,7 +310,14 @@ public final class DistantMeshBuilder {
         //Truncate any trailing partial quad from a capture stream
         this.buffer.flip();
         this.buffer.limit(quadCount * 4 * DistantMesh.STRIDE);
+        if (this.mergeTranslucent) {
+            quadCount = DistantQuadMerger.compact(this.buffer, quadCount);
+            this.buffer.limit(quadCount * 4 * DistantMesh.STRIDE);
+        }
+        // Compute before transferring ownership: discard() can still free a failed bake.
+        var lod = this.allowLod ? DistantMeshLod.build(this.buffer, quadCount) : DistantMeshLod.EMPTY;
         var cpu = new CpuMesh(this.buffer, quadCount);
+        cpu.lod = lod;
         cpu.minX = this.minX; cpu.minY = this.minY; cpu.minZ = this.minZ;
         cpu.maxX = this.maxX; cpu.maxY = this.maxY; cpu.maxZ = this.maxZ;
         //Ownership moves to the CpuMesh - discard() must not free it from under the new owner
@@ -279,7 +331,8 @@ public final class DistantMeshBuilder {
             return null;
         }
         try {
-            var mesh = new DistantMesh(cpu.buffer, cpu.quadCount);
+            if (cpu.buffer == null) throw new IllegalStateException("CPU mesh has already been consumed");
+            var mesh = new DistantMesh(cpu.buffer, cpu.quadCount, cpu.lod);
             mesh.minX = cpu.minX; mesh.minY = cpu.minY; mesh.minZ = cpu.minZ;
             mesh.maxX = cpu.maxX; mesh.maxY = cpu.maxY; mesh.maxZ = cpu.maxZ;
             return mesh;
@@ -291,6 +344,24 @@ public final class DistantMeshBuilder {
     //Uploads and frees the CPU buffer; returns null for empty meshes
     public DistantMesh build() {
         return upload(this.assemble());
+    }
+
+    /** Four side quads per consecutive wire segment; never run voxel or translucent merging. */
+    public CpuMesh assemblePolyline() {
+        this.preserveGeometry();
+        var cpu = this.assemble();
+        if (cpu == null) return null;
+        try {
+            cpu.lod = DistantPolylineLod.build(cpu.buffer, cpu.quadCount);
+            return cpu;
+        } catch (RuntimeException | Error failure) {
+            cpu.free();
+            throw failure;
+        }
+    }
+
+    public DistantMesh buildPolyline() {
+        return upload(this.assemblePolyline());
     }
 
     //Frees the native buffer without building - for exception paths that abandon a partial bake, so

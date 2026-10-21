@@ -1,6 +1,7 @@
 package me.cortex.voxy.commonImpl.network;
 
 import me.cortex.voxy.common.Logger;
+import net.minecraft.network.Connection;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.network.codec.StreamCodec;
@@ -40,6 +41,7 @@ public final class VoxyNetwork {
     //Client bound handlers live in client-only code. Registered here via a setter so that
     // the common payload handler never forces client classes to load on a dedicated server.
     public interface ClientHandler {
+        boolean acceptsConnection(Connection connection);
         void handleHello(HelloS2C payload);
         void handleBlockMaps(BlockMapBatchS2C payload);
         void handleBiomeMaps(BiomeMapBatchS2C payload);
@@ -191,9 +193,9 @@ public final class VoxyNetwork {
 
     // ---------- client-bound handlers (run on logical client, may not have the mod classes otherwise) ----------
 
-    private static void dispatchClient(Consumer<ClientHandler> action) {
+    static void dispatchClient(Connection connection, Consumer<ClientHandler> action) {
         var handler = clientHandler;
-        if (handler == null) {
+        if (handler == null || !handler.acceptsConnection(connection)) {
             return;
         }
         try {
@@ -204,23 +206,23 @@ public final class VoxyNetwork {
     }
 
     private static void handleHelloS2C(HelloS2C payload, IPayloadContext ctx) {
-        dispatchClient(h -> h.handleHello(payload));
+        ctx.enqueueWork(() -> dispatchClient(ctx.connection(), h -> h.handleHello(payload)));
     }
 
     private static void handleBlockMaps(BlockMapBatchS2C payload, IPayloadContext ctx) {
-        dispatchClient(h -> h.handleBlockMaps(payload));
+        ctx.enqueueWork(() -> dispatchClient(ctx.connection(), h -> h.handleBlockMaps(payload)));
     }
 
     private static void handleBiomeMaps(BiomeMapBatchS2C payload, IPayloadContext ctx) {
-        dispatchClient(h -> h.handleBiomeMaps(payload));
+        ctx.enqueueWork(() -> dispatchClient(ctx.connection(), h -> h.handleBiomeMaps(payload)));
     }
 
     private static void handleMappingDelta(MappingDeltaS2C payload, IPayloadContext ctx) {
-        dispatchClient(h -> h.handleMappingDelta(payload));
+        ctx.enqueueWork(() -> dispatchClient(ctx.connection(), h -> h.handleMappingDelta(payload)));
     }
 
     private static void handleSectionData(SectionDataS2C payload, IPayloadContext ctx) {
-        dispatchClient(h -> h.handleSectionData(payload));
+        ctx.enqueueWork(() -> dispatchClient(ctx.connection(), h -> h.handleSectionData(payload)));
     }
 
     // ---------- send helpers ----------

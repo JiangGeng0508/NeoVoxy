@@ -19,9 +19,13 @@ public class SectionSerializationStorage extends SectionStorage {
 
     private static final int MISS_CACHE_SIZE = Integer.getInteger("voxy.storageMissCacheSize", 1 << 16);
 
-    /** Hook for remote fetching: invoked (any thread) on a store miss. Set by client netcode, null on servers. */
+    /** Invoked on local misses, including cached misses. Bound to this store's world/session. */
     public interface ISectionMissListener { void onMissing(long sectionKey); }
-    public static volatile ISectionMissListener MISS_LISTENER;
+    private volatile ISectionMissListener missListener;
+
+    public void setMissListener(ISectionMissListener listener) {
+        this.missListener = listener;
+    }
 
     private final StorageBackend backend;
     private final LongLinkedOpenHashSet missingSections = new LongLinkedOpenHashSet();
@@ -34,11 +38,16 @@ public class SectionSerializationStorage extends SectionStorage {
 
     public int loadSection(WorldSection into) {
         long generation;
+        boolean cachedMissing;
         synchronized (this.missingSections) {
-            if (MISS_CACHE_SIZE > 0 && this.missingSections.contains(into.key)) {
-                return 1;
-            }
+            cachedMissing = MISS_CACHE_SIZE > 0 && this.missingSections.contains(into.key);
             generation = this.missingCacheGeneration;
+        }
+        if (cachedMissing) {
+            // A local miss does not prove remote absence. The listener coalesces pending
+            // pulls and server-confirmed misses; reconnects can use a fresh listener.
+            this.notifyMissing(into.key);
+            return 1;
         }
         var data = this.backend.getSectionData(into.key, MEMORY_CACHE.get().createUntrackedUnfreeableReference());
         if (data != null) {
@@ -56,18 +65,22 @@ public class SectionSerializationStorage extends SectionStorage {
         } else {
             //The response is expected to be put into the local db so future loads hit the fast path;
             //the server can also send arbitrary updates to the client for arbitrary lods.
-            var listener = MISS_LISTENER;
-            if (listener != null) {
-                try {
-                    listener.onMissing(into.key);
-                } catch (Exception e) {
-                    Logger.error("Voxy section miss listener failed", e);
-                }
-            }
+            this.notifyMissing(into.key);
             this.rememberMissing(into.key, generation);
             // the response should be put into the local db so that future data can just use that
             // the server can also send arbitrary updates to the client for arbitrary lods
             return 1;
+        }
+    }
+
+    private void notifyMissing(long key) {
+        var listener = this.missListener;
+        if (listener != null) {
+            try {
+                listener.onMissing(key);
+            } catch (Exception e) {
+                Logger.error("Voxy section miss listener failed", e);
+            }
         }
     }
 
@@ -193,6 +206,7 @@ public class SectionSerializationStorage extends SectionStorage {
 
     @Override
     public void close() {
+        this.missListener = null;
         this.backend.close();
     }
 

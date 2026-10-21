@@ -154,7 +154,7 @@ public final class DistantTrackRenderer implements LodPipelineHooks.Renderer {
                         (float) (unit.oy - camY),
                         (float) (unit.oz - camZ));
                 DistantShaders.uploadTransform(transform);
-                unit.mesh.draw();
+                unit.mesh.drawAt(viewport, unit.ox, unit.oy, unit.oz);
                 drawn++;
             }
         } finally {
@@ -449,7 +449,7 @@ public final class DistantTrackRenderer implements LodPipelineHooks.Renderer {
     private void bakeSection(Minecraft mc, long sectionKey, List<StraightBlock> blocks) {
         int sx = BlockPos.getX(sectionKey) << 4, sy = BlockPos.getY(sectionKey) << 4, sz = BlockPos.getZ(sectionKey) << 4;
         var dispatcher = mc.getBlockRenderer();
-        var builder = new DistantMeshBuilder();
+        var builder = new DistantMeshBuilder(true);
         for (StraightBlock entry : blocks) {
             //Per-block light from voxy's voxel store (the air right above the track) - a section
             //centre sample often lands inside solid ground and darkens the whole span
@@ -477,7 +477,7 @@ public final class DistantTrackRenderer implements LodPipelineHooks.Renderer {
         int lightA = DistantLightSampler.sample(mc.level, anchor.getX(), anchor.getY(), anchor.getZ());
         BlockPos far = bc.bePositions.getSecond();
         int lightB = DistantLightSampler.sample(mc.level, far.getX(), far.getY(), far.getZ());
-        var builder = new DistantMeshBuilder();
+        var builder = new DistantMeshBuilder(true);
         try {
             var segments = bc.getBakedSegments();
             var holder = bc.getMaterial().getModelHolder();

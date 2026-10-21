@@ -330,7 +330,11 @@ public class VoxyRenderSystem {
             return null;
         }
         if (this.viewportMatches(viewport, matrices, cameraX, cameraY, cameraZ)) {
-            return viewport;
+            // A stationary camera can still change detail settings or resize the window
+            // without changing its aspect ratio. Refresh using the main target size, not
+            // Sodium/Iris's temporary GL viewport; keep this viewport's buffers and identity.
+            int[] size = this.mainViewportSize();
+            return size == null ? null : viewport.setScreenSize(size[0], size[1]).update();
         }
         // 不同通道，或 /voxy reload 后主相机面对仍是 0 尺寸的默认视口。按渲染目标尺寸区分：
         // 主通道的目标就是主窗口，副通道则是尺寸永远不等于窗口的离屏帧缓冲。

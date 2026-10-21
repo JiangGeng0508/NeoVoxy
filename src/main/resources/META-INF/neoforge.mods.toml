@@ -46,14 +46,14 @@ file="META-INF/accesstransformer.cfg"
 [[dependencies.${mod_id}]]
     modId="sodium"
     type="required"
-    versionRange="[0.8.12,)"
+    versionRange="${sodium_version_range}"
     ordering="AFTER"
     side="CLIENT"
 
 [[dependencies.${mod_id}]]
     modId="iris"
     type="optional"
-    versionRange="[1.8.12,)"
+    versionRange="${iris_version_range}"
     ordering="AFTER"
     side="CLIENT"
 

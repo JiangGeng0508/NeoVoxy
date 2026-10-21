@@ -83,7 +83,8 @@ public class VoxyNeoForgeConfig {
     // ---- 远景生成（仅单人/集成服务器） --------------------------------
     private static final ModConfigSpec.BooleanValue DISTANT_GEN_ENABLED = BUILDER
             .comment("Keep the integrated server generating chunks around the player so Voxy can",
-                     "ingest terrain far beyond the vanilla view distance. Singleplayer/LAN host only.")
+                     "ingest terrain far beyond the vanilla view distance. Singleplayer/LAN host only.",
+                     "Default: false. Disabled automatically when Groundwork is installed.")
             .define("distantGenEnabled", false);
 
     private static final ModConfigSpec.IntValue DISTANT_GEN_RADIUS = BUILDER

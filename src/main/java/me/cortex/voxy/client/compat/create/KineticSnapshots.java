@@ -808,7 +808,7 @@ public final class KineticSnapshots {
             bucket.mesh.free();
             bucket.mesh = null;
         }
-        var builder = new DistantMeshBuilder();
+        var builder = new DistantMeshBuilder(true);
         try {
             var shaper = Minecraft.getInstance().getModelManager().getBlockModelShaper();
             var transform = new org.joml.Matrix4f();

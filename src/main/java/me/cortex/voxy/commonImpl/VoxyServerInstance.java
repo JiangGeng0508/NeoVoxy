@@ -225,6 +225,9 @@ public class VoxyServerInstance extends VoxyInstance {
                 buf.get(data);
             } catch (Exception e) {
                 Logger.error("Voxy failed serializing requested section", e);
+                // This is a transient failure, not confirmation that terrain is absent.
+                // Leave the request unanswered so the client's timeout can retry it.
+                return;
             } finally {
                 section.release();
             }

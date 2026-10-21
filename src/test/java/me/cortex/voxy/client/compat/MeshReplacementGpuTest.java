@@ -147,13 +147,21 @@ class MeshReplacementGpuTest {
     }
 
     private static DistantMesh mesh() {
-        var builder = new DistantMeshBuilder();
+        var builder = new DistantMeshBuilder(true);
         try {
-            builder.rawVertex(0, 0, 0, 0, 0, 15, 15, 1, 0, 0xFFFFFF);
-            builder.rawVertex(1, 0, 0, 1, 0, 15, 15, 1, 0, 0xFFFFFF);
-            builder.rawVertex(1, 1, 0, 1, 1, 15, 15, 1, 0, 0xFFFFFF);
-            builder.rawVertex(0, 1, 0, 0, 1, 15, 15, 1, 0, 0xFFFFFF);
-            return builder.build();
+            // Subdivide a unit plane so the 1/4 and 1-block grids actually collapse
+            // vertices. A 16-block plane with integer vertices has no coarse levels.
+            for (int y = 0; y < 16; y++) for (int x = 0; x < 16; x++) {
+                float x0 = x / 16f, x1 = (x + 1) / 16f;
+                float y0 = y / 16f, y1 = (y + 1) / 16f;
+                builder.rawVertex(x0, y0, 0, x0, y0, 15, 15, 1, 3, 0xFFFFFF);
+                builder.rawVertex(x1, y0, 0, x1, y0, 15, 15, 1, 3, 0xFFFFFF);
+                builder.rawVertex(x1, y1, 0, x1, y1, 15, 15, 1, 3, 0xFFFFFF);
+                builder.rawVertex(x0, y1, 0, x0, y1, 15, 15, 1, 3, 0xFFFFFF);
+            }
+            var mesh = builder.build();
+            assertTrue(mesh.gpuByteSize() > (long) mesh.quadCount() * 128);
+            return mesh;
         } finally {
             builder.discard();
         }
@@ -163,6 +171,10 @@ class MeshReplacementGpuTest {
         try {
             assertEquals(allocated, glIsBuffer((int) get(mesh, "vbo")));
             assertEquals(allocated, glIsVertexArray((int) get(mesh, "vao")));
+            for (String name : new String[]{"lodBuffer", "coarseVbo"}) {
+                int buffer = get(mesh, name);
+                if (buffer != 0) assertEquals(allocated, glIsBuffer(buffer), name);
+            }
         } catch (Exception e) {
             throw new AssertionError(e);
         }

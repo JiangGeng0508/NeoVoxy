@@ -106,7 +106,8 @@ public final class CarriageMeshBaker {
         }
 
         var dispatcher = Minecraft.getInstance().getBlockRenderer();
-        var builder = new DistantMeshBuilder();
+        // The builder retains full geometry if any block uses a translucent/unknown layer.
+        var builder = new DistantMeshBuilder(true);
         var cursor = new BlockPos.MutableBlockPos();
         var slice = new GridSlice(grid);
         var kineticTransform = new org.joml.Matrix4f();

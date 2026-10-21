@@ -58,7 +58,7 @@ public final class DistantBogeyMeshes {
             }
             size = it.next();
         }
-        var builder = new DistantMeshBuilder();
+        var builder = new DistantMeshBuilder(true);
         var capture = new CaptureBufferSource(builder);
         try {
             //BogeyStyle.render applies the -1.5078125 offset internally, so the snapshot bakes it in
@@ -86,6 +86,14 @@ public final class DistantBogeyMeshes {
 
         @Override
         public VertexConsumer getBuffer(RenderType type) {
+            // A style may use multiple streams. Finish the previous vertex before switching.
+            this.flush();
+            var atlas = net.minecraft.world.inventory.InventoryMenu.BLOCK_ATLAS;
+            if (type != RenderType.solid() && type != RenderType.cutout() && type != RenderType.cutoutMipped()
+                    && type != RenderType.entitySolid(atlas) && type != RenderType.entityCutout(atlas)
+                    && type != RenderType.entityCutoutNoCull(atlas)) {
+                this.builder.preserveGeometry();
+            }
             return this;
         }
 
@@ -131,6 +139,7 @@ public final class DistantBogeyMeshes {
 
         @Override
         public VertexConsumer setColor(int r, int g, int b, int a) {
+            if (a < 255) this.builder.preserveGeometry();
             return this;
         }
 
