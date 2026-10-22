@@ -425,6 +425,27 @@ public class Mapper {
         return out;
     }
 
+    /** Small append-only windows for paced network synchronization. */
+    public StateEntry[] getStateEntries(int start, int count) {
+        this.blockLock.lock();
+        try {
+            return this.blockId2stateEntry.subList(start, Math.min(this.blockId2stateEntry.size(), start + count))
+                    .toArray(StateEntry[]::new);
+        } finally {
+            this.blockLock.unlock();
+        }
+    }
+
+    public BiomeEntry[] getBiomeEntries(int start, int count) {
+        this.biomeLock.lock();
+        try {
+            return this.biomeId2biomeEntry.subList(start, Math.min(this.biomeId2biomeEntry.size(), start + count))
+                    .toArray(BiomeEntry[]::new);
+        } finally {
+            this.biomeLock.unlock();
+        }
+    }
+
     public BiomeEntry[] getBiomeEntries() {
         this.biomeLock.lock();
         var set = new ArrayList<>(this.biomeId2biomeEntry);

@@ -1,13 +1,13 @@
 # 自动验证
 
-使用 Java 21 和仓库内 Gradle wrapper。依赖已缓存时可添加 `--offline`；CPU 回归仍需 NeoForge 的类加载环境及 RocksDB 原生库，不需要启动游戏世界或创建 OpenGL 上下文。
+使用 Java 21、Python 3.11+ 和仓库内 Gradle wrapper。依赖已缓存时可添加 `--offline`；CPU 回归仍需 NeoForge 的类加载环境及 RocksDB 原生库，不需要启动游戏世界或创建 OpenGL 上下文。Python 用于 mixin 静态检查。
 
 ```powershell
 .\gradlew.bat check --console=plain
 .\gradlew.bat build --console=plain
 ```
 
-`check` 直接依赖 `testJunit` 和 `checkLangKeys`，`build` 通过 `check` 运行测试与语言检查。普通 Java `test` 任务仅作为依赖 `testJunit` 的入口，自身禁用，因此日志中的 `:test SKIPPED` 是预期行为；应查看 `:testJunit` 及其报告。未更改输入时 Gradle 可复用有效测试结果；需要强制重新执行测试时使用：
+`check` 直接依赖 `testJunit`、`checkLangKeys` 和 `validateMixins`，`build` 通过 `check` 运行全部检查。Mixin 检查依赖 `classes/slimJar`，因此 `check` 也会生成并检查最终分发 JAR。普通 Java `test` 任务仅作为依赖 `testJunit` 的入口，自身禁用，因此日志中的 `:test SKIPPED` 是预期行为；应查看 `:testJunit` 及其报告。未更改输入时 Gradle 可复用有效测试结果；需要强制重新执行测试时使用：
 
 ```powershell
 .\gradlew.bat testJunit --rerun --console=plain
@@ -39,6 +39,32 @@ python scripts/verify-lang-keys.py
 报告为 `build/reports/lang-keys/check.json`，包含状态、各语言键数、静态键的源码行号、动态调用位置和错误。失败时控制台也会列出缺键及引用位置。解析错误、缺语言或源码目录、非字符串/空白翻译、键集合差异及缺少静态键都会使 `checkLangKeys`、`check` 和 `build` 返回失败。
 
 独立验证脚本不修改项目源码或语言文件，在 `build/reports/lang-keys/fixtures-*` 保留每个夹具及 Gradle 日志，汇总到 `fixture-verification.json`。它验证静态/动态区分、注释与转义处理、双语同时缺键、间接消息键、缺语言、额外语言不完整、无效内容及源码缺失/解析错误，不需要 NeoForge 测试环境。
+
+## Mixin 静态与打包检查
+
+```powershell
+.\gradlew.bat validateMixins --console=plain
+# 可指定 Python 路径；默认 Windows 用 python，其他系统用 python3
+.\gradlew.bat validateMixins "-PpythonExecutable=C:/Python313/python.exe"
+# 先生成上述入口的 inputs.json，再验证检查器本身（JAVA_HOME 或 PATH 中需有 JDK 21）
+python scripts/verify-mixins.py
+```
+
+`writeMixinValidationInputs` 导出当前 Gradle 编译类路径，包括 NeoForge 映射后的 Minecraft、Sodium 内层 JAR 和 Create/Sable 的提取依赖。检查器读取编译后的 class 文件及注解，不加载目标类，不搜索其他工程的缓存或选择不确定版本的 JAR。`validateMixins` 每次执行，Python、脚本、依赖路径缺失或检查器异常均失败；没有缺工具就跳过的 `onlyIf`。
+
+检查分为三部分：
+
+- 配置：源码中的 mixin JSON 必须与 NeoForge metadata 一致；JSON 和插件 `getMixins()` 的字面量 `mixins.add(...)` 注册必须对应编译后的 `@Mixin` 类，重复或遗漏注册失败。当前插件之外的动态注册写法会要求扩展检查器；不执行插件的运行时条件。历史上未注册的 `eclipticseasons.MixinWorldImporter` 在 `scripts/mixin-validation.json` 中明确排除，保留原因，新增漏注册不能自动进入排除列表。
+- 目标与成员：逐个检查每个 mixin 的所有目标，校验目标自己声明的 `@Shadow`、`@Accessor`、`@Invoker`、`@Overwrite` 成员及 JVM 描述符/静态属性。注入选择器含描述符时严格匹配；裸方法名检查实际匹配的方法，并进一步核对 `@Inject` 回调参数、`WrapMethod` 参数/返回值和 `ModifyReturnValue` 返回类型。构造器和静态初始化器必须实际存在，不把继承成员当成目标自己声明的成员。
+- 分发包：检查 `slimJar` 的最终 JAR，确认 metadata、所有 mixin JSON、配置声明的 refmap、注册类和插件类齐全；JSON 与编译后的 mixin/plugin 字节必须和当前工程一致，避免沿用旧产物。重复 ZIP 条目也会失败。
+
+目标默认必需，运行时可选但已列为编译依赖的 Iris、Create、Sable 等也必须可解析。当前仅允许 5 个具体外部目标在其整个包命名空间都不存在时跳过：Simple Backups、Sodium Extra、Aeronautics、Simulated、Replay。报告逐项记录目标与插件条件；若模组已存在但目标类被删除/改名，或者目标存在但签名不符，检查仍失败。可用 `"-PmixinExtraClasspath=D:/mods/optional.jar;D:/mods/another.jar"` 添加可选模组的类 JAR（非 Windows 用 `:` 分隔）；嵌套 JAR 需单独提供。`require=0` 允许方法名完全不存在并单独记录，不能掩盖同名方法描述符变化。
+
+结构化报告位于 `build/reports/mixins/check.json`，记录注册/排除清单、逐目标和成员检查、可选跳过及错误。任务开始标记 `running`，检查器正常完成才写 `passed/failed`；Python 或脚本无法启动时保留 `running`，构建返回失败。隔离夹具、日志及汇总保存在 `build/reports/mixins/fixtures-*` 和 `fixture-verification.json`。
+
+静态检查不模拟 Mixin 变换器：不验证 `@At` 的实际命中次数、ordinal/slice、局部变量捕获、重映射或其他模组先注入的字节码；`Redirect/WrapOperation/ModifyArg` 等基于注入位置的处理器仅检查外层方法选择器。运行时插件条件和完整游戏组合仍需 V1/V2 验收。这里的静态成功不能替代启动游戏后的 mixin 应用检查。
+
+回调参数支持本项目 Simulated/Replay 使用的 `@Coerce Object` 引用转换；读取参数注解后才允许，未标注的类型变化和 Object 对应基本类型仍失败。其他更复杂的强制转换规则需要扩展检查器。
 
 ## 参考验证的覆盖映射
 
@@ -92,6 +118,16 @@ python scripts/summarize-gpu-tests.py --expect-run --output build/reports/gpu-su
 
 `build/test-results/testJunit-run.json` 在执行开始时标记 running，只有测试任务成功结束才改为 passed。汇总脚本同时检查该标记及 XML 时间戳，拒绝把失败/中断后残留的旧 XML 当作新结果。归档时同时保留 XML 目录和标记文件；读取其他目录可使用 `--results <目录> --run-status <标记文件>`。脚本总结已有证据，时间戳不代表又执行了一次硬件验证。
 
+## 服务端更新背压
+
+`LodServerSchedulerTest` / `LodUpdateRecoveryTest` 覆盖多人共享预算、单人限额、映射先行、请求去重和边界、慢连接/发送/读取失败、并发更新与旧确认、扫描释放存储迭代器、退出唤醒，以及为实时更新保留容量。真实双客户端压力测试与复跑命令见 [运行说明](../scripts/network-stress/README.md)。
+
+生产调度器的限制为：更新队列 2,048 个 key；每人 512 个待响应 key；每 tick 全服最多 32 个包及 2 MiB，每人最多 8 个包及 512 KiB。以上预算合计握手、映射、拉取响应与广播，广播按接收人数逐人计费。一个最大序列化区段约 320 KiB，可在单人单 tick 预算内发送。连接不可写时保留 key；入队不保留序列化字节或区段引用。
+
+溢出按维度标记补发。单个后台线程先把已知区段 key 写入临时文件，释放存储迭代器后按需回填队列；文件占用每个捕获 key 8 字节，活动区段和已落盘区段可以重复。扫描最多使用一半队列容量，为新的实时更新留空间，避免扫描本身使少量新更新反复溢出。关闭会中断扫描并删除临时文件，扫描失败保留修复标记。此方案限制队列内存，但全库扫描有额外磁盘读取和补发带宽成本。
+
+范围过滤使用同维度、区段完整水平边界和最大支持半径 32,768 方块。现有协议未传送客户端视距，所以不是按客户端实际视距精确订阅；不修改协议版本，已有客户端可继续连接。
+
 ## 验证记录与边界
 
 T1 在 2026-10-21 实测普通 `check` 为 92 项通过、20 项 GPU 跳过，启用 GPU 的 `build` 为 112 项通过；故意注入的 JUnit 断言让 `check/build` 均返回退出码 1，无匹配测试过滤器也返回 1。T2 新增 10 项 GPU 测试后，共 32 个测试类、122 项，其中 30 项需显式启用 GPU。以当次 XML 报告为准，不把 skipped 当成 passed。
@@ -99,5 +135,7 @@ T1 在 2026-10-21 实测普通 `check` 为 92 项通过、20 项 GPU 跳过，�
 T2 最终两次相同的 GPU `build` 均实际运行并通过全部 122 项；旧 init 入口的 GPU-only 检查通过 30 项。模拟 GLFW 库不可用时，报告 NOT RUN 和初始化失败，退出码 1，完成标记保持 running。一次前期 GPU-only 运行曾在测试结果产生前原生退出，未定位原因；后续诊断运行与两次正式构建未复现，不将其描述为已修复的生产问题。
 
 T3 在 2026-10-21 验证中英各 216 个键一致、127 个静态键齐全，并列出 5 处动态调用。18 项独立检查器夹具全部通过；实际工程中从两种语言同时移除 `voxy.config.distantGen.enabled` 后，`check/build` 均因静态缺键返回退出码 1。语言文件按原字节恢复，普通完整构建为 92 项通过、30 项 GPU 跳过，分发 JAR 哈希与 T2 相同。日志及结构化结果保存在 `build/reports/lang-keys/`。
+
+T4 在 2026-10-21 验证 86 个已注册 mixin、96 个 mixin/目标组合（86 个不同目标类）和 255 项成员/回调检查，5 个缺少依赖的可选目标明确列出。33 项真实 class 文件夹具全部通过；实际 Gradle 入口注入缺少 Sodium 编译目标与最终 JAR 缺少配置两种故障，分别令 `check/build` 返回 1。Python 不可用、脚本不存在也均失败，报告停在 running。最终正常 `build` 成功并复用有效的 92 项通过、30 项 GPU 跳过结果；本批未启用 GPU，分发 JAR 哈希保持不变。证据保存在 `build/reports/mixins/`。
 
 这些回归验证代码契约和指定 OpenGL 行为。shader-pack 片段输出使用测试桩，不能代替实际 Iris 光影包验收；完整世界画面、实际联动、Vista 副视口与长期多人负载仍需游戏验收。模型性能对照另见 [基准运行说明](../scripts/model-lod-benchmark/README.md)。

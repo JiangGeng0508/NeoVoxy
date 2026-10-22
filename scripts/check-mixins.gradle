@@ -1,0 +1,48 @@
+def mixinInputs = layout.buildDirectory.file('reports/mixins/inputs.json')
+def mixinReport = layout.buildDirectory.file('reports/mixins/check.json')
+def mixinPolicy = layout.projectDirectory.file('scripts/mixin-validation.json')
+def validationRoot = layout.projectDirectory.asFile.absolutePath
+def compiledClasses = sourceSets.main.output.classesDirs
+def distributionJar = layout.buildDirectory.file("libs/${base.archivesName.get()}-${project.version}.jar")
+def mixinScripts = fileTree('scripts') { include 'validate_mixin_targets.py', 'mixin_classfile.py' }
+def extraClasspath = providers.gradleProperty('mixinExtraClasspath').map { it.split(File.pathSeparator).toList() }.getOrElse([])
+def verificationClasspath = files(sourceSets.main.compileClasspath, extraClasspath)
+
+def writeMixinInputs = tasks.register('writeMixinValidationInputs') {
+    dependsOn tasks.named('classes')
+    inputs.files(verificationClasspath)
+    outputs.file(mixinInputs)
+    outputs.upToDateWhen { false }
+    doLast {
+        def data = [root: validationRoot,
+                    classes: compiledClasses.files.collect { it.absolutePath },
+                    classpath: verificationClasspath.files.collect { it.absolutePath },
+                    jar: distributionJar.get().asFile.absolutePath,
+                    policy: mixinPolicy.asFile.absolutePath]
+        def destination = mixinInputs.get().asFile
+        destination.parentFile.mkdirs()
+        destination.setText(groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(data)), 'UTF-8')
+    }
+}
+
+tasks.register('validateMixins', Exec) {
+    group = 'verification'
+    description = 'Checks registered mixins, target descriptors and the final distributable JAR.'
+    dependsOn writeMixinInputs, tasks.named('slimJar')
+    inputs.files(mixinScripts, mixinPolicy, mixinInputs, verificationClasspath, sourceSets.main.allSource,
+            sourceSets.main.output.classesDirs)
+    inputs.files(distributionJar)
+    outputs.file(mixinReport)
+    outputs.upToDateWhen { false }
+    def python = providers.gradleProperty('pythonExecutable').getOrElse(
+            System.getProperty('os.name').toLowerCase(Locale.ROOT).contains('windows') ? 'python' : 'python3')
+    environment 'PYTHONIOENCODING', 'utf-8'
+    commandLine python, 'scripts/validate_mixin_targets.py', '--inputs', mixinInputs.get().asFile,
+            '--report', mixinReport.get().asFile
+    // Missing Python/scripts and nonzero validator results are failures, never onlyIf skips.
+    doFirst {
+        mixinReport.get().asFile.setText('{"state":"running"}\n', 'UTF-8')
+    }
+}
+
+tasks.named('check') { dependsOn tasks.named('validateMixins') }

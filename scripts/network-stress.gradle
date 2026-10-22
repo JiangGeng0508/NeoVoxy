@@ -1,0 +1,37 @@
+import groovy.json.JsonOutput
+
+// Optional real multiplayer verification; probe sources never enter a normal build.
+allprojects {
+    afterEvaluate {
+        sourceSets.main.java.srcDir 'scripts/network-stress/src'
+        def base = layout.buildDirectory.dir('reports/network-stress').get().asFile
+        runs.named('server') {
+            workingDirectory new File(base, 'server')
+            systemProperty 'voxy.networkStress', base.absolutePath
+        }
+        runs.named('client') {
+            workingDirectory new File(base, 'client')
+            systemProperty 'voxy.networkStress', base.absolutePath
+            argument '--quickPlayMultiplayer'
+            argument '127.0.0.1:' + project.findProperty('stressPort')
+        }
+        tasks.register('writeNetworkStressLaunch') {
+            dependsOn 'classes', 'neoFormJoined1.21.1-20240808.144430DownloadAssets',
+                    'neoFormJoined1.21.1-20240808.144430ExtractNatives',
+                    'writeMinecraftClasspathClient', 'writeMinecraftClasspathServer'
+            doLast {
+                for (def name : ['runServer', 'runClient']) {
+                    def run = tasks.named(name).get()
+                    def output = new File(base, name + '.json')
+                    output.parentFile.mkdirs()
+                    output.text = JsonOutput.toJson([
+                        executable: run.javaLauncher.get().executablePath.asFile.absolutePath, workingDirectory: run.workingDir.absolutePath,
+                        args: run.allJvmArgs + ['-cp', run.classpath.asPath, run.mainClass.get()] + run.args,
+                        modClasses: run.environment['MOD_CLASSES']
+                    ])
+                }
+                copy { from configurations.sodiumOuter.singleFile; into new File(base, 'client/mods') }
+            }
+        }
+    }
+}

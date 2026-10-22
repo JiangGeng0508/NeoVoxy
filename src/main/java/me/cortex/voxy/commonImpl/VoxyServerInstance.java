@@ -7,8 +7,11 @@ import me.cortex.voxy.common.config.section.SectionStorage;
 import me.cortex.voxy.common.config.section.SectionStorageConfig;
 import me.cortex.voxy.common.world.SaveLoadSystem3;
 import me.cortex.voxy.common.world.WorldEngine;
-import me.cortex.voxy.common.world.WorldSection;
 import me.cortex.voxy.commonImpl.network.VoxyNetwork;
+import me.cortex.voxy.commonImpl.network.LodServerScheduler;
+import me.cortex.voxy.commonImpl.network.LodUpdateQueue;
+import me.cortex.voxy.commonImpl.network.LodUpdateRecovery;
+import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
@@ -18,7 +21,8 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentLinkedDeque;
+import java.util.UUID;
+import java.util.concurrent.CancellationException;
 
 /**
  * Dedicated-server voxy instance: ingests chunks into a server-side LOD store and
@@ -27,7 +31,6 @@ import java.util.concurrent.ConcurrentLinkedDeque;
  */
 public class VoxyServerInstance extends VoxyInstance {
     private static final int MAP_BATCH_SIZE = 128;
-    private static final int MAX_OUTBOUND_PER_TICK = 32;
 
     private final MinecraftServer server;
     private final Path basePath;
@@ -39,12 +42,11 @@ public class VoxyServerInstance extends VoxyInstance {
     /** Engines that already have broadcast/mapping hooks attached. */
     private final ConcurrentHashMap<WorldIdentifier, WorldEngine> hookedEngines = new ConcurrentHashMap<>();
 
-    /** Single FIFO outbound queue, preserves mapping-before-section causality. */
-    private final ConcurrentLinkedDeque<Outbound> outbound = new ConcurrentLinkedDeque<>();
-
-    private sealed interface Outbound permits MappingOutbound, SectionOutbound {}
-    private record MappingOutbound(String dimension, VoxyNetwork.MappingDeltaS2C payload) implements Outbound {}
-    private record SectionOutbound(String dimension, WorldIdentifier wid, long sectionKey, byte[] data) implements Outbound {}
+    private final LodServerScheduler scheduler = new LodServerScheduler();
+    private Thread recovery;
+    private int recoveryCooldown;
+    private volatile long recoverySweeps, recoverySpoolBytes;
+    private volatile boolean networkClosed;
 
     public VoxyServerInstance(MinecraftServer server) {
         super();
@@ -98,15 +100,10 @@ public class VoxyServerInstance extends VoxyInstance {
             return;//Same engine instance already hooked
         }
         final String dim = identifier.key.location().toString();
-        final var eng = engine;
-        final var wid = identifier;
-        eng.setDirtyCallback((section, updateFlags, neighborMsk) -> this.onSectionDirty(dim, wid, eng, section));
-        var mapper = eng.getMapper();
-        mapper.setStateCallback(entry -> {
-            if (!this.voxyClients.isEmpty()) this.outbound.add(new MappingOutbound(dim, VoxyNetwork.MappingDeltaS2C.block(entry.id, entry.serialize())));
-        });
-        mapper.setBiomeCallback(entry -> {
-            if (!this.voxyClients.isEmpty()) this.outbound.add(new MappingOutbound(dim, VoxyNetwork.MappingDeltaS2C.biome(entry.id, entry.biome)));
+        engine.setDirtyCallback((section, flags, neighbors) -> {
+            if (!this.networkClosed && this.isRunning()) {
+                this.scheduler.dirty(new LodUpdateQueue.Key(dim, section.key));
+            }
         });
     }
 
@@ -118,172 +115,182 @@ public class VoxyServerInstance extends VoxyInstance {
         return this.getOrCreateHooked(wid, level.dimension().location().toString());
     }
 
-    private void onSectionDirty(String dimension, WorldIdentifier wid, WorldEngine engine, WorldSection section) {
-        if (!this.isRunning() || this.voxyClients.isEmpty()) {
-            return;
-        }
-        //Runs on the ingest worker while the updater still holds the section: data is stable here.
-        try {
-            var serialized = SaveLoadSystem3.serialize(section);
-            var buf = serialized.asByteBuffer();
-            var bytes = new byte[buf.remaining()];
-            buf.get(bytes);
-            this.outbound.add(new SectionOutbound(dimension, wid, section.key, bytes));
-        } catch (Exception e) {
-            Logger.error("Voxy failed serializing dirty section for broadcast", e);
-        }
+    private static LodServerScheduler.View view(ServerPlayer player) {
+        return new LodServerScheduler.View(player.getUUID(), player.serverLevel().dimension().location().toString(),
+                player.getX(), player.getZ());
     }
 
-    // ---------- client tracking ----------
-
-    public boolean isVoxyClient(java.util.UUID uuid) {
+    public boolean isVoxyClient(UUID uuid) {
         return this.voxyClients.contains(uuid);
     }
 
     public void onClientHello(ServerPlayer player) {
-        if (!this.isRunning()) {
-            return;
-        }
-        boolean first = this.voxyClients.add(player.getUUID());
-        VoxyNetwork.sendToPlayer(player, new VoxyNetwork.HelloS2C(VoxyNetwork.PROTOCOL_VERSION));
-        if (first) {
+        if (!this.isRunning() || this.networkClosed) return;
+        if (this.voxyClients.add(player.getUUID())) {
             Logger.info("Voxy client connected: " + player.getGameProfile().getName());
         }
-        var level = player.serverLevel();
-        var engine = this.getEngineForLevel(level);
-        if (engine != null) {
-            this.sendFullMappings(player, engine);
-        }
+        this.scheduler.hello(view(player));
     }
 
     public void onPlayerLogout(ServerPlayer player) {
         this.voxyClients.remove(player.getUUID());
+        this.scheduler.logout(player.getUUID());
     }
 
-    /** Re-announces support and re-sends the mapping sync for the player's new dimension. */
     public void resyncPlayer(ServerPlayer player) {
-        if (!this.isRunning() || !this.voxyClients.contains(player.getUUID())) {
-            return;
-        }
-        VoxyNetwork.sendToPlayer(player, new VoxyNetwork.HelloS2C(VoxyNetwork.PROTOCOL_VERSION));
-        var engine = this.getEngineForLevel(player.serverLevel());
-        if (engine != null) {
-            this.sendFullMappings(player, engine);
+        if (this.isRunning() && this.voxyClients.contains(player.getUUID())) {
+            this.scheduler.hello(view(player));
         }
     }
-
-    private void sendFullMappings(ServerPlayer player, WorldEngine engine) {
-        try {
-            var states = engine.getMapper().getStateEntries();
-            for (int start = 0; start < states.length; start += MAP_BATCH_SIZE) {
-                var batch = new ArrayList<byte[]>(Math.min(MAP_BATCH_SIZE, states.length - start));
-                for (int i = start; i < Math.min(states.length, start + MAP_BATCH_SIZE); i++) {
-                    batch.add(states[i].serialize());
-                }
-                VoxyNetwork.sendToPlayer(player, new VoxyNetwork.BlockMapBatchS2C(start, batch));
-            }
-            var biomes = engine.getMapper().getBiomeEntries();
-            for (int start = 0; start < biomes.length; start += MAP_BATCH_SIZE) {
-                var batch = new ArrayList<String>(Math.min(MAP_BATCH_SIZE, biomes.length - start));
-                for (int i = start; i < Math.min(biomes.length, start + MAP_BATCH_SIZE); i++) {
-                    batch.add(biomes[i].biome);
-                }
-                VoxyNetwork.sendToPlayer(player, new VoxyNetwork.BiomeMapBatchS2C(start, batch));
-            }
-        } catch (Exception e) {
-            Logger.error("Voxy failed sending mapping sync", e);
-        }
-    }
-
-    // ---------- section requests (pull) ----------
 
     public void onSectionRequest(ServerPlayer player, VoxyNetwork.SectionRequestC2S request) {
-        if (!this.isRunning() || !this.voxyClients.contains(player.getUUID())) {
-            return;
-        }
-        ServerLevel level = null;
-        for (var l : this.server.getAllLevels()) {
-            if (l.dimension().location().toString().equals(request.dimension())) {
-                level = l;
-                break;
-            }
-        }
-        if (level == null) {
-            return;
-        }
-        var engine = this.getEngineForLevel(level);
-        if (engine == null) {
-            return;
-        }
-        byte[] data = null;
-        var section = engine.acquireIfExists(request.lvl(), request.x(), request.y(), request.z());
-        if (section != null) {
-            try {
-                var serialized = SaveLoadSystem3.serialize(section);
-                var buf = serialized.asByteBuffer();
-                data = new byte[buf.remaining()];
-                buf.get(data);
-            } catch (Exception e) {
-                Logger.error("Voxy failed serializing requested section", e);
-                // This is a transient failure, not confirmation that terrain is absent.
-                // Leave the request unanswered so the client's timeout can retry it.
-                return;
-            } finally {
-                section.release();
-            }
-        }
-        VoxyNetwork.sendToPlayer(player, new VoxyNetwork.SectionDataS2C(
-                request.dimension(), request.lvl(), request.x(), request.y(), request.z(),
-                data == null ? new byte[0] : data));
+        if (!this.isRunning() || this.networkClosed) return;
+        this.scheduler.updateView(view(player));
+        this.scheduler.request(player.getUUID(), request);
     }
 
-    // ---------- per-tick broadcast drain (server thread) ----------
+    private final LodServerScheduler.Transport transport = new LodServerScheduler.Transport() {
+        @Override
+        public boolean writable(UUID id) {
+            var player = server.getPlayerList().getPlayer(id);
+            if (player == null) return false;
+            var connection = player.connection.getConnection();
+            return connection.isConnected() && connection.channel() != null && connection.channel().isWritable();
+        }
+
+        @Override
+        public LodServerScheduler.Mappings nextMappings(UUID id, int blockCursor, int biomeCursor, int credit) {
+            var player = server.getPlayerList().getPlayer(id);
+            if (player == null) throw new IllegalStateException("Player disconnected");
+            var engine = getEngineForLevel(player.serverLevel());
+            if (engine == null) throw new IllegalStateException("Missing world engine");
+            var states = engine.getMapper().getStateEntries(blockCursor, MAP_BATCH_SIZE);
+            if (states.length != 0) {
+                var entries = new ArrayList<byte[]>();
+                for (var state : states) {
+                    entries.add(state.serialize());
+                    // Keep an oversized first entry pending; never treat it as completed sync.
+                    if (VoxyNetwork.encodedSize(new VoxyNetwork.BlockMapBatchS2C(blockCursor, entries)) > credit) {
+                        if (entries.size() > 1) entries.removeLast();
+                        break;
+                    }
+                }
+                return new LodServerScheduler.Mappings(new VoxyNetwork.BlockMapBatchS2C(blockCursor, entries),
+                        blockCursor + entries.size(), biomeCursor);
+            }
+            var biomes = engine.getMapper().getBiomeEntries(biomeCursor, MAP_BATCH_SIZE);
+            if (biomes.length != 0) {
+                var entries = new ArrayList<String>();
+                for (var biome : biomes) {
+                    entries.add(biome.biome);
+                    if (VoxyNetwork.encodedSize(new VoxyNetwork.BiomeMapBatchS2C(biomeCursor, entries)) > credit) {
+                        if (entries.size() > 1) entries.removeLast();
+                        break;
+                    }
+                }
+                return new LodServerScheduler.Mappings(new VoxyNetwork.BiomeMapBatchS2C(biomeCursor, entries),
+                        blockCursor, biomeCursor + entries.size());
+            }
+            return null;
+        }
+
+        @Override
+        public VoxyNetwork.SectionDataS2C load(LodUpdateQueue.Key key) {
+            for (var level : server.getAllLevels()) {
+                if (!level.dimension().location().toString().equals(key.dimension())) continue;
+                var engine = getEngineForLevel(level);
+                if (engine == null) return null;
+                var section = engine.acquireIfExists(key.section());
+                byte[] data = new byte[0];
+                if (section != null) {
+                    try {
+                        var buffer = SaveLoadSystem3.serialize(section).asByteBuffer();
+                        data = new byte[buffer.remaining()];
+                        buffer.get(data);
+                    } finally {
+                        section.release();
+                    }
+                }
+                return new VoxyNetwork.SectionDataS2C(key.dimension(), WorldEngine.getLevel(key.section()),
+                        WorldEngine.getX(key.section()), WorldEngine.getY(key.section()), WorldEngine.getZ(key.section()), data);
+            }
+            return null;
+        }
+
+        @Override
+        public boolean send(UUID id, CustomPacketPayload payload) {
+            var player = server.getPlayerList().getPlayer(id);
+            return player != null && this.writable(id) && VoxyNetwork.trySendToPlayer(player, payload);
+        }
+    };
 
     public void tick() {
-        if (!this.isRunning()) {
-            return;
-        }
-        int sent = 0;
-        while (sent < MAX_OUTBOUND_PER_TICK) {
-            var msg = this.outbound.poll();
-            if (msg == null) {
-                break;
+        if (!this.isRunning() || this.networkClosed) return;
+        for (UUID id : this.voxyClients) {
+            var player = this.server.getPlayerList().getPlayer(id);
+            if (player == null) {
+                this.voxyClients.remove(id);
+                this.scheduler.logout(id);
+            } else {
+                this.scheduler.updateView(view(player));
             }
-            if (msg instanceof MappingOutbound m) {
-                this.broadcastInDimension(m.dimension, m.payload());
-                sent++;
-            } else if (msg instanceof SectionOutbound s) {
-                this.broadcastInDimension(s.dimension, new VoxyNetwork.SectionDataS2C(
-                        s.dimension,
-                        WorldEngine.getLevel(s.sectionKey), WorldEngine.getX(s.sectionKey),
-                        WorldEngine.getY(s.sectionKey), WorldEngine.getZ(s.sectionKey), s.data));
-                sent++;
+        }
+        this.scheduler.tick(this.transport);
+        if (--this.recoveryCooldown <= 0 && (this.recovery == null || !this.recovery.isAlive())) {
+            this.recoveryCooldown = 200; // Failed scans retry without a per-tick error loop.
+            this.startRecovery();
+        }
+    }
+
+    private void startRecovery() {
+        for (var repair : this.scheduler.updates.repairs().entrySet()) {
+            for (var level : this.server.getAllLevels()) {
+                if (!level.dimension().location().toString().equals(repair.getKey())) continue;
+                var engine = this.getOrCreate(WorldIdentifier.of(level), true);
+                if (engine == null) return;
+                // Hold the world across capture AND dispatch; shutdown joins before freeing engines.
+                this.recovery = new Thread(() -> {
+                    try {
+                        this.recoverySpoolBytes = LodUpdateRecovery.sweep(this.basePath.resolve("network-recovery"),
+                                repair.getKey(), repair.getValue(), this.scheduler.updates,
+                                engine::iterateKnownPositions, this.scheduler::interested);
+                        this.recoverySweeps++;
+                    } catch (InterruptedException | CancellationException ignored) {
+                        Thread.currentThread().interrupt();
+                    } catch (Exception e) {
+                        Logger.error("Voxy LOD recovery failed; repair remains pending", e);
+                    } finally {
+                        engine.releaseRef();
+                    }
+                }, "Voxy LOD recovery");
+                this.recovery.setDaemon(true);
+                this.recovery.start();
+                return;
             }
         }
     }
 
-    private void broadcastInDimension(String dimension, VoxyNetwork.SectionDataS2C sectionPayload) {
-        broadcastInDimension(dimension, (VoxyNetwork.MappingDeltaS2C) null, sectionPayload);
-    }
+    public LodServerScheduler.Stats networkStats() { return this.scheduler.stats(); }
+    public LodUpdateQueue.Stats updateStats() { return this.scheduler.updates.stats(); }
+    public long recoverySweeps() { return this.recoverySweeps; }
+    public long recoverySpoolBytes() { return this.recoverySpoolBytes; }
 
-    private void broadcastInDimension(String dimension, VoxyNetwork.MappingDeltaS2C delta) {
-        broadcastInDimension(dimension, delta, null);
-    }
-
-    private void broadcastInDimension(String dimension, VoxyNetwork.MappingDeltaS2C delta, VoxyNetwork.SectionDataS2C section) {
-        for (var player : this.server.getPlayerList().getPlayers()) {
-            if (!this.voxyClients.contains(player.getUUID())) {
-                continue;
+    @Override
+    public void shutdown() {
+        this.networkClosed = true;
+        this.scheduler.close();
+        this.voxyClients.clear();
+        if (this.recovery != null) {
+            this.recovery.interrupt();
+            boolean interrupted = false;
+            while (this.recovery.isAlive()) {
+                try { this.recovery.join(1000); }
+                catch (InterruptedException ignored) { interrupted = true; }
             }
-            if (dimension != null && !player.serverLevel().dimension().location().toString().equals(dimension)) {
-                continue;
-            }
-            if (delta != null) {
-                VoxyNetwork.sendToPlayer(player, delta);
-            } else if (section != null) {
-                VoxyNetwork.sendToPlayer(player, section);
-            }
+            if (interrupted) Thread.currentThread().interrupt();
         }
+        this.hookedEngines.clear();
+        super.shutdown();
     }
 
     private static class Config {

@@ -1,0 +1,27 @@
+{
+  "inactiveMixins": {
+    "me.cortex.voxy.client.mixin.eclipticseasons.MixinWorldImporter": "Legacy importer mixin is already unregistered; do not enable it as part of build validation."
+  },
+  "optionalTargets": {
+    "de.melanx.simplebackups.BackupThread": {
+      "prefix": "de.melanx.simplebackups.",
+      "reason": "Simple Backups is not a compile dependency; CommonVoxyMixinPlugin gates it by simplebackups."
+    },
+    "dev.eriksonn.aeronautics.content.blocks.hot_air.balloon.effect.ClientBalloonEffectRenderer": {
+      "prefix": "dev.eriksonn.aeronautics.",
+      "reason": "Aeronautics is not a compile dependency; ClientVoxyMixinPlugin gates it by aeronautics."
+    },
+    "com.replaymod.replay.ReplayModReplay": {
+      "prefix": "com.replaymod.",
+      "reason": "Replay support has no compile dependency; ClientVoxyMixinPlugin gates it by reforgedplay/replaymod."
+    },
+    "dev.simulated_team.simulated.content.blocks.lasers.AbstractLaserRenderer": {
+      "prefix": "dev.simulated_team.simulated.",
+      "reason": "Simulated is not a compile dependency; ClientVoxyMixinPlugin gates it by simulated."
+    },
+    "me.flashyreese.mods.sodiumextra.client.fog.FogDistanceHelper": {
+      "prefix": "me.flashyreese.mods.sodiumextra.",
+      "reason": "Sodium Extra is not a compile dependency; ClientVoxyMixinPlugin gates it by sodium_extra."
+    }
+  }
+}

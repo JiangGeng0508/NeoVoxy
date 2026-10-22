@@ -112,6 +112,13 @@ public class WorldEngine {
         return this.sectionTracker.acquire(pos, true);
     }
 
+    /** Caller holds an engine reference. Dirty sections remain active until their save commits. */
+    public void iterateKnownPositions(java.util.function.LongConsumer consumer) {
+        // Active first: a section unloaded between these passes is already in persistent storage.
+        this.sectionTracker.iterateActivePositions(consumer);
+        this.storage.iteratePositions(-1, consumer);
+    }
+
     public static final int POS_FORMAT_VERSION = 1;
 
     /**

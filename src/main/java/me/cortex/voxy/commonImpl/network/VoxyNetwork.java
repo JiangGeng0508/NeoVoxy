@@ -30,7 +30,8 @@ import java.util.function.Consumer;
  *       {@link BiomeMapBatchS2C} / {@link MappingDeltaS2C}) received beforehand.</li>
  *   <li>Sections are pulled on demand: the client requests a section when its local
  *       store reports a miss, the server answers with {@link SectionDataS2C}. Live
- *       updates are pushed to all voxy clients in the same dimension.</li>
+ *       updates are pushed to voxy clients in the same dimension within the maximum
+ *       supported LoD radius, sharing bounded dispatch credit with pull responses.</li>
  * </ul>
  */
 public final class VoxyNetwork {
@@ -228,11 +229,45 @@ public final class VoxyNetwork {
     // ---------- send helpers ----------
 
     public static void sendToPlayer(ServerPlayer player, CustomPacketPayload payload) {
+        trySendToPlayer(player, payload);
+    }
+
+    public static boolean trySendToPlayer(ServerPlayer player, CustomPacketPayload payload) {
         try {
             PacketDistributor.sendToPlayer(player, payload);
+            return true;
         } catch (Exception e) {
             Logger.error("Voxy failed sending packet to player", e);
+            return false;
         }
+    }
+
+    /** Uncompressed payload + channel id, with 16 bytes reserved for packet/framing overhead.
+     * TCP/IP, encryption and compression overhead are outside this accounting. */
+    public static int encodedSize(CustomPacketPayload payload) {
+        int size = 16 + stringSize(payload.type().id().toString());
+        return size + switch (payload) {
+            case HelloS2C p -> varIntSize(p.version());
+            case BlockMapBatchS2C p -> varIntSize(p.startId()) + varIntSize(p.entries().size())
+                    + p.entries().stream().mapToInt(e -> varIntSize(e.length) + e.length).sum();
+            case BiomeMapBatchS2C p -> varIntSize(p.startId()) + varIntSize(p.entries().size())
+                    + p.entries().stream().mapToInt(VoxyNetwork::stringSize).sum();
+            case MappingDeltaS2C p -> 1 + varIntSize(p.id()) + varIntSize(p.data().length) + p.data().length;
+            case SectionDataS2C p -> stringSize(p.dimension()) + varIntSize(p.lvl()) + 12
+                    + varIntSize(p.data().length) + p.data().length;
+            default -> throw new IllegalArgumentException("Not a LOD server payload: " + payload.type());
+        };
+    }
+
+    private static int varIntSize(int value) {
+        int size = 1;
+        while ((value & ~127) != 0) { size++; value >>>= 7; }
+        return size;
+    }
+
+    private static int stringSize(String value) {
+        int length = value.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+        return varIntSize(length) + length;
     }
 
     public static void sendToServer(CustomPacketPayload payload) {

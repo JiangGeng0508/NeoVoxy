@@ -447,6 +447,7 @@ tasks.named('processTestResources', ProcessResources).configure {
 }
 
 apply from: 'scripts/check-lang-keys.gradle'
+apply from: 'scripts/check-mixins.gradle'
 
 // Minecraft and mod classes need NeoForge's transforming classloader (testJunit).
 // Keep check wired directly to the real suite; test remains a convenient alias.

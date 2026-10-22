@@ -369,6 +369,20 @@ public class ActiveSectionTracker {
         return this.loadedSections.get();
     }
 
+    /** Copy one shard at a time; the consumer must never run under a tracker lock. */
+    public void iterateActivePositions(java.util.function.LongConsumer consumer) {
+        for (int i = 0; i < this.loadedSectionCache.length; i++) {
+            long[] keys;
+            long stamp = this.locks[i].readLock();
+            try {
+                keys = this.loadedSectionCache[i].keySet().toLongArray();
+            } finally {
+                this.locks[i].unlockRead(stamp);
+            }
+            for (long key : keys) consumer.accept(key);
+        }
+    }
+
     public int getSecondaryCacheSize() {
         return this.lruSecondaryCache.size();
     }

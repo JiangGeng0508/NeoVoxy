@@ -32,7 +32,7 @@ Iris `1.8.12` 发布包仍引用 Sodium 已移除的 `SodiumGameOptions`，与�
 - 集成服/局域网主机的**远处区块后台生成**（Distant Generation），默认关闭；开启后持续向 LoD 存储写入地形
 - 世界导入（World / Bobby / Raw / Zip / Current / Distant Horizons SQLite）
 - 单人世界与服务器世界的本地 LoD 数据路径管理
-- 专用服务器地形同步（两端安装 Voxy）：握手后从服务端拉取已有 LoD；握手等待或请求窗口满时保留请求并重试，缓存服务端确认的缺失结果以减少重复请求
+- 专用服务器地形同步（两端安装 Voxy）：握手后从服务端拉取已有 LoD；握手等待或请求窗口满时保留请求并重试，缓存服务端确认的缺失结果以减少重复请求；更新按区段合并，映射、响应和广播共享发送预算，拥塞后从存储补发
 - Iris 光影兼容（光影包可通过 `voxy.json` 提供 LoD 片元着色器补丁）
 - 远处实体渲染：远距离玩家 / 载具快照渲染（服务端同样安装 Voxy 时可用）
 - 模组联动：Create（列车 / 轨道 / 装置 / 动力网格电线）、Create: Copycats+、Create: Simulated
@@ -135,8 +135,10 @@ Levitite 的船体组装、专用服务端保存重启及客户端重载显示�
 使用 Gradle 运行 `.\gradlew build` 即可，产物为 `build/libs/voxy-<版本>.jar`（`assemble` 会自
 动执行 `slimJar`）。`build/intermediate-jars` 下是未裁剪的中间产物，请勿发布。
 
-`check` 直接依赖 NeoForge 环境下的 `testJunit` 回归测试和 `checkLangKeys` 语言检查，`build` 通过
-`check` 执行；中英缺键、静态翻译键缺失或测试失败都会使构建失败。语言检查可单独运行 `.\gradlew checkLangKeys`。
+`check` 执行 NeoForge 环境下的 `testJunit`、`checkLangKeys` 和 `validateMixins`，`build` 通过
+`check` 执行；测试失败、语言缺键、必需 mixin 目标/签名不匹配或最终 JAR 缺少 mixin 文件都会使构建失败。
+Mixin 检查需要 Python 3.11+，缺少 Python 或检查脚本会明确失败。语言和 mixin 检查可分别单独运行
+`.\gradlew checkLangKeys`、`.\gradlew validateMixins`。
 也可单独运行 `.\gradlew testJunit`。测试覆盖区段坐标编码、交接、RocksDB 生命周期、模型 LoD、
 网络请求与负缓存、映射持久化、连接纹理和 Mipper。普通运行明确跳过需要 OpenGL 的可选检查；
 使用 `.\gradlew build -PverifyGpu=true` 启用 GPU 回归，或用
