@@ -5,8 +5,10 @@ import me.cortex.voxy.client.TimingStatistics;
 import me.cortex.voxy.client.VoxyClient;
 import me.cortex.voxy.client.config.VoxyConfig;
 import me.cortex.voxy.client.core.model.ModelBakerySubsystem;
+import me.cortex.voxy.client.core.gl.GlTexture;
 import me.cortex.voxy.client.core.rendering.Viewport;
 import me.cortex.voxy.client.core.rendering.LodViewState;
+import me.cortex.voxy.client.core.rendering.LodBoundaryFade;
 import me.cortex.voxy.client.core.rendering.hierachical.AsyncNodeManager;
 import me.cortex.voxy.client.core.rendering.hierachical.HierarchicalOcclusionTraverser;
 import me.cortex.voxy.client.core.rendering.hierachical.NodeCleaner;
@@ -77,6 +79,13 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
     private final FullscreenBlit sentinelRestore;
 
     public final DepthFramebuffer fb = new DepthFramebuffer(GL_DEPTH24_STENCIL8);
+
+    // Secondary cameras need the same depth conversion as the main camera, but must never
+    // resize its targets (Iris keeps using those textures for later passes such as water SSR).
+    private DepthFramebuffer secondaryFb;
+    private GlTexture secondaryColour;
+    private FullscreenBlit secondaryBlit;
+    private final Matrix4f secondaryTargetTransform = new Matrix4f();
 
     protected final boolean deferTranslucency;
 
@@ -188,33 +197,66 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         glBindFramebuffer(GL_FRAMEBUFFER, sourceFrameBuffer);
     }
 
-    //Renders the LOD for a secondary pass (camera mods like Vista, mirrors, freecam...) into its own
-    //already-bound off-screen target. Unlike runPipeline this does NOT initialise/resize the shared
-    //depth framebuffer, write depth back to the source gbuffer, or run the main-camera
-    //model/render-distance servicing - none of that applies to a secondary target and it would
-    //corrupt the main camera's SSR. It DOES build the secondary viewport's own HiZ (from the
-    //secondary target's depth), traverse to fill its render list, generate its draw calls and draw
-    //them, all in one frame so there is no delay.
+    // Secondary cameras use an isolated LOD target. Both HiZ and geometry must see source depth
+    // reprojected into the LOD projection; directly comparing their different near/far planes makes
+    // distant LOD appear in front of vanilla chunks. Only the final composite writes to the caller.
     public void renderSecondary(Viewport<?> viewport, int sourceFramebuffer) {
         var rs = ((AbstractSectionRenderer)this.sectionRenderer);
         if (rs == null) {
             return;
         }
 
-        //Build this viewport's HiZ from the secondary target's own depth for occlusion culling.
-        //Touches only the secondary viewport's HiZ buffer, never the shared main fb.
-        int depthTex = glGetNamedFramebufferAttachmentParameteri(
-                sourceFramebuffer,
-                getDepthAttachment(sourceFramebuffer),
-                GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME
-        );
+        int depthTex = this.setupSecondary(viewport, sourceFramebuffer);
         viewport.hiZBuffer.buildMipChain(depthTex, viewport.width, viewport.height);
 
-        //Traverse to fill this viewport's render list, then build draw calls and draw into the
-        //caller's already-bound target. Drawn the same frame so there's no one-frame blank.
+        //Build and draw this camera's current list in the same frame.
         this.traversal.doTraversal(viewport);
+        this.secondaryFb.bind();
         rs.buildDrawCalls(viewport);
         rs.renderOpaque(viewport);
+        viewport.prevBuildFrameId = viewport.frameId;
+        this.finishSecondary(viewport, sourceFramebuffer);
+    }
+
+    protected int setupSecondary(Viewport<?> viewport, int sourceFramebuffer) {
+        if (this.secondaryFb == null) {
+            this.secondaryFb = new DepthFramebuffer(GL_DEPTH24_STENCIL8);
+            this.secondaryBlit = new FullscreenBlit(this.properties,
+                    "voxy:post/blit_texture_depth_cutout.frag", builder -> builder.define("EMIT_COLOUR"));
+        }
+        if (this.secondaryFb.resize(viewport.width, viewport.height)) {
+            if (this.secondaryColour != null) this.secondaryColour.free();
+            this.secondaryColour = new GlTexture().store(GL_RGBA8, 1, viewport.width, viewport.height);
+            this.secondaryFb.framebuffer.bind(GL_COLOR_ATTACHMENT0, this.secondaryColour).verify();
+            org.lwjgl.opengl.GL45C.glTextureParameteri(this.secondaryColour.id, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            org.lwjgl.opengl.GL45C.glTextureParameteri(this.secondaryColour.id, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        }
+
+        glViewport(0, 0, viewport.width, viewport.height);
+        glDisable(GL_BLEND);
+        glColorMask(true, true, true, true);
+        glDepthMask(true);
+        glStencilMask(0xFF);
+        org.lwjgl.opengl.GL45C.glClearNamedFramebufferfv(this.secondaryFb.framebuffer.id,
+                GL_COLOR, 0, new float[]{0, 0, 0, 0});
+        this.initDepthStencil(viewport, sourceFramebuffer, this.secondaryFb.framebuffer.id,
+                viewport.width, viewport.height, viewport.width, viewport.height);
+        return this.secondaryFb.getDepthTex().id;
+    }
+
+    protected void finishSecondary(Viewport<?> viewport, int sourceFramebuffer) {
+        // Untouched pixels have alpha zero, so vanilla colour/depth survive without a round trip.
+        // Drawn pixels return to the caller's projection for subsequent entities/translucency.
+        glDisable(GL_BLEND);
+        glDepthMask(true);
+        glDepthFunc(this.properties.closerEqualDepthCompare());
+        glBindTextureUnit(3, this.secondaryColour.id);
+        glBindSampler(0, DEPTH_SAMPLER);
+        glBindSampler(3, DEPTH_SAMPLER);
+        transformBlitDepth(this.secondaryBlit, this.secondaryFb.getDepthTex().id, sourceFramebuffer,
+                viewport, this.secondaryTargetTransform.set(viewport.vanillaProjection).mul(viewport.modelView));
+        glBindSampler(0, 0);
+        glBindSampler(3, 0);
     }
 
     //The depth attachment point depends on whether the framebuffer carries a combined
@@ -244,10 +286,13 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
 
 
         this.depthStencilSetup.bind();
-        int depthTexture = glGetNamedFramebufferAttachmentParameteri(sourceFrameBuffer, GL_DEPTH_ATTACHMENT, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME);
-        this.lastSourceDepthTex = depthTexture;
-        this.lastSrcWidth = srcWidth;
-        this.lastSrcHeight = srcHeight;
+        int depthTexture = glGetNamedFramebufferAttachmentParameteri(sourceFrameBuffer,
+                getDepthAttachment(sourceFrameBuffer), GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME);
+        if (viewport.isMainViewport) {
+            this.lastSourceDepthTex = depthTexture;
+            this.lastSrcWidth = srcWidth;
+            this.lastSrcHeight = srcHeight;
+        }
         glBindTextureUnit(0, depthTexture);
         glBindSampler(0, DEPTH_SAMPLER);
         glUniform2f(1,((float)width)/srcWidth, ((float)height)/srcHeight);
@@ -265,7 +310,8 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         //sides share the one clip-control mode, and only z is affected by it
         glUniform4f(4, ndcRemapScale, ndcRemapBias,
                 1.0f / ndcRemapScale, -ndcRemapBias / ndcRemapScale);
-        var boundary = me.cortex.voxy.client.core.rendering.LodBoundaryFade.getDistances();
+        // Main-camera fade distances must not relinquish vanilla coverage in a remote camera.
+        var boundary = viewport.isMainViewport ? LodBoundaryFade.getDistances() : new LodBoundaryFade.Distances(0, 0);
         glUniform1f(6, boundary.fadeStart());
         glUniform1f(7, boundary.fadeEnd());
         int cameraBlockX = (int) Math.floor(viewport.cameraX);
@@ -411,6 +457,11 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
 
     @Override
     protected void free0() {
+        if (this.secondaryFb != null) {
+            this.secondaryBlit.delete();
+            this.secondaryFb.free();
+            if (this.secondaryColour != null) this.secondaryColour.free();
+        }
         this.fb.free();
         this.sectionRenderer.free();
         this.depthStencilSetup.delete();

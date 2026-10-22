@@ -593,8 +593,7 @@ public class VoxyRenderSystem {
             // 调整为电视机尺寸（破坏主相机水面 SSR），并把渲染距离中心移到电视机相机上。
             this.pipeline.runPipeline(viewport, boundFramebuffer, this.viewportDimensions[2], this.viewportDimensions[3]);
         } else {
-            // 副渲染通道（Vista 电视）：绘制到调用方已绑定的离屏目标。先重新绑定其绘制目标：
-            // 上面的 chunkBoundRenderer 绑定了视口的 depthBoundingBuffer，否则会吞掉 LOD 几何。
+            // 副渲染通道（Vista 电视）：在独立缓冲中转换深度、绘制，再合成回调用方目标。
             glBindFramebuffer(GL_FRAMEBUFFER, boundFramebuffer);
             this.pipeline.renderSecondary(viewport, boundFramebuffer);
         }
