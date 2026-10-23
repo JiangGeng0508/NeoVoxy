@@ -9,6 +9,15 @@ import org.lwjgl.system.MemoryUtil;
 
 public class SaveLoadSystem3 {
     public static final int STORAGE_VERSION = 0;
+    private static final long COVERAGE_TAG = 0x564F585900000000L;
+
+    public static int decodeKnownOctants(long metadata) {
+        return (metadata & 0xFFFFFFFF00000000L) == COVERAGE_TAG ? (int) (metadata >>> 24) & 255 : 0;
+    }
+
+    private static long coverage(WorldSection section) {
+        return COVERAGE_TAG | ((long) section.getKnownOctants() << 24);
+    }
 
     private record SerializationCache(Long2ShortOpenHashMap lutMapCache, MemoryBuffer memoryBuffer) {
         public SerializationCache() {
@@ -35,6 +44,14 @@ public class SaveLoadSystem3 {
     private static final ThreadLocal<SerializationCache> CACHE = ThreadLocal.withInitial(SerializationCache::new);
 
     public static MemoryBuffer serialize(WorldSection section) {
+        // Coverage and voxels must describe the same supplied data. Release the
+        // section lock before the caller compresses or writes the returned bytes.
+        synchronized (section) {
+            return serializeLocked(section);
+        }
+    }
+
+    private static MemoryBuffer serializeLocked(WorldSection section) {
         var cache = CACHE.get();
         var data = section._rawOrNull();
 
@@ -54,7 +71,7 @@ public class SaveLoadSystem3 {
             MemoryUtil.memSet(blockIdxPtr, 0, WorldSection.SECTION_VOLUME*2);
             MemoryUtil.memPutLong(ptr, value); ptr += 8;
 
-            long uniformMetadata = 0;
+            long uniformMetadata = coverage(section);
             uniformMetadata |= 1L;//LUT size
             uniformMetadata |= Byte.toUnsignedLong(section.getNonEmptyChildren())<<16;
             MemoryUtil.memPutLong(metadataPtr, uniformMetadata);
@@ -79,10 +96,10 @@ public class SaveLoadSystem3 {
             throw new IllegalStateException();
         }
 
-        long metadata = 0;
+        long metadata = coverage(section);
         metadata |= Integer.toUnsignedLong(LUT.size());//Bottom 2 bytes
         metadata |= Byte.toUnsignedLong(section.getNonEmptyChildren())<<16;//Next byte
-        //5 bytes free
+        // Upper five bytes carry the optional coverage tag and octant mask.
 
         MemoryUtil.memPutLong(metadataPtr, metadata);
 
@@ -99,6 +116,7 @@ public class SaveLoadSystem3 {
         }
 
         final long metadata = MemoryUtil.memGetLong(ptr); ptr += 8;
+        section.setKnownOctants(decodeKnownOctants(metadata));
         section.nonEmptyChildren = (byte) ((metadata>>>16)&0xFF);
         final long lutBasePtr = ptr + WorldSection.SECTION_VOLUME * 2;
 

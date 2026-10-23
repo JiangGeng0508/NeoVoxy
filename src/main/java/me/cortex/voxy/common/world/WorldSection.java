@@ -86,6 +86,48 @@ public final class WorldSection {
     volatile int nonEmptyBlockCount = 0;//Note: only needed for level 0 sections
     volatile byte nonEmptyChildren;
 
+    // Which 16-voxel octants have actually been supplied. Missing storage and
+    // legacy air are not evidence of empty space. Persisted in the spare header bytes.
+    private volatile int knownOctants;
+    private java.util.BitSet suppliedSubsections;
+    private int[] suppliedPerOctant;
+    volatile boolean dataAvailable;
+
+    public int getKnownOctants() { return this.knownOctants; }
+
+    public synchronized void setKnownOctants(int mask) {
+        this.knownOctants = mask & 255;
+        this.suppliedSubsections = null;
+        this.suppliedPerOctant = null;
+    }
+
+    public synchronized boolean markKnownOctant(int x, int y, int z) {
+        int octant = ((x >> this.lvl) & 1) | (((z >> this.lvl) & 1) << 1) | (((y >> this.lvl) & 1) << 2);
+        if ((this.knownOctants & (1 << octant)) != 0) return false;
+        if (this.lvl > 0) {
+            int bits = this.lvl + 1, mask = (1 << bits) - 1;
+            int index = (x & mask) | ((z & mask) << bits) | ((y & mask) << (bits * 2));
+            if (this.suppliedSubsections == null) {
+                this.suppliedSubsections = new java.util.BitSet(1 << (bits * 3));
+                this.suppliedPerOctant = new int[8];
+            }
+            if (this.suppliedSubsections.get(index)) return false;
+            this.suppliedSubsections.set(index);
+            if (++this.suppliedPerOctant[octant] != (1 << (this.lvl * 3))) return false;
+        }
+        int before = this.knownOctants;
+        this.knownOctants |= 1 << octant;
+        if (this.knownOctants == 255) {
+            this.suppliedSubsections = null;
+            this.suppliedPerOctant = null;
+        }
+        return before != this.knownOctants;
+    }
+
+    public boolean isVoxelKnown(int x, int y, int z) {
+        return (this.knownOctants & (1 << ((x >> 4) | ((z >> 4) << 1) | ((y >> 4) << 2)))) != 0;
+    }
+
     final ActiveSectionTracker tracker;
     volatile boolean inSaveQueue;
     volatile boolean isDirty;

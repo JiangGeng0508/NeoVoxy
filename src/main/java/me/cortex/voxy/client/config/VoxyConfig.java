@@ -58,6 +58,11 @@ public class VoxyConfig {
     public boolean enabled = true;
     public boolean enableRendering = true;
     public boolean ingestEnabled = true;
+    public boolean xaeroMapSync = true;
+    public boolean xaeroMapCoarse = true;
+    public int xaeroMapTilesPerSecond = 20;
+    public int xaeroMapCommitMillis = 2;
+    public int xaeroMapQueueRegions = 256;
     public float sectionRenderDistance = DEFAULT_SECTION_RENDER_DISTANCE;
     public boolean sableLodRendering = true;
     // 可选模组的总开关和距离上限；0 表示使用完整 LOD 半径。
@@ -108,7 +113,7 @@ public class VoxyConfig {
     public int earthCurveRatio = 0;
 
     // Distant generation (server chunk system; singleplayer/integrated server only)
-    public boolean distantGenEnabled = false;
+    public boolean distantGenEnabled = true;
     // Radius in chunks around the player to keep generating. 96 chunks = 1536 blocks.
     public int distantGenRadius = 96;
     // How many chunks may generate concurrently.

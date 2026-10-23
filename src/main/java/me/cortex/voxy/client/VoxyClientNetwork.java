@@ -369,17 +369,20 @@ public final class VoxyClientNetwork implements VoxyNetwork.ClientHandler {
 
             var section = engine.acquire(payload.lvl(), payload.x(), payload.y(), payload.z());
             try {
-                long[] raw = section._unsafeGetRawDataArray();
-                for (int i = 0; i < 32 * 32 * 32; i++) {
-                    raw[i] = translated[Short.toUnsignedInt(MemoryUtil.memGetShort(shortsBase + (long) i * 2))];
-                }
-                section._unsafeSetNonEmptyChildren(childMask);
-                if (payload.lvl() == 0) {
-                    int empty = 0;
-                    for (long v : raw) {
-                        if (Mapper.isAir(v)) empty++;
+                synchronized (section) {
+                    long[] raw = section._unsafeGetRawDataArray();
+                    for (int i = 0; i < 32 * 32 * 32; i++) {
+                        raw[i] = translated[Short.toUnsignedInt(MemoryUtil.memGetShort(shortsBase + (long) i * 2))];
                     }
-                    section.addNonEmptyBlockCount((32 * 32 * 32 - empty) - section.getNonEmptyBlockCount());
+                    section._unsafeSetNonEmptyChildren(childMask);
+                    section.setKnownOctants(me.cortex.voxy.common.world.SaveLoadSystem3.decodeKnownOctants(metadata));
+                    if (payload.lvl() == 0) {
+                        int empty = 0;
+                        for (long v : raw) {
+                            if (Mapper.isAir(v)) empty++;
+                        }
+                        section.addNonEmptyBlockCount((32 * 32 * 32 - empty) - section.getNonEmptyBlockCount());
+                    }
                 }
                 engine.markDirty(section, WorldEngine.DEFAULT_UPDATE_FLAGS, 0);
             } finally {

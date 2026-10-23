@@ -30,7 +30,22 @@ public class WorldUpdater {
                 previousSection = null;
             }
 
-            long status = insertSectionLvlIntoWorld(into, section, worldSection);
+            InsertResult update;
+            boolean coverageChanged;
+            synchronized (worldSection) {
+                update = insertSectionLvlIntoWorld(into, section, worldSection);
+                coverageChanged = worldSection.markKnownOctant(section.x, section.y, section.z);
+            }
+            // Releasing a dirty section can drain the save queue. Do this after
+            // dropping voxel locks, so serialization cannot invert their order.
+            if (update.below() != null) {
+                try {
+                    if (update.belowChanged()) into.markDirty(update.below(), UPDATE_TYPE_BLOCK_BIT, 1 << 1);
+                } finally {
+                    update.below().release();
+                }
+            }
+            long status = update.status();
             boolean didStateChange = (status&1)==1;
             int nonAirCount = (int) ((status>>1)&0x1FFF);
 
@@ -43,9 +58,9 @@ public class WorldUpdater {
                 }
             }
 
-            if (didStateChange || emptinessStateChange != 0) {
+            if (didStateChange || emptinessStateChange != 0 || coverageChanged) {
                 int neighbors = didStateChange ? neighborMask(section, lvl) : 0;
-                into.markDirty(worldSection, (didStateChange?UPDATE_TYPE_BLOCK_BIT:0)|(emptinessStateChange!=0?UPDATE_TYPE_CHILD_EXISTENCE_BIT:0), neighbors);
+                into.markDirty(worldSection, ((didStateChange || coverageChanged)?UPDATE_TYPE_BLOCK_BIT:0)|(emptinessStateChange!=0?UPDATE_TYPE_CHILD_EXISTENCE_BIT:0), neighbors);
             }
 
             if (didStateChange || emptinessStateChange == 2) {
@@ -83,8 +98,10 @@ public class WorldUpdater {
         return neighbors;
     }
 
-    /** 更新单个 LOD 层；返回值低位为数据变化标志，其余位保存非空气数量。 */
-    private static long insertSectionLvlIntoWorld(WorldEngine into, VoxelizedSection section, WorldSection worldSection) {
+    private record InsertResult(long status, WorldSection below, boolean belowChanged) {}
+
+    /** 更新单个 LOD 层；status 低位为变化标志，其余位保存非空气数量。below 交给调用方解锁后释放。 */
+    private static InsertResult insertSectionLvlIntoWorld(WorldEngine into, VoxelizedSection section, WorldSection worldSection) {
         final long[] vdat = section.section;
         final int lvl = worldSection.lvl;
 
@@ -122,7 +139,7 @@ public class WorldUpdater {
                         unchangedStatus |= Integer.toUnsignedLong(4096) << 1;
                     }
                     me.cortex.voxy.commonImpl.PerfStats.sectionUniformWriteSkipped.increment();
-                    return unchangedStatus;
+                    return new InsertResult(unchangedStatus, null, false);
                 }
             }
         }
@@ -178,16 +195,20 @@ public class WorldUpdater {
                                 belowWorldSection = into.acquire(lvl, worldSection.x, worldSection.y - 1, worldSection.z);
                             }
                             int belowIndex = (31 << 10) | (cSecIdx & 0x3FF);
-                            long oldBelow = belowWorldSection.get(belowIndex);
-                            if (!Mapper.isAir(oldBelow)) {
-                                long below = Mapper.applySurfaceCarrier(oldBelow, newId);
-                                if (below != oldBelow) {
-                                    belowWorldSection.materialize()[belowIndex] = below;
-                                    belowDidStateChange = true;
+                            // Nested section locks always descend in Y. Readers take
+                            // one section at a time, including the map snapshot worker.
+                            synchronized (belowWorldSection) {
+                                long oldBelow = belowWorldSection.get(belowIndex);
+                                if (!Mapper.isAir(oldBelow)) {
+                                    long below = Mapper.applySurfaceCarrier(oldBelow, newId);
+                                    if (below != oldBelow) {
+                                        belowWorldSection.materialize()[belowIndex] = below;
+                                        belowDidStateChange = true;
+                                    }
+                                    newId = Mapper.clearSurfaceCarrier(newId);
+                                } else {
+                                    newId = Mapper.restoreSurfaceCarrier(newId);
                                 }
-                                newId = Mapper.clearSurfaceCarrier(newId);
-                            } else {
-                                newId = Mapper.restoreSurfaceCarrier(newId);
                             }
                         } else {
                             newId = Mapper.restoreSurfaceCarrier(newId);
@@ -200,16 +221,9 @@ public class WorldUpdater {
             }
         }
 
-        if (belowWorldSection != null) {
-            if (belowDidStateChange) {
-                into.markDirty(belowWorldSection, UPDATE_TYPE_BLOCK_BIT, 1 << 1);
-            }
-            belowWorldSection.release();
-        }
-
         long status = 0;
         status |= didStateChange?1:0;
         status |= Integer.toUnsignedLong(nonAirCount)<<1;//13 bits are required because the value can be 4096
-        return status;
+        return new InsertResult(status, belowWorldSection, belowDidStateChange);
     }
 }

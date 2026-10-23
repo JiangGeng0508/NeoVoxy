@@ -1,5 +1,7 @@
 # 自动验证
 
+Xaero 的 CPU 回归随标准构建执行；真实加载、保存重启及可选依赖启动另外使用 [隔离游戏验收](../scripts/xaero-smoke/README.md)。功能范围和配置见 [Xaero 地表兼容](xaero-map.md)。
+
 使用 Java 21、Python 3.11+ 和仓库内 Gradle wrapper。依赖已缓存时可添加 `--offline`；CPU 回归仍需 NeoForge 的类加载环境及 RocksDB 原生库，不需要启动游戏世界或创建 OpenGL 上下文。Python 用于 mixin 静态检查。
 
 ```powershell

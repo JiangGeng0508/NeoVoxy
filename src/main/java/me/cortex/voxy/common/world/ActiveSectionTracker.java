@@ -69,6 +69,11 @@ public class ActiveSectionTracker {
 
     /** Cache-only acquire for render-thread callers; it never joins an in-flight load. */
     public WorldSection acquireIfCached(long key) {
+        return this.acquireIfCached(key, this.loader);
+    }
+
+    /** The supplied loader handles eviction between the LRU check and promotion. */
+    WorldSection acquireIfCached(long key, SectionLoader missLoader) {
         int index = this.getCacheArrayIndex(key);
         var cache = this.loadedSectionCache[index];
         final var lock = this.locks[index];
@@ -93,10 +98,14 @@ public class ActiveSectionTracker {
         } finally {
             this.lruLock.unlockRead(lruStamp);
         }
-        return inLru ? this.acquire(key, true) : null;
+        return inLru ? this.acquire(key, true, missLoader) : null;
     }
 
     public WorldSection acquire(long key, boolean nullOnEmpty) {
+        return this.acquire(key, nullOnEmpty, this.loader);
+    }
+
+    private WorldSection acquire(long key, boolean nullOnEmpty, SectionLoader loadFrom) {
         if (this.engine != null) this.engine.lastActiveTime = System.currentTimeMillis();
         int index = this.getCacheArrayIndex(key);
         var cache = this.loadedSectionCache[index];
@@ -185,7 +194,8 @@ public class ActiveSectionTracker {
                         WorldEngine.getZ(key),
                         this);
 
-                status = this.loader.load(section);
+                status = loadFrom.load(section);
+                section.dataAvailable = status == 0;
 
                 if (status < 0) {
                     Logger.error("Unable to load section " + section.key + " setting to air");
@@ -208,6 +218,9 @@ public class ActiveSectionTracker {
             VarHandle.storeStoreFence();//Do not reorder setting this object
             holder.obj = section;
             VarHandle.releaseFence();
+            // Published and outside tracker locks. Includes disk loads and LRU reuse,
+            // but excludes fabricated air on a miss or decoding failure.
+            if (section.dataAvailable && this.engine != null) this.engine.notifyDataAvailable(key);
             if (nullOnEmpty && status == 1) {//If its air return null as stated, release the section aswell
                 section.release();
                 return null;
@@ -385,6 +398,14 @@ public class ActiveSectionTracker {
 
     public int getSecondaryCacheSize() {
         return this.lruSecondaryCache.size();
+    }
+
+    public void iterateSecondaryPositions(java.util.function.LongConsumer consumer) {
+        long[] keys;
+        long stamp = this.lruLock.readLock();
+        try { keys = this.lruSecondaryCache.keySet().toLongArray(); }
+        finally { this.lruLock.unlockRead(stamp); }
+        for (long key : keys) consumer.accept(key);
     }
 
     public static void main(String[] args) throws InterruptedException {

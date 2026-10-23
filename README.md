@@ -29,7 +29,7 @@ Iris `1.8.12` 发布包仍引用 Sodium 已移除的 `SodiumGameOptions`，与�
 - 平滑过渡按原版实际绘制的地形交接，快速移动时保留已有 LoD 为未就绪的地形补位
 - Voxy LoD 区块的加载、保存与渲染（GPU 驱动的 MDIC 渲染后端、HiZ 遮挡剔除、SSAO）
 - 世界曲率（地球曲率）模拟，参照 Distant Horizons 实现
-- 集成服/局域网主机的**远处区块后台生成**（Distant Generation），默认关闭；开启后持续向 LoD 存储写入地形
+- 集成服/局域网主机的**远处区块后台生成**（Distant Generation），默认开启，持续向 LoD 存储写入地形
 - 世界导入（World / Bobby / Raw / Zip / Current / Distant Horizons SQLite）
 - 单人世界与服务器世界的本地 LoD 数据路径管理
 - 专用服务器地形同步（两端安装 Voxy）：握手后从服务端拉取已有 LoD；握手等待或请求窗口满时保留请求并重试，缓存服务端确认的缺失结果以减少重复请求；更新按区段合并，映射、响应和广播共享发送预算，拥塞后从存储补发

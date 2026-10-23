@@ -84,8 +84,8 @@ public class VoxyNeoForgeConfig {
     private static final ModConfigSpec.BooleanValue DISTANT_GEN_ENABLED = BUILDER
             .comment("Keep the integrated server generating chunks around the player so Voxy can",
                      "ingest terrain far beyond the vanilla view distance. Singleplayer/LAN host only.",
-                     "Default: false. Disabled automatically when Groundwork is installed.")
-            .define("distantGenEnabled", false);
+                     "Default: true. Disabled automatically when Groundwork is installed.")
+            .define("distantGenEnabled", true);
 
     private static final ModConfigSpec.IntValue DISTANT_GEN_RADIUS = BUILDER
             .comment("Radius in chunks around the player to keep generating")
@@ -100,6 +100,22 @@ public class VoxyNeoForgeConfig {
             .defineInRange("distantGenMaxMspt", 45, 5, 500);
 
     // ---- 世界兼容与远景实体 -------------------------------------------
+
+    private static final ModConfigSpec.BooleanValue XAERO_MAP_SYNC = BUILDER
+            .comment("Fill Xaero World Map surface maps from available LOD. Requires World Map 1.47.0.")
+            .define("xaeroMapSync", true);
+    private static final ModConfigSpec.BooleanValue XAERO_MAP_COARSE = BUILDER
+            .comment("Use approximate LOD1-4 surfaces; finer data improves them later.")
+            .define("xaeroMapCoarse", true);
+    private static final ModConfigSpec.IntValue XAERO_MAP_TILES_PER_SECOND = BUILDER
+            .comment("Maximum 16x16 map tiles extracted per second on the background worker.")
+            .defineInRange("xaeroMapTilesPerSecond", 20, 1, 128);
+    private static final ModConfigSpec.IntValue XAERO_MAP_COMMIT_MILLIS = BUILDER
+            .comment("Soft client-thread submission budget in milliseconds; at least one native tile update may run.")
+            .defineInRange("xaeroMapCommitMillis", 2, 1, 10);
+    private static final ModConfigSpec.IntValue XAERO_MAP_QUEUE_REGIONS = BUILDER
+            .comment("Bounded pending 512x512 map regions. Oldest notifications are evicted on overflow.")
+            .defineInRange("xaeroMapQueueRegions", 256, 16, 4096);
 
     private static final ModConfigSpec.IntValue EARTH_CURVE_RATIO = BUILDER
             .comment("World curvature effect - simulates standing on a spherical planet",
@@ -236,6 +252,11 @@ public class VoxyNeoForgeConfig {
 
     /** 从 NeoForge 配置快照写入运行时配置，并触发一次持久化。 */
     private static void syncToVoxyConfig() {
+        VoxyConfig.CONFIG.xaeroMapSync = XAERO_MAP_SYNC.get();
+        VoxyConfig.CONFIG.xaeroMapCoarse = XAERO_MAP_COARSE.get();
+        VoxyConfig.CONFIG.xaeroMapTilesPerSecond = XAERO_MAP_TILES_PER_SECOND.get();
+        VoxyConfig.CONFIG.xaeroMapCommitMillis = XAERO_MAP_COMMIT_MILLIS.get();
+        VoxyConfig.CONFIG.xaeroMapQueueRegions = XAERO_MAP_QUEUE_REGIONS.get();
         VoxyConfig.CONFIG.enabled = ENABLED.get();
         VoxyConfig.CONFIG.enableRendering = ENABLE_RENDERING.get();
         VoxyConfig.CONFIG.ingestEnabled = INGEST_ENABLED.get();
@@ -289,6 +310,11 @@ public class VoxyNeoForgeConfig {
 
     /** 将 VoxyConfig 的当前值回写到 NeoForge 配置，以保持 Mods 菜单一致。 */
     private static void syncFromVoxyConfig() {
+        XAERO_MAP_SYNC.set(VoxyConfig.CONFIG.xaeroMapSync);
+        XAERO_MAP_COARSE.set(VoxyConfig.CONFIG.xaeroMapCoarse);
+        XAERO_MAP_TILES_PER_SECOND.set(Math.clamp(VoxyConfig.CONFIG.xaeroMapTilesPerSecond, 1, 128));
+        XAERO_MAP_COMMIT_MILLIS.set(Math.clamp(VoxyConfig.CONFIG.xaeroMapCommitMillis, 1, 10));
+        XAERO_MAP_QUEUE_REGIONS.set(Math.clamp(VoxyConfig.CONFIG.xaeroMapQueueRegions, 16, 4096));
         VoxyConfig.CONFIG.sanitize();
         ENABLED.set(VoxyConfig.CONFIG.enabled);
         ENABLE_RENDERING.set(VoxyConfig.CONFIG.enableRendering);

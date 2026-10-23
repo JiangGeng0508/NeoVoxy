@@ -53,9 +53,26 @@ public class VoxyConfigMenu implements ConfigEntryPoint {
                 experimentalPage(cfg, renderReload),
                 fakesightPage(cfg),
                 distantGenerationPage(cfg),
+                xaeroPage(cfg),
                 compatibilityPage(cfg, renderReload, sableInstalled, createInstalled, powerGridInstalled,
                         copycatsInstalled, simulatedInstalled, framedBlocksInstalled, littleTilesInstalled,
                         domumInstalled, seasonsInstalled));
+    }
+
+    /** Xaero 的可选地表同步和处理预算。 */
+    private static Page xaeroPage(VoxyConfig cfg) {
+        return new Page(Component.translatable("voxy.config.xaero"),
+                new Group(Component.translatable("voxy.config.xaero"),
+                        new BoolOption("voxy:xaero_map_sync", Component.translatable("voxy.config.xaero.enabled"),
+                                () -> cfg.xaeroMapSync, v -> cfg.xaeroMapSync = v),
+                        new BoolOption("voxy:xaero_map_coarse", Component.translatable("voxy.config.xaero.coarse"),
+                                () -> cfg.xaeroMapCoarse, v -> cfg.xaeroMapCoarse = v),
+                        new IntOption("voxy:xaero_map_rate", Component.translatable("voxy.config.xaero.rate"),
+                                () -> cfg.xaeroMapTilesPerSecond, v -> cfg.xaeroMapTilesPerSecond = v,
+                                new Range(1, 128, 1)),
+                        new IntOption("voxy:xaero_map_budget", Component.translatable("voxy.config.xaero.budget"),
+                                () -> cfg.xaeroMapCommitMillis, v -> cfg.xaeroMapCommitMillis = v,
+                                new Range(1, 10, 1))));
     }
 
     /** 配置提交后执行需要即时生效的运行时操作。 */

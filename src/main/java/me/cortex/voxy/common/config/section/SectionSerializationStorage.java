@@ -37,6 +37,15 @@ public class SectionSerializationStorage extends SectionStorage {
     private static final ThreadLocalMemoryBuffer MEMORY_CACHE = new ThreadLocalMemoryBuffer(BIGGEST_SERIALIZED_SECTION_SIZE + 1024);
 
     public int loadSection(WorldSection into) {
+        return this.loadSection(into, true);
+    }
+
+    @Override
+    public int loadSectionLocal(WorldSection into) {
+        return this.loadSection(into, false);
+    }
+
+    private int loadSection(WorldSection into, boolean notify) {
         long generation;
         boolean cachedMissing;
         synchronized (this.missingSections) {
@@ -46,7 +55,7 @@ public class SectionSerializationStorage extends SectionStorage {
         if (cachedMissing) {
             // A local miss does not prove remote absence. The listener coalesces pending
             // pulls and server-confirmed misses; reconnects can use a fresh listener.
-            this.notifyMissing(into.key);
+            if (notify) this.notifyMissing(into.key);
             return 1;
         }
         var data = this.backend.getSectionData(into.key, MEMORY_CACHE.get().createUntrackedUnfreeableReference());
@@ -65,7 +74,7 @@ public class SectionSerializationStorage extends SectionStorage {
         } else {
             //The response is expected to be put into the local db so future loads hit the fast path;
             //the server can also send arbitrary updates to the client for arbitrary lods.
-            this.notifyMissing(into.key);
+            if (notify) this.notifyMissing(into.key);
             this.rememberMissing(into.key, generation);
             // the response should be put into the local db so that future data can just use that
             // the server can also send arbitrary updates to the client for arbitrary lods

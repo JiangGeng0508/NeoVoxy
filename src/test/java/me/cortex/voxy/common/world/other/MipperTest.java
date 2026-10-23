@@ -120,7 +120,10 @@ class MipperTest {
                     for (int y = 0; y < baseY + size; y++) {
                         assertFalse(Mapper.isSurfaceCarrier(target.get(WorldSection.getIndex(0, y, 0))), context);
                     }
-                    long status = (long) insert.invoke(null, null, section, target);
+                    var result = insert.invoke(null, null, section, target);
+                    var statusAccessor = result.getClass().getDeclaredMethod("status");
+                    statusAccessor.setAccessible(true);
+                    long status = (long) statusAccessor.invoke(result);
                     assertEquals(0L, status & 1, "repeated terrain write must be stable: " + context);
                 }
             }

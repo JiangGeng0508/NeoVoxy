@@ -1,0 +1,31 @@
+import groovy.json.JsonOutput
+
+// Explicit opt-in; these real-client probes never enter a regular build.
+allprojects {
+    afterEvaluate {
+        sourceSets.main.java.srcDir project.hasProperty('xaeroBare') ? 'scripts/xaero-smoke/bare-src' : 'scripts/xaero-smoke/src'
+        def base = layout.buildDirectory.dir('reports/xaero-smoke').get().asFile
+        runs.named('client') {
+            workingDirectory new File(base, 'client')
+            systemProperty 'voxy.xaeroSmoke', base.absolutePath
+        }
+        tasks.register('writeXaeroSmokeLaunch') {
+            dependsOn 'classes', 'neoFormJoined1.21.1-20240808.144430DownloadAssets',
+                    'neoFormJoined1.21.1-20240808.144430ExtractNatives', 'writeMinecraftClasspathClient'
+            doLast {
+                def run = tasks.named('runClient').get()
+                base.mkdirs()
+                new File(base, 'launch.json').text = JsonOutput.toJson([
+                    executable: run.javaLauncher.get().executablePath.asFile.absolutePath,
+                    args: run.allJvmArgs + ['-cp', run.classpath.asPath, run.mainClass.get()] + run.args,
+                    modClasses: run.environment['MOD_CLASSES']
+                ])
+                copy { from configurations.sodiumOuter.singleFile; into new File(base, 'mods') }
+                if (!project.hasProperty('xaeroBare')) copy {
+                    from configurations.compileClasspath.filter { it.name.startsWith('xaeros-world-map-') }
+                    into new File(base, 'mods')
+                }
+            }
+        }
+    }
+}

@@ -8,6 +8,10 @@ import me.cortex.voxy.common.world.WorldSection;
 public abstract class SectionStorage implements IMappingStorage, IStoredSectionPositionIterator {
     public abstract int loadSection(WorldSection into);
 
+    /** Optional consumers must not turn a local lookup into a network request.
+     * Storage implementations opt in only when they can guarantee local reads. */
+    public int loadSectionLocal(WorldSection into) { return 1; }
+
     public abstract void saveSection(WorldSection section);
 
     //A group of section saves applied together. add() serialises immediately (the serializer hands back

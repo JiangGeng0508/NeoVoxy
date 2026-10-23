@@ -70,6 +70,12 @@ public class ClientVoxyMixinPlugin implements IMixinConfigPlugin {
         if (FMLLoader.getDist() != Dist.CLIENT) {
             return mixins;
         }
+        if (me.cortex.voxy.client.compat.xaero.XaeroGate.supported()) {
+            mixins.add("xaero.MixinMapBlock");
+            mixins.add("xaero.MixinMapSaveLoad");
+            mixins.add("xaero.MixinMapTile");
+            mixins.add("xaero.MixinMapRegion");
+        }
         //(sable.MixinSableSubLevelRenderSectionManager omitted: its sable target class was removed in
         // sable 2.0.3 and its sodium ctor target no longer matches sodium 0.8.12.)
         if (sableInstalled) {

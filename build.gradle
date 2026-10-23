@@ -358,6 +358,8 @@ dependencies {
     compileOnly "maven.modrinth:fALzjamp:LuFhm4eU"
 
     // === Optional mod integration compile-time APIs (all optional at runtime) ===
+    compileOnly 'maven.modrinth:xaeros-world-map:neoforge-1.21.1-1.47.0'
+
     createOuter "maven.modrinth:create:6.0.10+mc1.21.1"
     compileOnly "maven.modrinth:create:6.0.10+mc1.21.1"
     compileOnly files(createPonderJar, createFlywheelJar).builtBy(extractCreateCompileJars)

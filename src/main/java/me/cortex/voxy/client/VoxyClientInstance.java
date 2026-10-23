@@ -99,6 +99,7 @@ public class VoxyClientInstance extends VoxyInstance {
 
     @Override
     public void shutdown() {
+        me.cortex.voxy.client.compat.xaero.XaeroSurfaceCompat.stop();
         super.shutdown();
         // 实例销毁后再释放共享 GPU 缓存，避免仍在使用的渲染器拿到失效资源。
         RenderResourceReuse.clearResources();

@@ -42,6 +42,21 @@ public class WorldEngine {
     private final ActiveSectionTracker sectionTracker;
     private ISectionChangeCallback dirtyCallback;
     private ISectionSaveCallback saveCallback;
+    private final java.util.concurrent.CopyOnWriteArrayList<java.util.function.LongConsumer> dataListeners = new java.util.concurrent.CopyOnWriteArrayList<>();
+
+    /** Notifications carry keys only. Consumers must enqueue, never acquire or scan sections here. */
+    public void addDataListener(java.util.function.LongConsumer listener) { this.dataListeners.add(listener); }
+    public void removeDataListener(java.util.function.LongConsumer listener) { this.dataListeners.remove(listener); }
+
+    void notifyDataAvailable(long key) {
+        for (var listener : this.dataListeners) {
+            try { listener.accept(key); }
+            catch (Exception failure) {
+                this.dataListeners.remove(listener);
+                Logger.error("Disabled failing section data listener", failure);
+            }
+        }
+    }
     volatile boolean isLive = true;
 
     public void setDirtyCallback(ISectionChangeCallback callback) {
@@ -92,6 +107,11 @@ public class WorldEngine {
         return this.sectionTracker.acquireIfCached(getWorldSectionId(lvl, x, y, z));
     }
 
+    /** Even an LRU eviction race must not cause an optional map reader to request remote LOD. */
+    public WorldSection acquireIfCachedLocal(int lvl, int x, int y, int z) {
+        return this.sectionTracker.acquireIfCached(getWorldSectionId(lvl, x, y, z), this.storage::loadSectionLocal);
+    }
+
     public WorldSection acquireIfExists(int lvl, int x, int y, int z) {
         if (!this.isLive) throw new IllegalStateException("World is not live");
         return this.sectionTracker.acquire(lvl, x, y, z, true);
@@ -117,6 +137,12 @@ public class WorldEngine {
         // Active first: a section unloaded between these passes is already in persistent storage.
         this.sectionTracker.iterateActivePositions(consumer);
         this.storage.iteratePositions(-1, consumer);
+    }
+
+    /** Bounded warm start for optional consumers; never enumerates the database. */
+    public void iterateCachedPositions(java.util.function.LongConsumer consumer) {
+        this.sectionTracker.iterateActivePositions(consumer);
+        this.sectionTracker.iterateSecondaryPositions(consumer);
     }
 
     public static final int POS_FORMAT_VERSION = 1;
@@ -191,6 +217,10 @@ public class WorldEngine {
         }
         if ((changeState & UPDATE_TYPE_DONT_SAVE) == 0) {
             section.markDirty();
+        }
+        if ((changeState & UPDATE_TYPE_BLOCK_BIT) != 0) {
+            section.dataAvailable = true;
+            this.notifyDataAvailable(section.key);
         }
     }
 

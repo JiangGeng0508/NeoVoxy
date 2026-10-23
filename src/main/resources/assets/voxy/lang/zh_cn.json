@@ -75,7 +75,7 @@
   "voxy.config.distantGeneration": "远景生成",
   "voxy.config.group.distantGeneration": "远景生成",
   "voxy.config.distantGen.enabled": "在视距外持续生成地形",
-  "voxy.config.distantGen.enabled.tooltip": "让集成服务器在玩家周围持续生成区块，供 Voxy 摄取远景地形。默认关闭。\n仅单人存档与局域网主机生效，专用服务器会忽略此项；安装 Groundwork 时自动停用内置生成。",
+  "voxy.config.distantGen.enabled.tooltip": "让集成服务器在玩家周围持续生成区块，供 Voxy 摄取远景地形。默认开启。\n仅单人存档与局域网主机生效，专用服务器会忽略此项；安装 Groundwork 时自动停用内置生成。",
   "voxy.config.distantGen.radius": "生成半径",
   "voxy.config.distantGen.radius.tooltip": "玩家周围持续生成区块的半径。96 区块 = 1536 方块。",
   "voxy.config.distantGen.maxInFlight": "并发生成数",
@@ -214,5 +214,14 @@
   "voxy.config.general.renderQuality.3": "标准",
   "voxy.config.general.renderQuality.4": "较高",
   "voxy.config.general.renderQuality.5": "高",
-  "voxy.config.general.renderQuality.6": "极高"
+  "voxy.config.general.renderQuality.6": "极高",
+  "voxy.config.xaero": "Xaero 世界地图",
+  "voxy.config.xaero.enabled": "同步 LOD 地表",
+  "voxy.config.xaero.coarse": "使用粗略 LOD",
+  "voxy.config.xaero.rate": "每秒处理地图区块",
+  "voxy.config.xaero.budget": "提交预算（毫秒）",
+  "voxy.config.xaero.enabled.tooltip": "使用本地已有 LOD 补全 Xaero 世界地图地表，需要 World Map 1.47.0。真实区块地图优先，不额外向服务器请求 LOD。",
+  "voxy.config.xaero.coarse.tooltip": "缺少精细 LOD 时填充近似地形，后续精细数据会逐步替换。垂直数据不完整时保留暂定标记。",
+  "voxy.config.xaero.rate.tooltip": "后台每秒最多提取的 16×16 地图瓦片数，默认 20。降低此项可减少 CPU 和本地磁盘负载。",
+  "voxy.config.xaero.budget.tooltip": "每次客户端 tick 提交地图的软预算，默认 2 毫秒。单次 Xaero 原生着色更新可能超出预算，每 tick 最多提交四个瓦片。"
 }

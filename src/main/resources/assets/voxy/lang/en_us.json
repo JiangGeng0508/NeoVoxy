@@ -75,7 +75,7 @@
   "voxy.config.distantGeneration": "Distant Generation",
   "voxy.config.group.distantGeneration": "Distant generation",
   "voxy.config.distantGen.enabled": "Generate terrain beyond view distance",
-  "voxy.config.distantGen.enabled.tooltip": "Keeps the integrated server generating chunks around the player so Voxy can ingest far terrain. Off by default.\nSingleplayer and LAN host only; dedicated servers ignore this. Disabled automatically when Groundwork is installed.",
+  "voxy.config.distantGen.enabled.tooltip": "Keeps the integrated server generating chunks around the player so Voxy can ingest far terrain. On by default.\nSingleplayer and LAN host only; dedicated servers ignore this. Disabled automatically when Groundwork is installed.",
   "voxy.config.distantGen.radius": "Generation radius",
   "voxy.config.distantGen.radius.tooltip": "Radius in chunks around the player to keep generating. 96 chunks = 1536 blocks.",
   "voxy.config.distantGen.maxInFlight": "Concurrent chunks",
@@ -214,5 +214,14 @@
   "voxy.config.general.renderQuality.3": "Standard",
   "voxy.config.general.renderQuality.4": "Medium-high",
   "voxy.config.general.renderQuality.5": "High",
-  "voxy.config.general.renderQuality.6": "Very high"
+  "voxy.config.general.renderQuality.6": "Very high",
+  "voxy.config.xaero": "Xaero world map",
+  "voxy.config.xaero.enabled": "Synchronize LOD surface",
+  "voxy.config.xaero.coarse": "Use approximate LOD",
+  "voxy.config.xaero.rate": "Tiles per second",
+  "voxy.config.xaero.budget": "Submission budget (ms)",
+  "voxy.config.xaero.enabled.tooltip": "Complete Xaero World Map surface maps from locally available LOD. Requires World Map 1.47.0. Existing real chunk maps take priority. No extra server LOD requests.",
+  "voxy.config.xaero.coarse.tooltip": "Use approximate terrain while detailed LOD is unavailable. Finer data replaces it as it arrives. Incomplete vertical data remains provisional.",
+  "voxy.config.xaero.rate.tooltip": "Maximum number of 16 x 16 map tiles extracted per second in the background. Default: 20. Lower this to reduce CPU and local disk work.",
+  "voxy.config.xaero.budget.tooltip": "Soft client tick budget for submitting maps. Default: 2 ms. A single native Xaero colour update can exceed this budget. At most four tiles are submitted per tick."
 }
