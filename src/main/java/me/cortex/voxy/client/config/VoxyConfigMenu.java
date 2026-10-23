@@ -47,7 +47,7 @@ public class VoxyConfigMenu implements ConfigEntryPoint {
                 .setIcon(ResourceLocation.parse("voxy:icon.png"));
         final var renderReload = OptionFlag.REQUIRES_RENDERER_RELOAD.getId().toString();
 
-        SodiumConfigBuilder.buildToSodium(builder, options, cfg::save, VoxyConfigMenu::registerPostApplyOps,
+        var pages = new java.util.ArrayList<>(java.util.List.of(
                 generalPage(cfg, renderReload),
                 renderingPage(cfg, renderReload),
                 experimentalPage(cfg, renderReload),
@@ -56,7 +56,24 @@ public class VoxyConfigMenu implements ConfigEntryPoint {
                 xaeroPage(cfg),
                 compatibilityPage(cfg, renderReload, sableInstalled, createInstalled, powerGridInstalled,
                         copycatsInstalled, simulatedInstalled, framedBlocksInstalled, littleTilesInstalled,
-                        domumInstalled, seasonsInstalled));
+                        domumInstalled, seasonsInstalled)));
+        if (me.cortex.voxy.client.compat.pingwheel.PingWheelGate.supported()) pages.add(pingwheelPage(cfg));
+        SodiumConfigBuilder.buildToSodium(builder, options, cfg::save, VoxyConfigMenu::registerPostApplyOps,
+                pages.toArray(Page[]::new));
+    }
+
+    private static Page pingwheelPage(VoxyConfig cfg) {
+        return new Page(Component.translatable("voxy.config.pingwheel"),
+                new Group(Component.translatable("voxy.config.pingwheel"),
+                        new BoolOption("voxy:pingwheel_lod_picking", Component.translatable("voxy.config.pingwheel.enabled"),
+                                () -> cfg.pingwheelLodPicking, v -> cfg.pingwheelLodPicking = v),
+                        new IntOption("voxy:pingwheel_max_distance_blocks", Component.translatable("voxy.config.pingwheel.distance"),
+                                () -> cfg.pingwheelMaxDistanceBlocks, v -> cfg.pingwheelMaxDistanceBlocks = v,
+                                new Range(0, 32768, 128))
+                                .setFormatter(v -> v == 0 ? Component.translatable("voxy.config.pingwheel.followDistance")
+                                        : Component.translatable("voxy.config.pingwheel.blocks", v))
+                                .setEnablerInherit("voxy:pingwheel_lod_picking")))
+                .setEnablerAND("voxy:enabled", "voxy:rendering");
     }
 
     /** Xaero 的可选地表同步和处理预算。 */

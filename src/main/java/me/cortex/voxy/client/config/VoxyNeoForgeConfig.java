@@ -101,6 +101,13 @@ public class VoxyNeoForgeConfig {
 
     // ---- 世界兼容与远景实体 -------------------------------------------
 
+    private static final ModConfigSpec.BooleanValue PINGWHEEL_LOD_PICKING = BUILDER
+            .comment("Approximate local LOD terrain picks on PingWheel 1.12.2 misses. Disabled with world curvature.")
+            .define("pingwheelLodPicking", true);
+    private static final ModConfigSpec.IntValue PINGWHEEL_MAX_DISTANCE_BLOCKS = BUILDER
+            .comment("LOD pick cap in blocks. 0 follows PingWheel's original ray distance and Voxy's LOD radius.")
+            .defineInRange("pingwheelMaxDistanceBlocks", 0, 0, 32768);
+
     private static final ModConfigSpec.BooleanValue XAERO_MAP_SYNC = BUILDER
             .comment("Fill Xaero World Map surface maps from available LOD. Requires World Map 1.47.0.")
             .define("xaeroMapSync", true);
@@ -252,6 +259,8 @@ public class VoxyNeoForgeConfig {
 
     /** 从 NeoForge 配置快照写入运行时配置，并触发一次持久化。 */
     private static void syncToVoxyConfig() {
+        VoxyConfig.CONFIG.pingwheelLodPicking = PINGWHEEL_LOD_PICKING.get();
+        VoxyConfig.CONFIG.pingwheelMaxDistanceBlocks = PINGWHEEL_MAX_DISTANCE_BLOCKS.get();
         VoxyConfig.CONFIG.xaeroMapSync = XAERO_MAP_SYNC.get();
         VoxyConfig.CONFIG.xaeroMapCoarse = XAERO_MAP_COARSE.get();
         VoxyConfig.CONFIG.xaeroMapTilesPerSecond = XAERO_MAP_TILES_PER_SECOND.get();
@@ -310,6 +319,8 @@ public class VoxyNeoForgeConfig {
 
     /** 将 VoxyConfig 的当前值回写到 NeoForge 配置，以保持 Mods 菜单一致。 */
     private static void syncFromVoxyConfig() {
+        PINGWHEEL_LOD_PICKING.set(VoxyConfig.CONFIG.pingwheelLodPicking);
+        PINGWHEEL_MAX_DISTANCE_BLOCKS.set(Math.clamp(VoxyConfig.CONFIG.pingwheelMaxDistanceBlocks, 0, 32768));
         XAERO_MAP_SYNC.set(VoxyConfig.CONFIG.xaeroMapSync);
         XAERO_MAP_COARSE.set(VoxyConfig.CONFIG.xaeroMapCoarse);
         XAERO_MAP_TILES_PER_SECOND.set(Math.clamp(VoxyConfig.CONFIG.xaeroMapTilesPerSecond, 1, 128));

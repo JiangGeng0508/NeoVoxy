@@ -1,0 +1,26 @@
+import groovy.json.JsonOutput
+
+// Explicit real-client verification. Probe classes never enter ordinary builds.
+allprojects {
+    afterEvaluate {
+        sourceSets.main.java.srcDir 'scripts/pingwheel-smoke/src'
+        def base = layout.buildDirectory.dir('reports/pingwheel-smoke').get().asFile
+        tasks.register('writePingWheelSmokeLaunch') {
+            dependsOn 'classes', 'neoFormJoined1.21.1-20240808.144430DownloadAssets',
+                    'neoFormJoined1.21.1-20240808.144430ExtractNatives', 'writeMinecraftClasspathClient'
+            doLast {
+                def run = tasks.named('runClient').get()
+                base.mkdirs()
+                new File(base, 'launch.json').text = JsonOutput.toJson([
+                        executable: run.javaLauncher.get().executablePath.asFile.absolutePath,
+                        args: run.allJvmArgs + ['-cp', run.classpath.asPath, run.mainClass.get()] + run.args,
+                        modClasses: run.environment['MOD_CLASSES']])
+                copy { from configurations.sodiumOuter.singleFile; into new File(base, 'mods') }
+                copy {
+                    from configurations.compileClasspath.filter { it.name.startsWith('ping-wheel-') || it.name.startsWith('iris-') }
+                    into new File(base, 'mods')
+                }
+            }
+        }
+    }
+}

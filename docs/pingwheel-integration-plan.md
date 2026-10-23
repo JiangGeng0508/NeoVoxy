@@ -1,6 +1,7 @@
 # NeoVoxy × PingWheel 联动方案与开发提示词
 
-调研日期：2026-10-23。本文是实现计划，尚未实现或进行游戏验收。
+调研日期：2026-10-23。本文保留原始实现计划；第一阶段实现与实际验证范围见
+[PingWheel 兼容](pingwheel.md)及[隔离验收](../scripts/pingwheel-smoke/README.md)。
 
 ## 推荐范围
 

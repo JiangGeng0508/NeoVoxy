@@ -223,5 +223,12 @@
   "voxy.config.xaero.enabled.tooltip": "使用本地已有 LOD 补全 Xaero 世界地图地表，需要 World Map 1.47.0。真实区块地图优先，不额外向服务器请求 LOD。",
   "voxy.config.xaero.coarse.tooltip": "缺少精细 LOD 时填充近似地形，后续精细数据会逐步替换。垂直数据不完整时保留暂定标记。",
   "voxy.config.xaero.rate.tooltip": "后台每秒最多提取的 16×16 地图瓦片数，默认 20。降低此项可减少 CPU 和本地磁盘负载。",
-  "voxy.config.xaero.budget.tooltip": "每次客户端 tick 提交地图的软预算，默认 2 毫秒。单次 Xaero 原生着色更新可能超出预算，每 tick 最多提交四个瓦片。"
+  "voxy.config.xaero.budget.tooltip": "每次客户端 tick 提交地图的软预算，默认 2 毫秒。单次 Xaero 原生着色更新可能超出预算，每 tick 最多提交四个瓦片。",
+  "voxy.config.pingwheel": "PingWheel",
+  "voxy.config.pingwheel.enabled": "标记远处 LOD 地形",
+  "voxy.config.pingwheel.enabled.tooltip": "PingWheel 未命中方块或实体时查询本地已保存的 LOD，需要 PingWheel 1.12.2。使用近似体素表面，潜行时也可选中流体。未知地形会中止查询，开启世界曲率时停用，不增加方块交互距离。",
+  "voxy.config.pingwheel.distance": "LOD 选点距离上限（方块）",
+  "voxy.config.pingwheel.distance.tooltip": "额外距离上限，单位为方块。0 表示取 PingWheel 原射线距离和 Voxy LOD 半径的较小值。PingWheel 默认射线距离 1024 方块、标记距离 2048 方块；此设置不修改 PingWheel 配置。",
+  "voxy.config.pingwheel.followDistance": "跟随 PingWheel / LOD 距离",
+  "voxy.config.pingwheel.blocks": "%s 方块"
 }

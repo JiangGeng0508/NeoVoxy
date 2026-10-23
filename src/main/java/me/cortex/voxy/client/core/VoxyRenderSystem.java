@@ -797,6 +797,7 @@ public class VoxyRenderSystem {
     }
 
     public void shutdown() {
+        me.cortex.voxy.client.compat.pingwheel.PingWheelCompat.stop();
         this.pendingUnpatchedIrisViewport = null;
         Logger.info("Flushing download stream");
         DownloadStream.INSTANCE.flushWaitClear();

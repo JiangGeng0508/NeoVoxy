@@ -41,6 +41,8 @@ Iris `1.8.12` 发布包仍引用 Sodium 已移除的 `SodiumGameOptions`，与�
 - 远景信标光柱、放置式动力机械的远处剔除等原版扩展
 - Create 机壳连接纹理：根据已保存的 LoD 邻居计算连接，支持跨区段边角与方块修改后的刷新；旧缓存无需删除
 - `/voxy reload`
+- PingWheel 1.12.2 可选兼容：普通 MISS 后从本地 LoD 近似选取远处地形，复用原有标记协议；
+  距离仍受 PingWheel 限制，曲率开启时停用。配置与验收见 [PingWheel 兼容](docs/pingwheel.md)。
 - `/voxy import world <name>`
 - `/voxy import bobby <name>`
 - `/voxy import raw <path>`

@@ -58,6 +58,9 @@ public class VoxyConfig {
     public boolean enabled = true;
     public boolean enableRendering = true;
     public boolean ingestEnabled = true;
+    public boolean pingwheelLodPicking = true;
+    // Blocks; 0 follows the minimum of PingWheel's original ray distance and the LOD radius.
+    public int pingwheelMaxDistanceBlocks = 0;
     public boolean xaeroMapSync = true;
     public boolean xaeroMapCoarse = true;
     public int xaeroMapTilesPerSecond = 20;
@@ -247,6 +250,7 @@ public class VoxyConfig {
     }
 
     public void sanitize() {
+        this.pingwheelMaxDistanceBlocks = Math.clamp(this.pingwheelMaxDistanceBlocks, 0, 32768);
         this.cmdListHoldMaxFrames = Math.clamp(this.cmdListHoldMaxFrames, 2, 60);
         this.sectionArrayPoolMiB = Math.clamp(this.sectionArrayPoolMiB, 25, 1024);
         WorldSection.setArrayPoolCapMiB(this.sectionArrayPoolMiB);

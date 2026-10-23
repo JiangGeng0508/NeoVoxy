@@ -287,6 +287,16 @@ public class Mapper {
         return this.stateEntryForRenderId(blockId).state;
     }
 
+    /** Optional CPU readers race mapping appends; copy the immutable state under the mapping lock. */
+    public BlockState getBlockStateForLocalReader(int blockId) {
+        this.blockLock.lock();
+        try {
+            return this.getBlockStateFromBlockId(blockId);
+        } finally {
+            this.blockLock.unlock();
+        }
+    }
+
     /** Resolves the base state and variant descriptor, including seasonal render-only IDs. */
     public StateEntry stateEntryForRenderId(int blockId) {
         if (blockId < this.blockId2stateEntry.size()) {

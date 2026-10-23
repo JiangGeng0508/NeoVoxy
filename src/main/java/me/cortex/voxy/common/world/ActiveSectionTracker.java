@@ -246,7 +246,7 @@ public class ActiveSectionTracker {
                 }
 
                 //We failed everything, try get it again
-                return this.acquire(key, nullOnEmpty);
+                return this.acquire(key, nullOnEmpty, loadFrom);
             }
         }
     }
