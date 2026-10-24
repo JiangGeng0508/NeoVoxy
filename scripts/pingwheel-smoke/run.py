@@ -21,7 +21,8 @@ for mod in (base / 'mods').glob('*.jar'):
         shutil.copy2(mod, work / 'mods' / mod.name)
 (work / 'config/voxy-config.json').write_text(json.dumps({
     'enabled': True, 'enable_rendering': True, 'ingest_enabled': False, 'distant_gen_enabled': False,
-    'section_render_distance': 0.625, 'service_threads': 2, 'pingwheel_lod_picking': True,
+    'section_render_distance': 32, 'service_threads': 2, 'pingwheel_lod_picking': True,
+    'pingwheel_max_distance_blocks': 0,
 }))
 (work / 'options.txt').write_text('renderDistance:2\nsimulationDistance:5\nmaxFps:30\nenableVsync:false\n'
     'pauseOnLostFocus:false\nfullscreen:false\noverrideWidth:640\noverrideHeight:360\njoinedFirstServer:true\n')

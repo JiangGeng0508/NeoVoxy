@@ -72,7 +72,7 @@
 17. 仅用户触发 ping 时查询，不做每帧扫描。限制在途任务、局部缓存、区段读取数和遍历工作量；超预算/超时取消，不能静默发出不完整结果。记录实际耗时和读取次数，避免无界线程池及请求堆积。
 
 距离、生命周期与兼容
-18. 首版遵守 traceDirectional 实际收到的距离，再取 NeoVoxy 有效 LoD 范围及联动上限的最小值。PingWheel 普通射线是 min(raycastDistance,pingDistance)，默认 1024/2048。接收端 pingDistance >= 2048 会跳过距离过滤，不要把该接收语义误用于所有选点路径。不修改用户已有 PingWheel 配置。
+18. 首版曾遵守 traceDirectional 实际收到的距离；2026-10-24 按远距离标记需求调整：LoD 查询独立使用 NeoVoxy 有效 LoD 范围及非零联动上限的最小值，0 跟随完整 LoD 视距。普通方块/实体射线仍是 min(raycastDistance,pingDistance)，默认 1024/2048。接收端 pingDistance >= 2048 会跳过距离过滤，调低时仍可能过滤远处标记。不修改用户已有 PingWheel 配置。
 19. 用触发时的 cameraEntity 眼睛位置、方向和 partial tick 构建请求，沿用 PingWheel 的视角语义。第三人称不能随意改为屏幕中心相机原点；不接入 Vista 副视口或阴影视图。
 20. 发起时捕获连接、世界/维度、engine generation、频道、sequence、射线和配置状态；完成时在客户端线程核验有效性。退出、换服、同维度世界重载、切维度、voxy reload、关闭渲染或联动、后续操作使旧请求失效时，丢弃旧结果。不要在回调里读取新的 sequence 然后发送旧射线结果。
 21. NeoVoxy 未启用、渲染关闭、数据不可用或 earth_curve_ratio 非零时停用新增查询，保留原 PingWheel 行为，并说明曲率模式暂不支持。普通/Iris 无曲率场景都需要验收；首版不宣称按最终像素精确选点。

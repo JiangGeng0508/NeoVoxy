@@ -1,5 +1,6 @@
 package me.cortex.voxy.client.core.picking;
 
+import me.cortex.voxy.client.compat.pingwheel.PingWheelBridge;
 import me.cortex.voxy.common.config.section.SectionSerializationStorage;
 import me.cortex.voxy.common.config.storage.inmemory.MemoryStorageBackend;
 import me.cortex.voxy.common.world.WorldEngine;
@@ -10,20 +11,26 @@ import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.Vec3;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 class LodRaycasterTest {
-    @Test void distanceUsesOriginalRayLodRadiusAndExplicitBlockCap() {
-        assertEquals(1024, PickingDistance.limit(1024, 16, 0));
-        assertEquals(320, PickingDistance.limit(1024, 0.625f, 0));
-        assertEquals(128, PickingDistance.limit(1024, 16, 128));
-        assertEquals(1024, PickingDistance.limit(1024, 16, 32768));
-        assertEquals(0, PickingDistance.limit(Double.NaN, 16, 0));
+    @Test void distanceUsesFullLodRadiusAndOptionalBlockCap() {
+        assertEquals(8192, PickingDistance.limit(16, 0));
+        assertEquals(32768, PickingDistance.limit(64, 0));
+        assertEquals(320, PickingDistance.limit(0.625f, 0));
+        assertEquals(128, PickingDistance.limit(16, 128));
+        assertEquals(8192, PickingDistance.limit(16, 32768));
+        assertEquals(0, PickingDistance.limit(Float.NaN, 0));
+        assertEquals(0, PickingDistance.limit(Float.POSITIVE_INFINITY, 0));
+        assertEquals(0, PickingDistance.limit(0, 0));
+        assertEquals(0, PickingDistance.limit(-1, 0));
     }
-    private static final LodRaycaster.Bounds BOUNDS = new LodRaycaster.Bounds(-1024, -64, -1024, 1024, 320, 1024);
+    private static final LodRaycaster.Bounds BOUNDS = new LodRaycaster.Bounds(-30_000_000, -64, -30_000_000, 30_000_000, 320, 30_000_000);
     private static final long TIME = 5_000_000_000L;
 
     private static final class Fixture implements AutoCloseable {
@@ -39,18 +46,46 @@ class LodRaycasterTest {
         }
         long value(BlockState state) { return Mapper.composeMappingId((byte) 15, this.engine.getMapper().getIdForBlockState(state), 0); }
         LodRaycaster.Result trace(Vec3 origin, Vec3 direction, double distance, boolean crouch) {
-            return trace(origin, direction, distance, crouch, 256);
+            return trace(origin, direction, distance, crouch, PingWheelBridge.MAX_SECTION_READS);
         }
         LodRaycaster.Result trace(Vec3 origin, Vec3 direction, double distance, boolean crouch, int maxReads) {
             this.engine.acquireRef();
             try (var source = new LocalLodSource(this.engine, crouch, () -> false, System.nanoTime() + TIME, maxReads)) {
-                return LodRaycaster.trace(new LodRaycaster.Ray(origin, direction, distance, BOUNDS), source, () -> false, TIME, 32768);
+                return LodRaycaster.trace(new LodRaycaster.Ray(origin, direction, distance, BOUNDS), source, () -> false, TIME, PingWheelBridge.MAX_NODES);
             } finally { this.engine.releaseRef(); }
         }
         @Override public void close() {
             assertEquals(0, this.remote.get(), "picking must not trigger remote LOD requests");
             assertEquals(0, this.engine.getActiveSectionCount(), "every section reference must be released");
             this.engine.free();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {2048, 8192, 32752})
+    void distantCoarseTerrainCanBePickedAcrossTheFullRenderRadius(int target) {
+        try (var f = new Fixture()) {
+            for (int sx = 0; sx <= target / 512; sx++) {
+                var coarse = f.section(4, sx, 0, 0, Blocks.AIR.defaultBlockState(), 255);
+                if (sx == target / 512)
+                    coarse.materialize()[WorldSection.getIndex((target >> 4) & 31, 0, 0)] = f.value(Blocks.STONE.defaultBlockState());
+                f.storage.saveSection(coarse);
+            }
+            Vec3 origin = new Vec3(0.5, 8, 8), direction = new Vec3(1, 0, 0);
+            double distance = PickingDistance.limit(64, 0);
+            var hit = f.trace(origin, direction, distance, false);
+            assertEquals(LodRaycaster.Status.HIT, hit.status(), hit.toString());
+            assertEquals(target, hit.position().x, 1e-9);
+            assertEquals(4, hit.lod());
+            assertEquals(Direction.WEST, hit.normal());
+            assertTrue(hit.visitedNodes() < 4 * (target / 32 + 1) + 256,
+                    "known uniform coarse air should skip voxel traversal");
+            assertEquals(LodRaycaster.Status.MISS,
+                    f.trace(origin, direction, PickingDistance.limit(64, 1024), false).status());
+            if (target > 8192) {
+                assertTrue(hit.sectionReads() > 256, "exercise the old implicit read-budget limit");
+                assertEquals(LodRaycaster.Status.BUDGET, f.trace(origin, direction, distance, false, 256).status());
+            }
         }
     }
 

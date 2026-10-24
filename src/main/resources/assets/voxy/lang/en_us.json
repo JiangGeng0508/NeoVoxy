@@ -228,7 +228,7 @@
   "voxy.config.pingwheel.enabled": "Pick distant LOD terrain",
   "voxy.config.pingwheel.enabled.tooltip": "Use locally saved LOD when PingWheel misses blocks and entities. Requires PingWheel 1.12.2. Approximate voxel surfaces; crouch also picks fluids. Unknown terrain blocks the query. Disabled with world curvature. Does not extend block interaction reach.",
   "voxy.config.pingwheel.distance": "Maximum LOD pick distance (blocks)",
-  "voxy.config.pingwheel.distance.tooltip": "Additional distance cap in blocks. 0 follows the smaller of PingWheel's original ray distance and Voxy's LOD radius. PingWheel defaults to a 1024-block ray and 2048-block ping distance. This option does not change PingWheel settings.",
-  "voxy.config.pingwheel.followDistance": "Follow PingWheel / LOD distance",
+  "voxy.config.pingwheel.distance.tooltip": "Additional distance cap in blocks. 0 uses Voxy's full LOD render distance, without PingWheel's ordinary 1024-block ray limit. Larger values can only shorten that range. Requires locally available terrain data. This option does not change PingWheel settings.",
+  "voxy.config.pingwheel.followDistance": "Full LOD distance (no extra cap)",
   "voxy.config.pingwheel.blocks": "%s blocks"
 }

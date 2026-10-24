@@ -59,7 +59,7 @@ public class VoxyConfig {
     public boolean enableRendering = true;
     public boolean ingestEnabled = true;
     public boolean pingwheelLodPicking = true;
-    // Blocks; 0 follows the minimum of PingWheel's original ray distance and the LOD radius.
+    // Blocks; 0 follows the full LOD render radius without an additional distance cap.
     public int pingwheelMaxDistanceBlocks = 0;
     public boolean xaeroMapSync = true;
     public boolean xaeroMapCoarse = true;

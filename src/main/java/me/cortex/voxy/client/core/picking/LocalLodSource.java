@@ -85,10 +85,12 @@ public final class LocalLodSource implements LodRaycaster.Source {
     @Override public int finestLevel() { return this.finest; }
 
     @Override public LodRaycaster.Cell uniform() {
-        // Only LOD0 can cover an entire 32-block region without crossing voxel boundaries.
-        Snapshot fine = this.prepared[0];
+        // A fully known uniform finest snapshot also covers this region at coarse LODs.
+        // Skipping its cells keeps long rays through known empty terrain inexpensive.
+        if (this.finest > 4) return null;
+        Snapshot fine = this.prepared[this.finest];
         if (fine == MISSING || fine.data != null || fine.known != 255) return null;
-        return new LodRaycaster.Cell(material(fine.uniform), 0);
+        return new LodRaycaster.Cell(material(fine.uniform), this.finest);
     }
 
     @Override public LodRaycaster.Cell sample(int bx, int by, int bz) {

@@ -63,13 +63,13 @@ public final class PingWheelSmoke {
             if (renderer == null) return;
             if (state == 2) {
                 var engine = renderer.getEngine();
-                int sy = ((int) Math.floor(mc.player.getEyePosition().y)) >> 5;
-                // Exact ray corridor; target x=256 is outside the vanilla 2-chunk view.
-                for (int sx = 0; sx <= 8; sx++) {
-                    var section = engine.acquire(0, sx, sy, 0);
+                int sy = ((int) Math.floor(mc.player.getEyePosition().y)) >> 9;
+                // Coarse known corridor; x=8192 exceeds both ordinary PingWheel distance settings.
+                for (int sx = 0; sx <= 16; sx++) {
+                    var section = engine.acquire(4, sx, sy, 0);
                     try {
                         synchronized (section) {
-                            section.setUniform(sx == 8 ? Mapper.composeMappingId((byte) 15,
+                            section.setUniform(sx == 16 ? Mapper.composeMappingId((byte) 15,
                                     engine.getMapper().getIdForBlockState(Blocks.STONE.defaultBlockState()), 0) : Mapper.AIR);
                             section.setKnownOctants(255);
                         }
@@ -78,13 +78,16 @@ public final class PingWheelSmoke {
                     } finally { section.release(); }
                 }
                 ClientConfig.HANDLER.getConfig().setChannel("voxy-fixture");
+                if (ClientConfig.HANDLER.getConfig().getRaycastDistance() != 1024
+                        || ClientConfig.HANDLER.getConfig().getPingDistance() != 2048)
+                    throw new AssertionError("probe must exercise unchanged PingWheel distance defaults");
                 PingManager.clearPings();
                 System.out.println("PINGWHEEL_SMOKE eye=" + mc.player.getEyePosition() + " pipeline=" + renderer.getClass().getName());
                 PERFORM.invoke(null, 1.0f);
                 state = 3; wait = 100;
             } else if (state == 3) {
-                verifyPosition(256, "LOD pick");
-                Files.writeString(output.resolve("lod.pass"), "Actual MISS bridge sent one terrain ping at x=256 through integrated PingWheel networking.\n");
+                verifyPosition(8192, "LOD pick beyond ordinary ray distance");
+                Files.writeString(output.resolve("lod.pass"), "Actual MISS bridge sent one terrain ping at x=8192 with PingWheel defaults 1024/2048 through integrated networking.\n");
                 PingManager.clearPings();
                 VoxyConfig.CONFIG.pingwheelLodPicking = false;
                 PERFORM.invoke(null, 1.0f);

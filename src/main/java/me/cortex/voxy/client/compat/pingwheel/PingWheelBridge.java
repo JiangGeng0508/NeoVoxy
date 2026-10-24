@@ -29,7 +29,9 @@ import java.util.concurrent.TimeUnit;
 /** Resolved only for the supported optional client mod. No world/entity reads on the worker. */
 public final class PingWheelBridge {
     public static final long BUDGET_NANOS = 250_000_000L;
-    public static final int MAX_SECTION_READS = 256, MAX_NODES = 32768;
+    // Cover the full supported 32768-block LOD radius, including diagonal rays.
+    // The deadline and snapshot cache still bound latency and retained memory.
+    public static final int MAX_SECTION_READS = 16384, MAX_NODES = 1048576;
     private static final PingRequestGuard GUARD = new PingRequestGuard();
     private static final ThreadPoolExecutor WORKER = new ThreadPoolExecutor(0, 1, 30, TimeUnit.SECONDS,
             new SynchronousQueue<>(), task -> {
@@ -55,7 +57,7 @@ public final class PingWheelBridge {
 
     public static long beginOperation() { pending = null; return GUARD.begin(); }
 
-    public static boolean tryPick(long token, Vec3 direction, float partialTick, double originalDistance,
+    public static boolean tryPick(long token, Vec3 direction, float partialTick,
                                   boolean crouching, ClientConfig config, int sequence) {
         var mc = Minecraft.getInstance();
         Settings settings = Settings.capture(config);
@@ -65,7 +67,7 @@ public final class PingWheelBridge {
                 || renderer == null || camera == null || camera.level() != mc.level || !Float.isFinite(partialTick)) return false;
         WorldEngine engine = renderer.getEngine();
         if (!engine.isLive()) return false;
-        double distance = PickingDistance.limit(originalDistance, settings.radius, settings.cap);
+        double distance = PickingDistance.limit(settings.radius, settings.cap);
         if (!Double.isFinite(distance) || distance <= 0 || !GUARD.start(token)) return false;
         var border = mc.level.getWorldBorder();
         var bounds = new LodRaycaster.Bounds(Math.max(-30_000_000, border.getMinX()), mc.level.getMinBuildHeight(),

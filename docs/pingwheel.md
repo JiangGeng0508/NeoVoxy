@@ -19,10 +19,12 @@ JSON：`config/voxy-config.json`；NeoForge TOML：`config/voxy-client.toml`。
 | `pingwheel_lod_picking` | `true` | 普通 MISS 后查询本地 LoD |
 | `pingwheel_max_distance_blocks` | `0` | 额外距离上限，单位方块；范围 0–32768 |
 
-有效距离为 **PingWheel 本次普通射线距离、NeoVoxy LoD 半径、非零联动上限** 的最小值。
-0 表示跟随前两者。PingWheel 普通射线距离是 `min(raycastDistance,pingDistance)`，默认
-1024/2048，因此默认最多 1024 方块；本兼容不会修改 PingWheel 配置，也不会扩大方块交互距离。
-接收端 `pingDistance >= 2048` 跳过距离过滤的行为不改变发送端射线语义。
+有效距离为 **NeoVoxy LoD 半径、非零联动上限** 的最小值。0（默认）表示没有额外上限，
+跟随完整 LoD 视距，不再受 PingWheel 普通射线默认 1024 格的限制。NeoVoxy 默认半径为
+8192 方块，当前可配置到 32768 方块；提高 LoD 视距会同时扩大选点范围。
+普通方块/实体射线仍使用 PingWheel 的 `min(raycastDistance,pingDistance)`，不会增加方块交互距离。
+接收端 `pingDistance >= 2048`（默认值）不按距离过滤；若接收端主动调低此值，远处标记仍可能被过滤。
+本兼容不修改 PingWheel 配置。范围内仍需本地地形数据完整且查询未超时，不能保证每个可见像素都能选中。
 
 ## 选点与数据限制
 
@@ -42,9 +44,11 @@ JSON：`config/voxy-config.json`；NeoForge TOML：`config/voxy-client.toml`。
 ## 后台与生命周期
 
 只在用户执行 ping 时查询。最多一个后台任务，无排队请求，后续操作使旧结果失效。
-每次请求最多 256 次区段查找、32768 个遍历节点、16 个缓存区段快照，加上当前五层快照
+每次请求最多 16384 次区段查找、1048576 个遍历节点（覆盖当前完整 LoD 半径，包括斜向射线）、
+16 个缓存区段快照，加上当前五层快照
 最多约 5.25 MiB 稠密数组，
-预算 250 ms。磁盘/锁等待不可强制中断，完成读取后重新检查时间；超预算不发不完整命中。
+预算 250 ms。已知且均匀的粗层空气也按区段跳过，减少长射线遍历开销。
+磁盘/锁等待不可强制中断，完成读取后重新检查时间；超预算不发不完整命中。
 引擎引用保护存储关闭，区段引用在复制完快照后立即释放，异常与取消也释放。
 查询只使用 `acquireIfCachedLocal` / `loadSectionLocal`，不请求远程 LoD，不加载或生成原版区块，
 不扫描存储 key。修正缓存引用竞争重试丢失 local-only 加载器的问题。
@@ -60,7 +64,8 @@ DEBUG 日志 `PingWheel LOD pick` 记录状态、耗时、区段查找次数、�
 
 ## 验证
 
-CPU 回归随 `testJunit` / `build` 执行。覆盖本地命中、uniform、粗细层覆盖、未知遮挡、
+CPU 回归随 `testJunit` / `build` 执行。覆盖 2048/8192/32752 格远处地形命中、显式距离上限、
+完整 LoD 半径、本地命中、uniform、粗细层覆盖、未知遮挡、
 负坐标、轴向/边角边界、起点在体素内、维度高度、非有限输入、距离/读取/遍历预算、
 VISUAL/OUTLINE 流体规则、取消、后续操作失效与重复发送保护。存储 miss listener 断言
 没有远程请求，结束断言所有区段引用归零。

@@ -34,7 +34,7 @@ public abstract class MixinPingController {
                                            boolean crouching, Operation<HitResult> original) {
         HitResult hit = original.call(direction, partialTick, distance, crouching);
         if (hit == null || hit.getType() == HitResult.Type.MISS) {
-            voxy$taken = PingWheelBridge.tryPick(voxy$token, direction, partialTick, distance, crouching,
+            voxy$taken = PingWheelBridge.tryPick(voxy$token, direction, partialTick, crouching,
                     CLIENT_CONFIG, pingSequence);
         }
         return hit;

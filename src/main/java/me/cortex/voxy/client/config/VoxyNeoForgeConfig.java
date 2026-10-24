@@ -105,7 +105,7 @@ public class VoxyNeoForgeConfig {
             .comment("Approximate local LOD terrain picks on PingWheel 1.12.2 misses. Disabled with world curvature.")
             .define("pingwheelLodPicking", true);
     private static final ModConfigSpec.IntValue PINGWHEEL_MAX_DISTANCE_BLOCKS = BUILDER
-            .comment("LOD pick cap in blocks. 0 follows PingWheel's original ray distance and Voxy's LOD radius.")
+            .comment("LOD pick cap in blocks. 0 follows Voxy's full LOD radius, independent of PingWheel's ordinary ray distance.")
             .defineInRange("pingwheelMaxDistanceBlocks", 0, 0, 32768);
 
     private static final ModConfigSpec.BooleanValue XAERO_MAP_SYNC = BUILDER

@@ -228,7 +228,7 @@
   "voxy.config.pingwheel.enabled": "标记远处 LOD 地形",
   "voxy.config.pingwheel.enabled.tooltip": "PingWheel 未命中方块或实体时查询本地已保存的 LOD，需要 PingWheel 1.12.2。使用近似体素表面，潜行时也可选中流体。未知地形会中止查询，开启世界曲率时停用，不增加方块交互距离。",
   "voxy.config.pingwheel.distance": "LOD 选点距离上限（方块）",
-  "voxy.config.pingwheel.distance.tooltip": "额外距离上限，单位为方块。0 表示取 PingWheel 原射线距离和 Voxy LOD 半径的较小值。PingWheel 默认射线距离 1024 方块、标记距离 2048 方块；此设置不修改 PingWheel 配置。",
-  "voxy.config.pingwheel.followDistance": "跟随 PingWheel / LOD 距离",
+  "voxy.config.pingwheel.distance.tooltip": "额外距离上限，单位为方块。0 表示使用 Voxy 完整 LOD 视距，不受 PingWheel 普通射线默认 1024 格的限制。非零值只能缩短此范围。需要本地可用的地形数据；此设置不修改 PingWheel 配置。",
+  "voxy.config.pingwheel.followDistance": "完整 LOD 视距（无额外上限）",
   "voxy.config.pingwheel.blocks": "%s 方块"
 }
