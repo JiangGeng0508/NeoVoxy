@@ -19,6 +19,7 @@ Python 每次创建独立 `build/reports/xaero-smoke/run-<时间>/client`，关�
 | 标记 | 断言 |
 |---|---|
 | `write.pass` | LOD0 沙底 y=285、水面 y=300、沼泽生物群系、覆盖层及原生纹理高度 |
+| `incremental.pass` | 未加载池化瓦片能补图，相同像素保留原对象，邻居更新不触发整区域刷新，处理列表不重复注册 |
 | `precision.pass` | LOD4 暂定石面由 LOD0 完整金块地表替换 |
 | `real-map.pass` | 原版真实地图抵御冲突的 LOD 注入 |
 | `real-handoff.pass` | 实际 MapWriter 重新扫描像素，即使地形相同也移除 LOD 所有权 |

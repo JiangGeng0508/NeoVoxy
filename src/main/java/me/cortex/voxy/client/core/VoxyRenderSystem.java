@@ -719,7 +719,9 @@ public class VoxyRenderSystem {
         float near = getRenderDistance() <= 32.0f ? 8.0f : 16.0f;
         near = VoxyClient.disableSodiumChunkRender() ? 0.1f : near;
 
-        float far = farPlane;
+        // Keep SeedGen's required ModifyConstant target, while retaining dynamic shader-pack
+        // distances when its far plane is still the upstream 48000-block baseline.
+        float far = me.cortex.voxy.client.compat.seedgen.SeedGenCompat.projectionFarPlane(farPlane, 48000.0f);
 
         // Reverse-Z swaps the near and far mapping.
         if (properties.isReverseZ()) {

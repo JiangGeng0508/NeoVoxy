@@ -321,6 +321,9 @@ public class DistantWorldGenerator {
                 this.submitted.remove(pos);
             }
         });
+        // Register before enqueueing: a fast ingest worker may finish the callback before
+        // rawIngest returns. Adding afterwards can leave a stale submitted entry forever.
+        this.submitted.add(pos);
         batch.await(sectionCount);
 
         boolean allIngested = true;
@@ -340,11 +343,6 @@ public class DistantWorldGenerator {
                 allIngested = false;
                 //The refused task will never run; account for it (and poison the batch) here
                 batch.taskDone(false);
-            }
-        }
-        if (allIngested) {
-            synchronized (this.submitted) {
-                this.submitted.add(pos);
             }
         }
         return allIngested;

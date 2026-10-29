@@ -75,6 +75,13 @@ public class DistantGenerationManager {
         for (ServerLevel level : server.getAllLevels()) {
             var players = level.players();
             var generator = GENERATORS.get(level);
+            if (me.cortex.voxy.client.compat.seedgen.SeedGenCompat.ownsGeneration(level.dimension())) {
+                if (generator != null) {
+                    generator.shutdown();
+                    GENERATORS.remove(level);
+                }
+                continue;
+            }
             if (generator == null) {
                 if (players.isEmpty()) {
                     continue;//Dont create generators for empty dimensions

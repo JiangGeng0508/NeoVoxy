@@ -91,6 +91,9 @@ public final class WorldSection {
     private volatile int knownOctants;
     private java.util.BitSet suppliedSubsections;
     private int[] suppliedPerOctant;
+    // Direct LOD writers supply individual voxels, rather than complete 16-block subsections.
+    private java.util.BitSet directlySuppliedVoxels;
+    private int[] directlySuppliedPerOctant;
     volatile boolean dataAvailable;
 
     public int getKnownOctants() { return this.knownOctants; }
@@ -99,6 +102,8 @@ public final class WorldSection {
         this.knownOctants = mask & 255;
         this.suppliedSubsections = null;
         this.suppliedPerOctant = null;
+        this.directlySuppliedVoxels = null;
+        this.directlySuppliedPerOctant = null;
     }
 
     public synchronized boolean markKnownOctant(int x, int y, int z) {
@@ -173,6 +178,43 @@ public final class WorldSection {
     public long get(int idx) {
         long[] d = this.data;
         return d == null ? this.uniformValue : d[idx];
+    }
+
+    /**
+     * Upstream Voxy's direct-write API used by SeedGen. The caller holds a section reference
+     * and publishes through WorldEngine.markDirty after its batch; never save under this lock.
+     */
+    public synchronized long set(int x, int y, int z, long value) {
+        int index = getIndex(x, y, z);
+        long previous = this.get(index);
+        if (previous != value) {
+            this.materialize()[index] = value;
+            if (this.lvl == 0) {
+                int delta = Mapper.isNotAirInt(value) - Mapper.isNotAirInt(previous);
+                if (delta != 0) {
+                    this.addNonEmptyBlockCount(delta);
+                    this.updateLvl0State();
+                }
+            }
+        }
+        int octant = ((index >> 4) & 1) | ((index >> 8) & 2) | ((index >> 12) & 4);
+        if ((this.knownOctants & (1 << octant)) == 0) {
+            if (this.directlySuppliedVoxels == null) {
+                this.directlySuppliedVoxels = new java.util.BitSet(SECTION_VOLUME);
+                this.directlySuppliedPerOctant = new int[8];
+            }
+            if (!this.directlySuppliedVoxels.get(index)) {
+                this.directlySuppliedVoxels.set(index);
+                if (++this.directlySuppliedPerOctant[octant] == 16 * 16 * 16) {
+                    this.knownOctants |= 1 << octant;
+                    if (this.knownOctants == 255) {
+                        this.directlySuppliedVoxels = null;
+                        this.directlySuppliedPerOctant = null;
+                    }
+                }
+            }
+        }
+        return previous;
     }
 
     //Snapshot of the backing array, may be null when uniform. Callers must handle null.

@@ -73,6 +73,11 @@ python scripts/verify-mixins.py
 
 ## 参考验证的覆盖映射
 
+外部 SeedGen 兼容由 `DirectSectionWriteTest` 验证直接写入、空气覆盖与保存往返，
+`SeedGenBytecodeTest` 验证字段/方法签名适配和投影远裁剪距离。
+实际 SeedGen JAR 的客户端启动、写入与维度让出验收见
+[SeedGen client verification](../scripts/seedgen-smoke/README.md)。
+
 参考来源为 `neo-voxy-multiversion` 的 Minecraft 1.21.1 根工程。适用 CPU 验证已融入 `src/test/java`，无需维护另一套 `main()` 程序或依赖参考仓库目录。
 
 | 参考验证 | 本项目主要测试类 | 覆盖 |

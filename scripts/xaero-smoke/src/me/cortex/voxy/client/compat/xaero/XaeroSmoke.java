@@ -158,8 +158,12 @@ public final class XaeroSmoke {
                     if (++wait < 40) return;
                 }
                 Files.writeString(base.resolve("write.pass"), "LOD0 -> native map tile/texture height; top=300, ground=285; known source, swamp, water overlay.\n");
-                state = 10;
+                state = 30;
             }
+        }
+        if (state == 30 && verifyIncrementalCommits()) {
+            Files.writeString(base.resolve("incremental.pass"), "Unloaded pooled tiles repaired; identical pixels retain objects; texture updates do not request region refresh or duplicate processing.\n");
+            state = 10;
         }
         if (state >= 10 && state < 20 && mc.level != null) {
             var engine = WorldIdentifier.ofEngine(mc.level);
@@ -352,6 +356,58 @@ public final class XaeroSmoke {
         if (state == 3 && ++wait > 100) {
             System.out.println("XAERO_SMOKE PASS reload=" + reload);
             mc.stop();
+        }
+    }
+
+    private static boolean verifyIncrementalCommits() throws Exception {
+        var processor = WorldMapSession.getCurrentSession().getMapProcessor();
+        var region = processor.getLeafMapRegion(Integer.MAX_VALUE, -2, -1, true);
+        synchronized (processor.renderThreadPauseSync) {
+            synchronized (region.writerThreadPauseSync) {
+                synchronized (region) {
+                    if (region.getLoadState() != 2 || !region.isResting() || region.isWritingPaused() || region.isRefreshing()) return false;
+                    var field = XaeroSurfaceBridge.class.getDeclaredField("current");
+                    field.setAccessible(true);
+                    var session = field.get(null);
+                    if (session == null) return false;
+                    var commit = XaeroSurfaceBridge.class.getDeclaredMethod("commit", session.getClass(), SurfaceTile.class);
+                    commit.setAccessible(true);
+                    SurfaceTile.Pixel[] pixels = new SurfaceTile.Pixel[256];
+                    java.util.Arrays.fill(pixels, new SurfaceTile.Pixel(Blocks.GOLD_BLOCK.defaultBlockState(), 80, 80,
+                            net.minecraft.world.level.biome.Biomes.PLAINS, (byte) 0, java.util.List.of(), 0, false));
+                    // This tile's east neighbour texture already contains the main fixture.
+                    var data = new SurfaceTile(-37, -1, pixels);
+                    if (!(boolean) commit.invoke(null, session, data)) return false;
+                    if (region.isRefreshing() || region.recacheHasBeenRequested())
+                        throw new AssertionError("incremental write requested a full region refresh");
+                    var tile = processor.getMapTile(Integer.MAX_VALUE, -37, -1);
+                    var retained = tile.getBlock(0, 0);
+                    var levelsField = xaero.map.MapProcessor.class.getDeclaredField("toProcessLevels");
+                    levelsField.setAccessible(true);
+                    var levels = (java.util.ArrayList<?>[]) levelsField.get(processor);
+                    long before = levels[0].stream().filter(r -> r == region).count();
+                    for (int i = 0; i < 20; i++) {
+                        if (!(boolean) commit.invoke(null, session, data)) throw new AssertionError("identical commit blocked");
+                        if (tile.getBlock(0, 0) != retained) throw new AssertionError("identical pixels were replaced");
+                    }
+                    if (levels[0].stream().filter(r -> r == region).count() != before)
+                        throw new AssertionError("duplicate region processing entries");
+                    // Xaero's pool deliberately keeps old blocks in unloaded tiles.
+                    tile.setLoaded(false);
+                    for (int x = 0; x < 16; x++) for (int z = 0; z < 16; z++)
+                        ((ProvenancedPixel) tile.getBlock(x, z)).voxy$setSource(0);
+                    java.util.Arrays.fill(pixels, new SurfaceTile.Pixel(Blocks.IRON_BLOCK.defaultBlockState(), 81, 81,
+                            net.minecraft.world.level.biome.Biomes.PLAINS, (byte) 0, java.util.List.of(), 0, false));
+                    if (!(boolean) commit.invoke(null, session, data)) throw new AssertionError("unloaded tile commit blocked");
+                    tile = processor.getMapTile(Integer.MAX_VALUE, -37, -1);
+                    if (!tile.isLoaded() || !tile.getBlock(0, 0).getState().is(Blocks.IRON_BLOCK)
+                            || ((ProvenancedPixel) tile.getBlock(0, 0)).voxy$getSource() != SurfaceProvenance.encode(1, false))
+                        throw new AssertionError("pooled stale source pixels prevented hole repair");
+                    if (region.isRefreshing()) throw new AssertionError("neighbour update requested a full region refresh");
+                    verify(processor.getMapTile(Integer.MAX_VALUE, -33, -1));
+                    return true;
+                }
+            }
         }
     }
 

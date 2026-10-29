@@ -65,10 +65,13 @@ final class XaeroSurfaceBridge {
         long deadline = System.nanoTime() + Math.clamp(config.xaeroMapCommitMillis, 1, 10) * 1_000_000L;
         int limit = 4;
         do {
-            SurfaceTile tile = current.ready.peek();
-            if (tile == null || !commit(current, tile)) break;
-            current.ready.poll();
-            current.committed++;
+            SurfaceTile tile = current.ready.poll();
+            if (tile == null) break;
+            if (commit(current, tile)) current.committed++;
+            else {
+                current.queue.retry(tile.chunkX(), tile.chunkZ());
+                current.deferred++;
+            }
         } while (--limit > 0 && System.nanoTime() < deadline);
     }
 
@@ -84,12 +87,11 @@ final class XaeroSurfaceBridge {
             if (processor.isWritingPaused() || processor.isWaitingForWorldUpdate() || !session.matches(session.engine, processor, session.level)) return false;
             MapRegion region = processor.getLeafMapRegion(Integer.MAX_VALUE, data.chunkX() >> 5, data.chunkZ() >> 5, true);
             if (region == null) return false;
-            MapTileChunk changedChunk;
             synchronized (region.writerThreadPauseSync) {
                 if (region.isWritingPaused()) return false;
                 synchronized (region) {
                     if (region.getLoadState() != 2) {
-                        if (region.isResting()) {
+                        if (region.isResting() && !region.reloadHasBeenRequested()) {
                             region.setBeingWritten(true);
                             region.setShouldCache(true, "Voxy surface requires source pixels");
                             processor.getMapSaveLoad().requestLoad(region, "Voxy surface", false);
@@ -102,9 +104,13 @@ final class XaeroSurfaceBridge {
                     if (chunk != null && (chunk.getLoadState() != 2 || chunk.getLeafTexture().shouldDownloadFromPBO())) return false;
                     int ix = data.chunkX() & 3, iz = data.chunkZ() & 3;
                     MapTile tile = chunk == null ? null : chunk.getTile(ix, iz);
+                    // A recycled tile can still contain the previous location's
+                    // pooled MapBlocks. Only loaded source pixels own this tile.
+                    if (tile != null && !tile.isLoaded()) tile = null;
                     // A loaded foreign/real tile is protected pixel by pixel. New empty
                     // filler pixels carry their own marker, also across save/reload.
                     boolean changed = false;
+                    boolean visualChanged = false;
                     for (int z = 0; z < 16; z++) for (int x = 0; x < 16; x++) {
                         var incoming = data.pixels()[z * 16 + x];
                         if (incoming == null) continue;
@@ -120,11 +126,23 @@ final class XaeroSurfaceBridge {
                             overlay.increaseOpacity(cover.opacity());
                             block.addOverlay(processor.getOverlayManager().getOriginal(overlay));
                         }
-                        ((ProvenancedPixel) block).voxy$setSource(SurfaceProvenance.encode(incoming.lod() + 1, incoming.provisional()));
+                        int source = SurfaceProvenance.encode(incoming.lod() + 1, incoming.provisional());
+                        if (previous != null && block.equalsSlopesExcluded(previous)) {
+                            if (((ProvenancedPixel) previous).voxy$getSource() != source) {
+                                ((ProvenancedPixel) previous).voxy$setSource(source);
+                                changed = true;
+                            }
+                            continue;
+                        }
+                        ((ProvenancedPixel) block).voxy$setSource(source);
                         tile.setBlock(x, z, block);
                         changed = true;
+                        visualChanged = true;
                     }
-                    if (!changed) return true;
+                    if (!changed) {
+                        session.unchanged++;
+                        return true;
+                    }
                     if (chunk == null) {
                         chunk = new MapTileChunk(region, data.chunkX() >> 2, data.chunkZ() >> 2);
                         chunk.setLoadState((byte) 2);
@@ -134,38 +152,39 @@ final class XaeroSurfaceBridge {
                     tile.setWrittenCave(Integer.MAX_VALUE, 0);
                     tile.setLoaded(true);
                     // setWrittenOnce is exclusively reserved for genuine MapWriter scans.
-                    chunk.setTile(ix, iz, tile, processor.getBlockStateShortShapeCache(), processor);
+                    if (visualChanged) chunk.setTile(ix, iz, tile, processor.getBlockStateShortShapeCache(), processor);
                     chunk.setHasHadTerrain();
-                    chunk.setChanged(true);
                     region.setHasHadTerrain();
                     if (SingleplayerSurfaceStore.applies(region)) ((SupplementedRegion) region).voxy$setSupplement(true);
                     region.setBeingWritten(true);
-                    region.setAllCachePrepared(false);
                     region.registerVisit();
-                    processor.addToProcess(region);
-                    invalidateSlopes(chunk);
-                    chunk.updateBuffers(processor, processor.getWorldBlockTintProvider(), processor.getOverlayManager(), false,
-                            processor.getBlockStateShortShapeCache(), new MapUpdateFastConfig(processor));
-                    chunk.setChanged(false);
-                    changedChunk = chunk;
-                }
-            }
-            // Do not hold two region locks. The native refresh path recomputes
-            // neighbouring slopes, colours and parent textures on its own schedule.
-            for (int dx = 0; dx <= 1; dx++) for (int dz = 0; dz <= 1; dz++) {
-                if (dx == 0 && dz == 0) continue;
-                MapTileChunk neighbour = changedChunk.getNeighbourTileChunk(dx, dz, processor, true);
-                if (neighbour == null) continue;
-                MapRegion neighbourRegion = neighbour.getInRegion();
-                synchronized (neighbourRegion.writerThreadPauseSync) {
-                    synchronized (neighbourRegion) {
-                        if (!neighbourRegion.isWritingPaused() && neighbourRegion.isResting() && neighbour.getLoadState() == 2)
-                            neighbourRegion.requestRefresh(processor, false);
+                    if (visualChanged) {
+                        scheduleBufferUpdate(chunk);
+                        // Xaero's slope sampling only crosses texture boundaries
+                        // WITHIN this region. Mark those textures, not all 1024
+                        // tiles via requestRefresh (which also forces recaching).
+                        if (ix == 3 && tx < 7) scheduleBufferUpdate(region.getChunk(tx + 1, tz));
+                        if (iz == 3 && tz < 7) scheduleBufferUpdate(region.getChunk(tx, tz + 1));
+                        if (ix == 3 && iz == 3 && tx < 7 && tz < 7)
+                            scheduleBufferUpdate(region.getChunk(tx + 1, tz + 1));
                     }
+                    // addToProcess appends without deduplicating in Xaero 1.47.0.
+                    if (!processor.isProcessed(region)) processor.addToProcess(region);
+                    session.changed++;
                 }
             }
             return true;
         }
+    }
+
+    private static void scheduleBufferUpdate(MapTileChunk chunk) {
+        if (chunk == null || chunk.getLoadState() != 2) return;
+        invalidateSlopes(chunk);
+        chunk.setToUpdateBuffers(true);
+        chunk.setChanged(false);
+        chunk.getInRegion().setAllCachePrepared(false);
+        // LeafRegionTexture.preUpload performs the colour update on the client
+        // thread, coalescing multiple tile writes into one native texture update.
     }
 
     private static void invalidateSlopes(MapTileChunk chunk) {
@@ -204,6 +223,7 @@ final class XaeroSurfaceBridge {
         volatile Throwable failure;
         volatile int tilesPerSecond;
         long committed;
+        long changed, unchanged, deferred;
 
         Session(WorldEngine engine, MapProcessor processor, ClientLevel level, VoxyConfig config, boolean seed) {
             this.engine = engine;
@@ -278,7 +298,8 @@ final class XaeroSurfaceBridge {
             this.worker.interrupt();
             this.queue.clear();
             this.ready.clear();
-            Logger.info("Xaero LOD map sync detached: " + this.committed + " tiles submitted; " + this.queue.overflowCount()
+            Logger.info("Xaero LOD map sync detached: " + this.committed + " tiles submitted (" + this.changed
+                    + " changed, " + this.unchanged + " unchanged); " + this.deferred + " deferred; " + this.queue.overflowCount()
                     + " region notifications evicted (revisited LOD will retry).");
         }
     }

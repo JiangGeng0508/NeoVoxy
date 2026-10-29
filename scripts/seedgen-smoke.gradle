@@ -1,0 +1,22 @@
+import groovy.json.JsonOutput
+
+// Opt-in real-client verification; the probe is excluded from ordinary builds.
+allprojects {
+    afterEvaluate {
+        sourceSets.main.java.srcDir 'scripts/seedgen-smoke/src'
+        def base = layout.buildDirectory.dir('reports/seedgen-smoke').get().asFile
+        tasks.register('writeSeedGenSmokeLaunch') {
+            dependsOn 'classes', 'neoFormJoined1.21.1-20240808.144430DownloadAssets',
+                    'neoFormJoined1.21.1-20240808.144430ExtractNatives', 'writeMinecraftClasspathClient'
+            doLast {
+                def run = tasks.named('runClient').get()
+                base.mkdirs()
+                new File(base, 'launch.json').text = JsonOutput.toJson([
+                        executable: run.javaLauncher.get().executablePath.asFile.absolutePath,
+                        args: run.allJvmArgs + ['-cp', run.classpath.asPath, run.mainClass.get()] + run.args,
+                        modClasses: run.environment['MOD_CLASSES']])
+                copy { from configurations.sodiumOuter.singleFile; into new File(base, 'mods') }
+            }
+        }
+    }
+}

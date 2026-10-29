@@ -6,6 +6,40 @@ import java.util.HashSet;
 import static org.junit.jupiter.api.Assertions.*;
 
 class SurfaceQueueTest {
+    @Test void continuousParentUpdatesCannotStarveLaterTiles() {
+        var queue = new SurfaceQueue(4);
+        long section = WorldEngine.getWorldSectionId(4, -1, 0, -2);
+        var visited = new HashSet<SurfaceQueue.Tile>();
+        for (int i = 0; i < 1024; i++) {
+            queue.offer(section);
+            assertTrue(visited.add(queue.poll()), "every tile must get a turn during continuous generation");
+        }
+        assertEquals(1024, visited.size());
+        assertTrue(visited.contains(new SurfaceQueue.Tile(-1, -33)));
+    }
+
+    @Test void busyXaeroRegionDoesNotBlockOtherRegionsOrLoseItsRetry() {
+        var queue = new SurfaceQueue(4);
+        queue.offer(WorldEngine.getWorldSectionId(4, -1, 0, -1));
+        var blocked = queue.poll(0);
+        queue.retry(blocked.x(), blocked.z(), 0);
+        // New voxel notifications must not bypass a pending source load's backoff.
+        queue.offer(WorldEngine.getWorldSectionId(4, -1, 1, -1));
+        queue.offer(WorldEngine.getWorldSectionId(0, 16, 0, 16));
+        for (int i = 0; i < 4; i++) {
+            var tile = queue.poll(1);
+            assertNotNull(tile);
+            assertTrue(tile.x() >= 32 && tile.z() >= 32);
+        }
+        assertNull(queue.poll(249_999_999));
+        var retried = new HashSet<SurfaceQueue.Tile>();
+        SurfaceQueue.Tile tile;
+        while ((tile = queue.poll(250_000_000)) != null) assertTrue(retried.add(tile));
+        assertEquals(1024, retried.size());
+        assertTrue(retried.contains(blocked));
+        assertEquals(0, queue.regionCount());
+    }
+
     @Test void coalescesVerticalUpdatesAndExpandsCoarseNegativeCoordinatesExactlyOnce() {
         var queue = new SurfaceQueue(4);
         for (int y = -64; y < 64; y++) queue.offer(WorldEngine.getWorldSectionId(4, -1, y, -2));

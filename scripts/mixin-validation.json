@@ -3,6 +3,22 @@
     "me.cortex.voxy.client.mixin.eclipticseasons.MixinWorldImporter": "Legacy importer mixin is already unregistered; do not enable it as part of build validation."
   },
   "optionalTargets": {
+    "mobius.voxyseedgen.voxy.LodLevels": {
+      "prefix": "mobius.voxyseedgen.",
+      "reason": "SeedGen is optional; ClientVoxyMixinPlugin gates its ABI adapter by voxyseedgen."
+    },
+    "mobius.voxyseedgen.voxy.RenderReach": {
+      "prefix": "mobius.voxyseedgen.",
+      "reason": "SeedGen is optional; ClientVoxyMixinPlugin gates its ABI adapter by voxyseedgen."
+    },
+    "mobius.voxyseedgen.voxy.CoarseRings": {
+      "prefix": "mobius.voxyseedgen.",
+      "reason": "SeedGen is optional; ClientVoxyMixinPlugin gates its ABI adapter by voxyseedgen."
+    },
+    "mobius.voxyseedgen.voxy.LadderWriter": {
+      "prefix": "mobius.voxyseedgen.",
+      "reason": "SeedGen is optional; ClientVoxyMixinPlugin gates its ABI adapter by voxyseedgen."
+    },
     "de.melanx.simplebackups.BackupThread": {
       "prefix": "de.melanx.simplebackups.",
       "reason": "Simple Backups is not a compile dependency; CommonVoxyMixinPlugin gates it by simplebackups."

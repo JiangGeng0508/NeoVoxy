@@ -70,6 +70,10 @@ public class ClientVoxyMixinPlugin implements IMixinConfigPlugin {
         if (FMLLoader.getDist() != Dist.CLIENT) {
             return mixins;
         }
+        if (isLoadedEarly("voxyseedgen")) {
+            mixins.add("seedgen.MixinSeedGenAbi");
+            mixins.add("seedgen.MixinSeedGenLadderWriter");
+        }
         if (me.cortex.voxy.client.compat.xaero.XaeroGate.supported()) {
             mixins.add("xaero.MixinMapBlock");
             mixins.add("xaero.MixinMapSaveLoad");
@@ -160,5 +164,9 @@ public class ClientVoxyMixinPlugin implements IMixinConfigPlugin {
     public void preApply(String targetClassName, ClassNode targetClass, String mixinClassName, IMixinInfo mixinInfo) {}
 
     @Override
-    public void postApply(String targetClassName, ClassNode targetClass, String mixinClassName, IMixinInfo mixinInfo) {}
+    public void postApply(String targetClassName, ClassNode targetClass, String mixinClassName, IMixinInfo mixinInfo) {
+        if (mixinClassName.endsWith(".seedgen.MixinSeedGenAbi")) {
+            me.cortex.voxy.client.compat.seedgen.SeedGenBytecode.adapt(targetClass);
+        }
+    }
 }

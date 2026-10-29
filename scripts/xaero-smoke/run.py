@@ -62,6 +62,6 @@ for reload in ((True,) if options.reload_run else (False,) if options.bare else 
     assert marker.exists(), f'Probe did not pass; see {log}'
     print(marker.read_text(), flush=True)
 if not options.bare:
-    for name in ['precision', 'real-map', 'real-handoff', 'cache', 'import', 'receive', 'coarse-reload', 'eviction', 'subworld', 'native-zip', 'dimension']:
+    for name in ['incremental', 'precision', 'real-map', 'real-handoff', 'cache', 'import', 'receive', 'coarse-reload', 'eviction', 'subworld', 'native-zip', 'dimension']:
         assert (run / (name + '.pass')).exists(), 'Missing verification: ' + name
 print('XAERO_SMOKE PASS', flush=True)

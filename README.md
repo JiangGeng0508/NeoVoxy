@@ -12,7 +12,7 @@ NeoVoxy 是面向 Minecraft 1.21.1 + NeoForge 的 Voxy 移植项目，目标是�
 
 - Minecraft: `1.21.1`
 - NeoForge: `21.1.244`
-- Mod 版本: `0.2.18-beta+neoforge`
+- Mod 版本: `0.2.19-beta+neoforge`
 - Java: `21`
 - 客户端必需依赖: Sodium NeoForge `>=0.8.12, <0.9`，编译基线 `mc1.21.1-0.8.12-neoforge`
 - 客户端可选依赖: Iris NeoForge `>=1.8.14-beta.1`，编译基线 `1.8.14-beta.1+1.21.1-neoforge`（启用光影时自动切换到 Iris 渲染管线）
@@ -71,7 +71,7 @@ Iris `1.8.12` 发布包仍引用 Sodium 已移除的 `SodiumGameOptions`，与�
 | `sky_fog_distance` | `96` | 天空雾结束距离（方块） |
 | `ssao_mode` | `auto`（省略时） | SSAO 模式（auto/basic/better/best） |
 | `earth_curve_ratio` | `0` | 世界曲率倍率；`0` 关闭，`50-5000` 开启（值越大曲率越明显） |
-| `distant_gen_enabled` | `false` | 远处区块后台生成，仅单人/局域网主机生效；安装 Groundwork 时自动停用内置生成 |
+| `distant_gen_enabled` | `true` | 远处区块后台生成，仅单人/局域网主机生效；安装 Groundwork 时自动停用内置生成 |
 | `distant_gen_radius` | `96` | 后台生成半径（区块） |
 | `distant_gen_max_in_flight` | `16` | 同时生成的区块数量 |
 | `distant_gen_max_mspt` | `45` | 生成时的服务器 MSPT 上限 |
@@ -84,6 +84,10 @@ Iris `1.8.12` 发布包仍引用 Sodium 已移除的 `SodiumGameOptions`，与�
 | `render_far_player_names` | `true` | 远景玩家代理的名牌显示 |
 
 ### 运行时开关
+
+SeedGen 的种子地形生成功能由外部模组提供，本模组不内置种子采样或临时预览。
+保留外部 SeedGen 所需的直接写入接口、投影远裁剪兼容点和签名适配；外部 SeedGen
+在当前维度运行生成任务时，普通后台区块生成会让出，避免重复生成。
 
 - `/voxy distantgen`：查看/暂停/恢复/重置远处区块生成；`resume` 只解除暂停，仍需在配置中开启后台生成
 - `/voxy debug`：输出信标 / 列车 / 动力学 / 雾 / 性能等调试信息（`capture` 可抓取性能采样）
