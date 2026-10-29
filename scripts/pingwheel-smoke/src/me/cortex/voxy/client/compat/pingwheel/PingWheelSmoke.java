@@ -24,6 +24,7 @@ import java.nio.file.Path;
 
 public final class PingWheelSmoke {
     private static int state, ticks, wait;
+    private static Vec3 shallowExpected;
     private static final java.lang.reflect.Method PERFORM;
     private static final java.lang.reflect.Field POSITION;
     static {
@@ -53,10 +54,10 @@ public final class PingWheelSmoke {
             state = 2;
             wait = 60;
         }
-        if (state >= 2 && state <= 8 && mc.player != null) {
+        if ((state >= 2 && state <= 8 || state == 11) && mc.player != null) {
             mc.setScreen(null);
-            mc.player.setYRot(-90);
-            mc.player.setXRot(0);
+            mc.player.setYRot(state == 11 ? -83 : -90);
+            mc.player.setXRot(state == 11 ? 0.57f : 0);
             mc.player.getAbilities().flying = true;
             if (--wait > 0) return;
             var renderer = IGetVoxyRenderSystem.getNullable();
@@ -65,8 +66,8 @@ public final class PingWheelSmoke {
                 var engine = renderer.getEngine();
                 int sy = ((int) Math.floor(mc.player.getEyePosition().y)) >> 9;
                 // Coarse known corridor; x=8192 exceeds both ordinary PingWheel distance settings.
-                for (int sx = 0; sx <= 16; sx++) {
-                    var section = engine.acquire(4, sx, sy, 0);
+                for (int sx = 0; sx <= 16; sx++) for (int sz = 0; sz <= 2; sz++) {
+                    var section = engine.acquire(4, sx, sy, sz);
                     try {
                         synchronized (section) {
                             section.setUniform(sx == 16 ? Mapper.composeMappingId((byte) 15,
@@ -88,6 +89,19 @@ public final class PingWheelSmoke {
             } else if (state == 3) {
                 verifyPosition(8192, "LOD pick beyond ordinary ray distance");
                 Files.writeString(output.resolve("lod.pass"), "Actual MISS bridge sent one terrain ping at x=8192 with PingWheel defaults 1024/2048 through integrated networking.\n");
+                PingManager.clearPings();
+                mc.player.setYRot(-83);
+                mc.player.setXRot(0.57f);
+                Vec3 origin = mc.player.getEyePosition(1.0f), direction = mc.player.getViewVector(1.0f);
+                shallowExpected = origin.add(direction.scale((8192 - origin.x) / direction.x));
+                PERFORM.invoke(null, 1.0f);
+                state = 11; wait = 100;
+            } else if (state == 11) {
+                verifyPosition(8192, "shallow LOD pick");
+                Vec3 position = (Vec3) POSITION.get(PingManager.PING_REPO.getFirst());
+                if (position.distanceTo(shallowExpected) > 0.01)
+                    throw new AssertionError("shallow ray left the aimed line: " + position + " vs " + shallowExpected);
+                Files.writeString(output.resolve("shallow.pass"), "Pitch 0.57 degrees, yaw -83: exactly one LOD ping at x=8192 on the aimed ray through integrated networking.\n");
                 PingManager.clearPings();
                 VoxyConfig.CONFIG.pingwheelLodPicking = false;
                 PERFORM.invoke(null, 1.0f);

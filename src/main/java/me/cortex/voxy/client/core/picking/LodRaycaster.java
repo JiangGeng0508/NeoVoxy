@@ -33,6 +33,44 @@ public final class LodRaycaster {
     public static final class LimitReached extends RuntimeException {}
     private record Interval(double entry, double exit, Direction normal) {}
     private record Node(int x, int y, int z, int level, Interval interval) {}
+    private static final class SectionAxis {
+        final double origin, direction;
+        final int step;
+        int section;
+        double exit;
+
+        SectionAxis(double origin, double direction, double entry) {
+            this.origin = origin;
+            this.direction = direction;
+            this.step = direction > 0 ? 1 : direction < 0 ? -1 : 0;
+            this.section = section(Math.fma(direction, entry, origin), direction);
+            this.exit = exitTime();
+            if (this.step != 0) {
+                // Clipping into the dimension can itself round the entry point
+                // onto either side of a grid plane. Resolve ownership in ray time.
+                if (this.exit <= entry) advance();
+                else if (boundaryTime(this.section + (this.step < 0 ? 1 : 0)) > entry) {
+                    this.section -= this.step;
+                    this.exit = exitTime();
+                }
+            }
+        }
+
+        private double boundaryTime(int boundary) {
+            return (boundary * 32.0 - this.origin) / this.direction;
+        }
+
+        private double exitTime() {
+            return this.step == 0 ? Double.POSITIVE_INFINITY
+                    : boundaryTime(this.section + (this.step > 0 ? 1 : 0));
+        }
+
+        void advance() {
+            this.section += this.step;
+            // Recompute from the integer plane and original ray, not accumulated deltas.
+            this.exit = exitTime();
+        }
+    }
     private final Ray ray;
     private final Vec3 direction;
     private final Source source;
@@ -66,24 +104,32 @@ public final class LodRaycaster {
         if (range == null) { finish(Status.MISS, null, null, -1); return; }
         double t = range.entry;
         Direction normal = range.normal;
+        var x = new SectionAxis(this.ray.origin.x, this.direction.x, t);
+        var y = new SectionAxis(this.ray.origin.y, this.direction.y, t);
+        var z = new SectionAxis(this.ray.origin.z, this.direction.z, t);
         while (t < range.exit && check()) {
-            Vec3 p = this.ray.origin.add(this.direction.scale(t));
-            int sx = section(p.x, this.direction.x), sy = section(p.y, this.direction.y), sz = section(p.z, this.direction.z);
-            Interval segment = intersect(sx * 32.0, sy * 32.0, sz * 32.0,
-                    (sx + 1) * 32.0, (sy + 1) * 32.0, (sz + 1) * 32.0, t, range.exit);
-            if (segment == null || segment.exit <= t) throw new LimitReached();
-            this.source.prepare(sx, sy, sz);
+            double exit = Math.min(range.exit, Math.min(x.exit, Math.min(y.exit, z.exit)));
+            if (exit <= t) throw new LimitReached();
+            this.source.prepare(x.section, y.section, z.section);
             if (!check()) break; // A blocking local read can exhaust the deadline.
             Cell constant = this.source.uniform();
-            Interval clipped = new Interval(t, segment.exit, normal);
+            Interval clipped = new Interval(t, exit, normal);
             if (constant != null) visitCell(constant, clipped);
             else if (this.source.finestLevel() > 4) finish(Status.INCOMPLETE, null, null, -1);
-            else visit(new Node(sx * 32, sy * 32, sz * 32, 5, clipped));
+            else visit(new Node(x.section * 32, y.section * 32, z.section * 32, 5, clipped));
             if (this.result != null) return;
-            t = segment.exit;
-            // Entry into the next section has the opposite face of this section's exit.
-            normal = exitNormal(sx * 32.0, sy * 32.0, sz * 32.0, (sx + 1) * 32.0,
-                    (sy + 1) * 32.0, (sz + 1) * 32.0, t);
+            t = exit;
+            if (t >= range.exit) break;
+            normal = x.exit == t ? (x.step > 0 ? Direction.WEST : Direction.EAST)
+                    : y.exit == t ? (y.step > 0 ? Direction.DOWN : Direction.UP)
+                    : (z.step > 0 ? Direction.NORTH : Direction.SOUTH);
+            // Step the grid indices directly. Reconstructing origin + direction * t
+            // can round back into the old section and falsely report BUDGET.
+            // Exact ties cross all involved planes; no epsilon may skip a thin
+            // interval of unknown/solid data at a nearly simultaneous crossing.
+            if (x.exit == t) x.advance();
+            if (y.exit == t) y.advance();
+            if (z.exit == t) z.advance();
         }
         if (this.result == null) finish(Status.MISS, null, null, -1);
     }
@@ -156,19 +202,6 @@ public final class LodRaycaster {
             }
         }
         return new Interval(entry, exit, normal);
-    }
-
-    private Direction exitNormal(double minX, double minY, double minZ, double maxX, double maxY, double maxZ, double t) {
-        double[] dirs = {this.direction.x, this.direction.y, this.direction.z};
-        double[] origins = {this.ray.origin.x, this.ray.origin.y, this.ray.origin.z};
-        double[] mins = {minX, minY, minZ}, maxs = {maxX, maxY, maxZ};
-        Direction[] negative = {Direction.WEST, Direction.DOWN, Direction.NORTH};
-        Direction[] positive = {Direction.EAST, Direction.UP, Direction.SOUTH};
-        for (int axis = 0; axis < 3; axis++) if (dirs[axis] != 0) {
-            double exit = ((dirs[axis] > 0 ? maxs[axis] : mins[axis]) - origins[axis]) / dirs[axis];
-            if (Math.abs(exit - t) <= Math.ulp(t) * 4) return dirs[axis] > 0 ? negative[axis] : positive[axis];
-        }
-        return Direction.getNearest(-this.direction.x, -this.direction.y, -this.direction.z);
     }
 
     private static int section(double coordinate, double direction) {

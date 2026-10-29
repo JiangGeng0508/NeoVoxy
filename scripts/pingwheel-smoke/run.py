@@ -50,7 +50,7 @@ with (run / 'client.log').open('w', encoding='utf-8') as log:
         proc.wait(timeout=15)
         raise
 assert code == 0, f'Client failed ({code}); see {run / "client.log"}'
-for name in (['bare'] if options.bare else ['lod', 'disabled', 'curve', 'cancel', 'near', 'complete']):
+for name in (['bare'] if options.bare else ['lod', 'shallow', 'disabled', 'curve', 'cancel', 'near', 'complete']):
     assert (run / (name + '.pass')).exists(), f'Missing {name}; see {run / "client.log"}'
     print((run / (name + '.pass')).read_text().strip(), flush=True)
 print('PINGWHEEL_SMOKE PASS', flush=True)

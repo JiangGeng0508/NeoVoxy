@@ -12,6 +12,7 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.Vec3;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.concurrent.atomic.AtomicInteger;
@@ -32,6 +33,81 @@ class LodRaycasterTest {
     }
     private static final LodRaycaster.Bounds BOUNDS = new LodRaycaster.Bounds(-30_000_000, -64, -30_000_000, 30_000_000, 320, 30_000_000);
     private static final long TIME = 5_000_000_000L;
+
+    @ParameterizedTest
+    @CsvSource({"1, -0.01, 0.123, true", "1, -0.005, 1, true", "-1, -0.01, -0.123, true",
+            "1, 0, 0.123, true", "1, -0.01, 0.123, false", "-1, -0.01, -0.123, false"})
+    void shallowRaysCrossSectionBoundariesWithoutFalseBudgetFailures(double dx, double dy, double dz, boolean uniform) {
+        Vec3 origin = new Vec3(0.5, 201.62, 0.5);
+        int target = dx > 0 ? 8192 : -8192;
+        var source = new LodRaycaster.Source() {
+            int sectionX, reads;
+            public void prepare(int x, int y, int z) { this.sectionX = x; this.reads++; }
+            public int finestLevel() { return 0; }
+            public LodRaycaster.Cell uniform() {
+                if (!uniform) return null;
+                boolean solid = dx > 0 ? this.sectionX * 32 >= target : (this.sectionX + 1) * 32 <= target;
+                return new LodRaycaster.Cell(solid ? LodRaycaster.Material.SOLID : LodRaycaster.Material.AIR, 4);
+            }
+            public LodRaycaster.Cell sample(int x, int y, int z) {
+                boolean solid = dx > 0 ? x >= target : x + 1 <= target;
+                return new LodRaycaster.Cell(solid ? LodRaycaster.Material.SOLID : LodRaycaster.Material.AIR, 0);
+            }
+            public int reads() { return this.reads; }
+        };
+        var ray = new LodRaycaster.Ray(origin, new Vec3(dx, dy, dz), 12000, BOUNDS);
+        var hit = LodRaycaster.trace(ray, source, () -> false, TIME, PingWheelBridge.MAX_NODES);
+        assertEquals(LodRaycaster.Status.HIT, hit.status(), hit.toString());
+        assertEquals(target, hit.position().x, 1e-8);
+        assertEquals(origin.y + (target - origin.x) * dy / dx, hit.position().y, 1e-8);
+        assertEquals(origin.z + (target - origin.x) * dz / dx, hit.position().z, 1e-8);
+        assertEquals(dx > 0 ? Direction.WEST : Direction.EAST, hit.normal());
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {-16_777_216, 0, 16_777_216})
+    void clippedShallowRaysAlsoWorkAtLargeWorldCoordinates(int offset) {
+        Vec3 origin = new Vec3(offset + 0.5, 400, offset + 0.5);
+        Vec3 direction = new Vec3(1, -0.015, 0.123);
+        int target = offset + 8192;
+        var source = new LodRaycaster.Source() {
+            int sectionX;
+            public void prepare(int x, int y, int z) { this.sectionX = x; }
+            public int finestLevel() { return 4; }
+            public LodRaycaster.Cell uniform() {
+                return new LodRaycaster.Cell(this.sectionX * 32 >= target
+                        ? LodRaycaster.Material.SOLID : LodRaycaster.Material.AIR, 4);
+            }
+            public LodRaycaster.Cell sample(int x, int y, int z) { throw new AssertionError("uniform section"); }
+            public int reads() { return 0; }
+        };
+        var hit = LodRaycaster.trace(new LodRaycaster.Ray(origin, direction, 9000, BOUNDS),
+                source, () -> false, TIME, PingWheelBridge.MAX_NODES);
+        assertEquals(LodRaycaster.Status.HIT, hit.status(), hit.toString());
+        assertEquals(target, hit.position().x, 1e-8);
+        assertEquals(origin.y + (target - origin.x) * direction.y, hit.position().y, 1e-8);
+        assertEquals(Direction.WEST, hit.normal());
+    }
+
+    @Test void almostSimultaneousCrossingsCannotSkipUnknownIntervals() {
+        var source = new LodRaycaster.Source() {
+            int sx, sz;
+            public void prepare(int x, int y, int z) { this.sx = x; this.sz = z; }
+            public int finestLevel() { return 4; }
+            public LodRaycaster.Cell uniform() {
+                return new LodRaycaster.Cell(this.sx != this.sz ? LodRaycaster.Material.UNKNOWN
+                        : this.sx > 0 ? LodRaycaster.Material.SOLID : LodRaycaster.Material.AIR, 4);
+            }
+            public LodRaycaster.Cell sample(int x, int y, int z) { throw new AssertionError("uniform section"); }
+            public int reads() { return 0; }
+        };
+        for (double offset : new double[]{-1e-8, 0, 1e-8}) {
+            var hit = LodRaycaster.trace(new LodRaycaster.Ray(new Vec3(0.5, 8, 0.5 + offset),
+                    new Vec3(1, 0, 1), 100, BOUNDS), source, () -> false, TIME, PingWheelBridge.MAX_NODES);
+            assertEquals(offset == 0 ? LodRaycaster.Status.HIT : LodRaycaster.Status.INCOMPLETE, hit.status(), hit.toString());
+            if (offset != 0) assertNull(hit.position());
+        }
+    }
 
     private static final class Fixture implements AutoCloseable {
         final SectionSerializationStorage storage = new SectionSerializationStorage(new MemoryStorageBackend());
@@ -100,6 +176,19 @@ class LodRaycasterTest {
             assertEquals(0, hit.lod());
             assertTrue(hit.sectionReads() <= 10);
             assertTrue(hit.visitedNodes() < 10, "uniform sections skip per-voxel traversal");
+        }
+    }
+
+    @Test void shallowRayHitsLocallyStoredCoarseTerrainWithoutRemoteRequests() {
+        try (var f = new Fixture()) {
+            for (int sx = 0; sx <= 16; sx++) for (int sz = 0; sz <= 2; sz++)
+                f.storage.saveSection(f.section(4, sx, 0, sz,
+                        (sx == 16 ? Blocks.STONE : Blocks.AIR).defaultBlockState(), 255));
+            var hit = f.trace(new Vec3(0.5, 201.62, 0.5), new Vec3(1, -0.01, 0.123), 9000, false);
+            assertEquals(LodRaycaster.Status.HIT, hit.status(), hit.toString());
+            assertEquals(8192, hit.position().x, 1e-8);
+            assertEquals(4, hit.lod());
+            assertEquals(Direction.WEST, hit.normal());
         }
     }
 
