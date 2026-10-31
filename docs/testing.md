@@ -140,6 +140,8 @@ python scripts/summarize-gpu-tests.py --expect-run --output build/reports/gpu-su
 
 范围过滤使用同维度、区段完整水平边界和最大支持半径 32,768 方块。现有协议未传送客户端视距，所以不是按客户端实际视距精确订阅；不修改协议版本，已有客户端可继续连接。
 
+区段冷读取、序列化和映射页编码由权重 2 的有界后台服务执行，重复需求共享版本化结果。`LodServerPreparationTest` / `LodServerPreparationDispatchTest` 与调度器回归覆盖缓存失效、映射追加、容量拒绝重试、后台读取、多人复用及关闭引用释放。完整预算和本批证据见 [服务端异步网络说明](server-network-preparation.md)。
+
 ## 验证记录与边界
 
 T1 在 2026-10-21 实测普通 `check` 为 92 项通过、20 项 GPU 跳过，启用 GPU 的 `build` 为 112 项通过；故意注入的 JUnit 断言让 `check/build` 均返回退出码 1，无匹配测试过滤器也返回 1。T2 新增 10 项 GPU 测试后，共 32 个测试类、122 项，其中 30 项需显式启用 GPU。以当次 XML 报告为准，不把 skipped 当成 passed。

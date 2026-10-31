@@ -38,14 +38,18 @@ public final class LodServerScheduler {
         boolean writable(UUID player);
         Mappings nextMappings(UUID player, int blockCursor, int biomeCursor, int maxBytes);
         VoxyNetwork.SectionDataS2C load(LodUpdateQueue.Key key);
+        /** The prepared snapshot must still belong to the current world/update version. */
+        default boolean current(LodUpdateQueue.Key key, VoxyNetwork.SectionDataS2C data) { return true; }
         boolean send(UUID player, CustomPacketPayload payload);
     }
+    /** A null payload means preparation is pending; null Mappings means cursors are current. */
     public record Mappings(CustomPacketPayload payload, int blockEnd, int biomeEnd) {}
     public record Stats(int players, int requests, int requestPeak, long rejectedRequests,
                         long packets, long bytes, int lastPackets, int lastBytes, long unwritable) {}
     private static final class Client {
         View view;
         final LinkedHashSet<LodUpdateQueue.Key> requests = new LinkedHashSet<>();
+        final Set<LodUpdateQueue.Key> deferred = new HashSet<>();
         int blockCursor, biomeCursor, packets, bytes;
         boolean hello = true, preferPush, syncing = true;
         Client(View view) { this.view = view; }
@@ -136,10 +140,11 @@ public final class LodServerScheduler {
         if (order.isEmpty()) return;
         for (Client client : this.clients.values()) {
             client.packets = client.bytes = 0;
+            client.deferred.clear();
             client.requests.removeIf(key -> !client.view.contains(key));
         }
         int start = Math.floorMod(this.rotation++, order.size());
-        // Bounded attempts also bound disk reads/serialization when remaining byte credit is small.
+        // Bounded attempts also bound preparation admission and ready-result lookups.
         for (int round = 0, attempts = 0; round < PLAYER_PACKETS_PER_TICK && attempts < PACKETS_PER_TICK; round++) {
             for (int offset = 0; offset < order.size() && attempts < PACKETS_PER_TICK; offset++) {
                 if (this.lastPackets >= PACKETS_PER_TICK || this.lastBytes >= BYTES_PER_TICK) return;
@@ -158,6 +163,7 @@ public final class LodServerScheduler {
                 Mappings mapping = transport.nextMappings(player, client.blockCursor, client.biomeCursor, credit);
                 if (mapping != null) {
                     client.syncing = true;
+                    if (mapping.payload() == null) continue;
                     if (this.send(transport, player, client, mapping.payload(), credit)) {
                         client.blockCursor = mapping.blockEnd();
                         client.biomeCursor = mapping.biomeEnd();
@@ -165,19 +171,25 @@ public final class LodServerScheduler {
                     continue;
                 }
                 client.syncing = false;
-                var push = this.updates.next(player, client.view::contains, this::audience);
-                var pull = client.requests.isEmpty() ? null : client.requests.getFirst();
+                var push = this.updates.next(player, client.view::contains, this::audience, client.deferred);
+                var pull = client.requests.stream().filter(k -> !client.deferred.contains(k)).findFirst().orElse(null);
                 boolean pushing = push != null && (pull == null || client.preferPush);
                 LodUpdateQueue.Key key = pushing ? push.key() : pull;
                 if (key == null) continue;
                 VoxyNetwork.SectionDataS2C data = transport.load(key);
-                if (data == null) continue; // Failed read is transient, never "missing terrain".
-                // Serialization can observe newly registered ids. Re-check before sending this snapshot.
+                if (data == null) {
+                    client.deferred.add(key);
+                    continue; // Pending/failed preparation is never "missing terrain".
+                }
+                // Preparation can observe newly registered ids. Re-check before sending this snapshot.
                 if (transport.nextMappings(player, client.blockCursor, client.biomeCursor, credit) != null) continue;
+                if (!transport.current(key, data)) { client.deferred.add(key); continue; }
                 if (this.send(transport, player, client, data, credit)) {
                     if (pushing) this.updates.complete(player, push);
                     else client.requests.remove(key);
                     client.preferPush = !pushing;
+                } else {
+                    client.deferred.add(key);
                 }
                 } catch (Exception e) {
                     // Keep work pending and isolate a failed peer/store from the other clients.

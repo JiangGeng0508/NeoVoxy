@@ -221,7 +221,15 @@ public class Mapper {
     // ---- 状态/生物群系查询与注册 --------------------------------------
 
     public final int getBlockStateCount() {
-        return this.blockId2stateEntry.size();
+        this.blockLock.lock();
+        try { return this.blockId2stateEntry.size(); }
+        finally { this.blockLock.unlock(); }
+    }
+
+    public final int getBiomeCount() {
+        this.biomeLock.lock();
+        try { return this.biomeId2biomeEntry.size(); }
+        finally { this.biomeLock.unlock(); }
     }
 
     private StateEntry registerNewBlockState(BlockState state) {

@@ -72,6 +72,11 @@ public final class LodUpdateQueue {
     }
 
     public synchronized Ticket next(UUID player, Predicate<Key> interested, Function<Key, Set<UUID>> audience) {
+        return this.next(player, interested, audience, Set.of());
+    }
+
+    /** Temporarily pending preparation must not remove this player from the update audience. */
+    public synchronized Ticket next(UUID player, Predicate<Key> interested, Function<Key, Set<UUID>> audience, Set<Key> deferred) {
         Iterator<Map.Entry<Key, Entry>> iterator = this.pending.entrySet().iterator();
         while (iterator.hasNext()) {
             var next = iterator.next();
@@ -81,7 +86,7 @@ public final class LodUpdateQueue {
             if (entry.remaining.isEmpty()) {
                 iterator.remove();
                 this.notifyAll();
-            } else if (entry.remaining.contains(player)) {
+            } else if (entry.remaining.contains(player) && !deferred.contains(next.getKey())) {
                 return new Ticket(next.getKey(), entry.revision);
             }
         }

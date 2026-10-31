@@ -188,4 +188,75 @@ class LodServerSchedulerTest {
         assertEquals(buf.readableBytes() + 16, VoxyNetwork.encodedSize(payload));
         buf.clear();
     }
+
+    @Test void pendingMappingPreparationDoesNotAdvanceCursorsOrSendSections() {
+        var s = new LodServerScheduler(); var id = UUID.randomUUID();
+        var ready = new java.util.concurrent.atomic.AtomicBoolean();
+        var t = new Transport() {
+            @Override public LodServerScheduler.Mappings nextMappings(UUID id, int block, int biome, int credit) {
+                if (!ready.get()) { assertEquals(0, block); return new LodServerScheduler.Mappings(null, block, biome); }
+                return super.nextMappings(id, block, biome, credit);
+            }
+        };
+        s.hello(view(id)); s.request(id, request(1));
+        s.tick(t); s.tick(t);
+        assertEquals(1, t.sent.get(id).size()); assertEquals(0, t.loads); assertEquals(1, s.stats().requests());
+        ready.set(true); s.tick(t);
+        assertEquals(1, t.sections(id).size()); assertEquals(0, s.stats().requests()); s.close();
+    }
+
+    @Test void pendingSectionsYieldWithoutRemovingTheirPullOrUpdateTickets() {
+        var s = new LodServerScheduler(); var id = UUID.randomUUID();
+        var pendingKeys = new HashSet<LodUpdateQueue.Key>(Set.of(key(1), key(4)));
+        var attempts = new ArrayList<LodUpdateQueue.Key>();
+        var t = new Transport() {
+            @Override public VoxyNetwork.SectionDataS2C load(LodUpdateQueue.Key key) {
+                attempts.add(key);
+                return pendingKeys.contains(key) ? null : super.load(key);
+            }
+        };
+        t.mappings = 0; s.hello(view(id));
+        for (int x : new int[]{1, 2, 3}) s.request(id, request(x));
+        s.dirty(key(4)); s.dirty(key(5));
+        s.tick(t);
+        assertEquals(Set.of(2, 3, 5), new HashSet<>(t.sections(id).stream().map(VoxyNetwork.SectionDataS2C::x).toList()));
+        assertEquals(1, Collections.frequency(attempts, key(1)));
+        assertEquals(1, Collections.frequency(attempts, key(4)));
+        assertEquals(1, s.stats().requests()); assertEquals(1, s.updates.stats().pending());
+        pendingKeys.clear(); s.tick(t);
+        assertEquals(0, s.stats().requests()); assertEquals(0, s.updates.stats().pending()); s.close();
+    }
+
+    @Test void stalePreparedResultsCannotCompleteRequestsOrUpdateTickets() {
+        var s = new LodServerScheduler(); var id = UUID.randomUUID();
+        var current = new java.util.concurrent.atomic.AtomicBoolean();
+        var t = new Transport() {
+            @Override public boolean current(LodUpdateQueue.Key key, VoxyNetwork.SectionDataS2C data) { return current.get(); }
+        };
+        t.mappings = 0; s.hello(view(id)); s.request(id, request(1)); s.dirty(key(1));
+        s.tick(t);
+        assertTrue(t.sections(id).isEmpty()); assertEquals(1, s.stats().requests()); assertEquals(1, s.updates.stats().pending());
+        t.revision = 2; s.dirty(key(1)); current.set(true); s.tick(t);
+        assertEquals(2, t.sections(id).getLast().data()[0]);
+        assertEquals(0, s.stats().requests()); assertEquals(0, s.updates.stats().pending()); s.close();
+    }
+
+    @Test void preencodedMappingPagesHaveExactlyTheOriginalWireFormatAndAccounting() {
+        var a = new RegistryFriendlyByteBuf(Unpooled.buffer(), RegistryAccess.EMPTY);
+        var b = new RegistryFriendlyByteBuf(Unpooled.buffer(), RegistryAccess.EMPTY);
+        try {
+            var entries = Collections.nCopies(128, new byte[]{1, 2, 3});
+            var cached = VoxyNetwork.BlockMapBatchS2C.preencoded(128, entries);
+            VoxyNetwork.BlockMapBatchS2C.CODEC.encode(a, cached);
+            VoxyNetwork.BlockMapBatchS2C.CODEC.encode(b, new VoxyNetwork.BlockMapBatchS2C(128, entries));
+            assertEquals(a, b); assertEquals(128, VoxyNetwork.BlockMapBatchS2C.CODEC.decode(b).entries().size());
+            checkSize(a, cached); a.clear(); b.clear();
+            var biomes = List.of("example:林地", DIM);
+            var biomePage = VoxyNetwork.BiomeMapBatchS2C.preencoded(256, biomes);
+            VoxyNetwork.BiomeMapBatchS2C.CODEC.encode(a, biomePage);
+            VoxyNetwork.BiomeMapBatchS2C.CODEC.encode(b, new VoxyNetwork.BiomeMapBatchS2C(256, biomes));
+            assertEquals(a, b); assertEquals(biomes, VoxyNetwork.BiomeMapBatchS2C.CODEC.decode(b).entries());
+            checkSize(a, biomePage);
+        } finally { a.release(); b.release(); }
+    }
 }

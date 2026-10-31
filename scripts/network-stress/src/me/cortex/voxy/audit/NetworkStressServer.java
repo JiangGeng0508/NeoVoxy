@@ -6,6 +6,7 @@ import me.cortex.voxy.common.world.other.Mapper;
 import me.cortex.voxy.commonImpl.VoxyCommon;
 import me.cortex.voxy.commonImpl.VoxyServerInstance;
 import me.cortex.voxy.commonImpl.network.LodServerScheduler;
+import me.cortex.voxy.commonImpl.network.LodServerPreparation;
 import net.minecraft.world.level.block.Blocks;
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.bus.api.SubscribeEvent;
@@ -31,6 +32,10 @@ public final class NetworkStressServer {
             throw new AssertionError("network tick budget exceeded: " + stats);
         maxPackets = Math.max(maxPackets, stats.lastPackets()); maxBytes = Math.max(maxBytes, stats.lastBytes());
         if (server.updateStats().pending() > LodServerScheduler.MAX_UPDATES) throw new AssertionError("unbounded queue");
+        var prepared = server.preparationStats();
+        if (prepared.inFlight() > LodServerPreparation.MAX_IN_FLIGHT || prepared.bytes() > LodServerPreparation.MAX_BYTES
+                || prepared.cachedSections() + prepared.cachedMappingPages() + prepared.inFlight() > LodServerPreparation.MAX_ENTRIES)
+            throw new AssertionError("unbounded preparation: " + prepared);
         long heap = Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory();
         heapPeak = Math.max(heapPeak, heap);
         Path base = Path.of(output);
@@ -57,7 +62,7 @@ public final class NetworkStressServer {
         }
         if (elapsed % 100 == 0) {
             System.out.println("NETWORK_STRESS tick=" + elapsed + " " + stats + " " + server.updateStats()
-                    + " sweeps=" + server.recoverySweeps() + " spoolBytes=" + server.recoverySpoolBytes());
+                    + " sweeps=" + server.recoverySweeps() + " spoolBytes=" + server.recoverySpoolBytes() + " prepared=" + prepared);
             for (var p : event.getServer().getPlayerList().getPlayers()) System.out.println("NETWORK_STRESS peer=" + p.getGameProfile().getName()
                     + " id=" + p.getUUID() + " writable=" + p.connection.getConnection().channel().isWritable()
                     + " sent=" + p.connection.getConnection().getAverageSentPackets());
@@ -66,9 +71,11 @@ public final class NetworkStressServer {
                 && server.updateStats().pending() == 0 && server.updateStats().repairs() == 0) {
             if (server.updateStats().overflow() == 0 || server.updateStats().coalesced() == 0 || server.recoverySweeps() == 0 || stats.unwritable() == 0)
                 throw new AssertionError("stress did not exercise coalescing/overflow/recovery");
+            if (prepared.sectionsPrepared() == 0 || prepared.mappingPagesPrepared() == 0 || prepared.cacheHits() == 0)
+                throw new AssertionError("stress did not exercise background preparation and reuse");
             String result = "NETWORK_STRESS SERVER PASS " + stats + " " + server.updateStats()
                     + " maxPackets=" + maxPackets + " maxBytes=" + maxBytes + " recoverySweeps=" + server.recoverySweeps()
-                    + " spoolBytes=" + server.recoverySpoolBytes() + " heapBefore=" + heapBefore + " heapPeak=" + heapPeak;
+                    + " spoolBytes=" + server.recoverySpoolBytes() + " heapBefore=" + heapBefore + " heapPeak=" + heapPeak + " prepared=" + prepared;
             Files.writeString(base.resolve("server.pass"), result);
             System.out.println(result); done = true;
         }

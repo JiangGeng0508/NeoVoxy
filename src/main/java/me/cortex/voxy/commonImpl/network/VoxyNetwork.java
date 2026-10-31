@@ -1,6 +1,7 @@
 package me.cortex.voxy.commonImpl.network;
 
 import me.cortex.voxy.common.Logger;
+import io.netty.buffer.Unpooled;
 import net.minecraft.network.Connection;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.network.RegistryFriendlyByteBuf;
@@ -88,10 +89,12 @@ public final class VoxyNetwork {
         @Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
     }
 
-    public record BlockMapBatchS2C(int startId, List<byte[]> entries) implements CustomPacketPayload {
+    public record BlockMapBatchS2C(int startId, List<byte[]> entries, byte[] encoded) implements CustomPacketPayload {
+        public BlockMapBatchS2C(int startId, List<byte[]> entries) { this(startId, entries, null); }
         public static final Type<BlockMapBatchS2C> TYPE = new Type<>(ResourceLocation.fromNamespaceAndPath("voxy", "block_map"));
         public static final StreamCodec<RegistryFriendlyByteBuf, BlockMapBatchS2C> CODEC = StreamCodec.of(
                 (buf, p) -> {
+                    if (p.encoded != null) { buf.writeBytes(p.encoded); return; }
                     buf.writeVarInt(p.startId);
                     buf.writeVarInt(p.entries.size());
                     for (var e : p.entries) buf.writeByteArray(e);
@@ -104,12 +107,27 @@ public final class VoxyNetwork {
                     return new BlockMapBatchS2C(start, list);
                 });
         @Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
+
+        public static BlockMapBatchS2C preencoded(int startId, List<byte[]> entries) {
+            var owned = List.copyOf(entries);
+            var buf = new FriendlyByteBuf(Unpooled.buffer());
+            try {
+                buf.writeVarInt(startId);
+                buf.writeVarInt(owned.size());
+                for (byte[] entry : owned) buf.writeByteArray(entry);
+                var encoded = new byte[buf.readableBytes()];
+                buf.readBytes(encoded);
+                return new BlockMapBatchS2C(startId, owned, encoded);
+            } finally { buf.release(); }
+        }
     }
 
-    public record BiomeMapBatchS2C(int startId, List<String> entries) implements CustomPacketPayload {
+    public record BiomeMapBatchS2C(int startId, List<String> entries, byte[] encoded) implements CustomPacketPayload {
+        public BiomeMapBatchS2C(int startId, List<String> entries) { this(startId, entries, null); }
         public static final Type<BiomeMapBatchS2C> TYPE = new Type<>(ResourceLocation.fromNamespaceAndPath("voxy", "biome_map"));
         public static final StreamCodec<RegistryFriendlyByteBuf, BiomeMapBatchS2C> CODEC = StreamCodec.of(
                 (buf, p) -> {
+                    if (p.encoded != null) { buf.writeBytes(p.encoded); return; }
                     buf.writeVarInt(p.startId);
                     buf.writeVarInt(p.entries.size());
                     for (var e : p.entries) buf.writeUtf(e, 256);
@@ -122,6 +140,19 @@ public final class VoxyNetwork {
                     return new BiomeMapBatchS2C(start, list);
                 });
         @Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
+
+        public static BiomeMapBatchS2C preencoded(int startId, List<String> entries) {
+            var owned = List.copyOf(entries);
+            var buf = new FriendlyByteBuf(Unpooled.buffer());
+            try {
+                buf.writeVarInt(startId);
+                buf.writeVarInt(owned.size());
+                for (String entry : owned) buf.writeUtf(entry, 256);
+                var encoded = new byte[buf.readableBytes()];
+                buf.readBytes(encoded);
+                return new BiomeMapBatchS2C(startId, owned, encoded);
+            } finally { buf.release(); }
+        }
     }
 
     /** Incremental mapping update for ids registered after the initial full sync. */
@@ -248,9 +279,9 @@ public final class VoxyNetwork {
         int size = 16 + stringSize(payload.type().id().toString());
         return size + switch (payload) {
             case HelloS2C p -> varIntSize(p.version());
-            case BlockMapBatchS2C p -> varIntSize(p.startId()) + varIntSize(p.entries().size())
+            case BlockMapBatchS2C p -> p.encoded() != null ? p.encoded().length : varIntSize(p.startId()) + varIntSize(p.entries().size())
                     + p.entries().stream().mapToInt(e -> varIntSize(e.length) + e.length).sum();
-            case BiomeMapBatchS2C p -> varIntSize(p.startId()) + varIntSize(p.entries().size())
+            case BiomeMapBatchS2C p -> p.encoded() != null ? p.encoded().length : varIntSize(p.startId()) + varIntSize(p.entries().size())
                     + p.entries().stream().mapToInt(VoxyNetwork::stringSize).sum();
             case MappingDeltaS2C p -> 1 + varIntSize(p.id()) + varIntSize(p.data().length) + p.data().length;
             case SectionDataS2C p -> stringSize(p.dimension()) + varIntSize(p.lvl()) + 12
@@ -259,13 +290,13 @@ public final class VoxyNetwork {
         };
     }
 
-    private static int varIntSize(int value) {
+    static int varIntSize(int value) {
         int size = 1;
         while ((value & ~127) != 0) { size++; value >>>= 7; }
         return size;
     }
 
-    private static int stringSize(String value) {
+    static int stringSize(String value) {
         int length = value.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
         return varIntSize(length) + length;
     }

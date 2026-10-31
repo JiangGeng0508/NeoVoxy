@@ -5,12 +5,12 @@ import me.cortex.voxy.common.StorageConfigUtil;
 import me.cortex.voxy.common.config.ConfigBuildCtx;
 import me.cortex.voxy.common.config.section.SectionStorage;
 import me.cortex.voxy.common.config.section.SectionStorageConfig;
-import me.cortex.voxy.common.world.SaveLoadSystem3;
 import me.cortex.voxy.common.world.WorldEngine;
 import me.cortex.voxy.commonImpl.network.VoxyNetwork;
 import me.cortex.voxy.commonImpl.network.LodServerScheduler;
 import me.cortex.voxy.commonImpl.network.LodUpdateQueue;
 import me.cortex.voxy.commonImpl.network.LodUpdateRecovery;
+import me.cortex.voxy.commonImpl.network.LodServerPreparation;
 import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
@@ -18,7 +18,6 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.storage.LevelResource;
 
 import java.nio.file.Path;
-import java.util.ArrayList;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.UUID;
@@ -30,8 +29,6 @@ import java.util.concurrent.CancellationException;
  * hello packet and are therefore never sent anything.
  */
 public class VoxyServerInstance extends VoxyInstance {
-    private static final int MAP_BATCH_SIZE = 128;
-
     private final MinecraftServer server;
     private final Path basePath;
     private final Config config;
@@ -43,6 +40,7 @@ public class VoxyServerInstance extends VoxyInstance {
     private final ConcurrentHashMap<WorldIdentifier, WorldEngine> hookedEngines = new ConcurrentHashMap<>();
 
     private final LodServerScheduler scheduler = new LodServerScheduler();
+    private final LodServerPreparation preparation;
     private Thread recovery;
     private int recoveryCooldown;
     private volatile long recoverySweeps, recoverySpoolBytes;
@@ -54,6 +52,7 @@ public class VoxyServerInstance extends VoxyInstance {
         this.basePath = server.getWorldPath(LevelResource.ROOT).resolve("voxy").toAbsolutePath().normalize();
         this.config = StorageConfigUtil.getCreateStorageConfig(Config.class, c -> c.version == 1 && c.sectionStorageConfig != null,
                 () -> DEFAULT_STORAGE_CONFIG, this.basePath);
+        this.preparation = new LodServerPreparation(this.getServiceManager());
         this.updateDedicatedThreads();
         Logger.info("Voxy server instance ready, storage: " + this.basePath);
     }
@@ -102,7 +101,9 @@ public class VoxyServerInstance extends VoxyInstance {
         final String dim = identifier.key.location().toString();
         engine.setDirtyCallback((section, flags, neighbors) -> {
             if (!this.networkClosed && this.isRunning()) {
-                this.scheduler.dirty(new LodUpdateQueue.Key(dim, section.key));
+                var key = new LodUpdateQueue.Key(dim, section.key);
+                this.preparation.invalidate(engine, key);
+                this.scheduler.dirty(key);
             }
         });
     }
@@ -164,34 +165,7 @@ public class VoxyServerInstance extends VoxyInstance {
             if (player == null) throw new IllegalStateException("Player disconnected");
             var engine = getEngineForLevel(player.serverLevel());
             if (engine == null) throw new IllegalStateException("Missing world engine");
-            var states = engine.getMapper().getStateEntries(blockCursor, MAP_BATCH_SIZE);
-            if (states.length != 0) {
-                var entries = new ArrayList<byte[]>();
-                for (var state : states) {
-                    entries.add(state.serialize());
-                    // Keep an oversized first entry pending; never treat it as completed sync.
-                    if (VoxyNetwork.encodedSize(new VoxyNetwork.BlockMapBatchS2C(blockCursor, entries)) > credit) {
-                        if (entries.size() > 1) entries.removeLast();
-                        break;
-                    }
-                }
-                return new LodServerScheduler.Mappings(new VoxyNetwork.BlockMapBatchS2C(blockCursor, entries),
-                        blockCursor + entries.size(), biomeCursor);
-            }
-            var biomes = engine.getMapper().getBiomeEntries(biomeCursor, MAP_BATCH_SIZE);
-            if (biomes.length != 0) {
-                var entries = new ArrayList<String>();
-                for (var biome : biomes) {
-                    entries.add(biome.biome);
-                    if (VoxyNetwork.encodedSize(new VoxyNetwork.BiomeMapBatchS2C(biomeCursor, entries)) > credit) {
-                        if (entries.size() > 1) entries.removeLast();
-                        break;
-                    }
-                }
-                return new LodServerScheduler.Mappings(new VoxyNetwork.BiomeMapBatchS2C(biomeCursor, entries),
-                        blockCursor, biomeCursor + entries.size());
-            }
-            return null;
+            return preparation.mappings(engine, blockCursor, biomeCursor);
         }
 
         @Override
@@ -200,21 +174,19 @@ public class VoxyServerInstance extends VoxyInstance {
                 if (!level.dimension().location().toString().equals(key.dimension())) continue;
                 var engine = getEngineForLevel(level);
                 if (engine == null) return null;
-                var section = engine.acquireIfExists(key.section());
-                byte[] data = new byte[0];
-                if (section != null) {
-                    try {
-                        var buffer = SaveLoadSystem3.serialize(section).asByteBuffer();
-                        data = new byte[buffer.remaining()];
-                        buffer.get(data);
-                    } finally {
-                        section.release();
-                    }
-                }
-                return new VoxyNetwork.SectionDataS2C(key.dimension(), WorldEngine.getLevel(key.section()),
-                        WorldEngine.getX(key.section()), WorldEngine.getY(key.section()), WorldEngine.getZ(key.section()), data);
+                return preparation.section(engine, key);
             }
             return null;
+        }
+
+        @Override
+        public boolean current(LodUpdateQueue.Key key, VoxyNetwork.SectionDataS2C data) {
+            for (var level : server.getAllLevels()) {
+                if (!level.dimension().location().toString().equals(key.dimension())) continue;
+                var engine = getEngineForLevel(level);
+                return engine != null && preparation.current(engine, key, data);
+            }
+            return false;
         }
 
         @Override
@@ -274,6 +246,7 @@ public class VoxyServerInstance extends VoxyInstance {
     public LodUpdateQueue.Stats updateStats() { return this.scheduler.updates.stats(); }
     public long recoverySweeps() { return this.recoverySweeps; }
     public long recoverySpoolBytes() { return this.recoverySpoolBytes; }
+    public LodServerPreparation.Stats preparationStats() { return this.preparation.stats(); }
 
     @Override
     public void shutdown() {
@@ -290,6 +263,7 @@ public class VoxyServerInstance extends VoxyInstance {
             if (interrupted) Thread.currentThread().interrupt();
         }
         this.hookedEngines.clear();
+        this.preparation.close();
         super.shutdown();
     }
 
