@@ -133,7 +133,7 @@ public class DHImporter implements IDataImporter {
             } catch (SQLException e) {
                 throw new RuntimeException(e);
             }
-        }, 10, "DH Importer", rateLimiter);
+        }, 1, "DH Importer", rateLimiter);
     }
 
     public void runImport(IUpdateCallback updateCallback, ICompletionCallback completionCallback) {

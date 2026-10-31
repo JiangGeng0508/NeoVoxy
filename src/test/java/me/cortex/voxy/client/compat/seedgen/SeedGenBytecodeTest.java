@@ -7,6 +7,7 @@ import me.cortex.voxy.common.world.WorldEngine;
 import me.cortex.voxy.common.world.WorldSection;
 import org.junit.jupiter.api.Test;
 import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.*;
 
@@ -15,6 +16,37 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.jupiter.api.Assertions.*;
 
 class SeedGenBytecodeTest implements Opcodes {
+    @Test void meshSchedulingRetainsSeedGensActualInjectionSites() throws Exception {
+        var service = new ClassNode();
+        new ClassReader("me.cortex.voxy.client.core.rendering.building.RenderGenerationService").accept(service, 0);
+        var process = service.methods.stream().filter(m -> m.name.equals("processJob")).findFirst().orElseThrow();
+        assertEquals("(Lme/cortex/voxy/client/core/rendering/building/RenderDataFactory;Lit/unimi/dsi/fastutil/ints/IntOpenHashSet;)V", process.desc);
+        int polls = 0, publishes = 0;
+        for (var instruction : process.instructions) {
+            if (instruction instanceof MethodInsnNode call) {
+                if (call.owner.equals("java/util/concurrent/PriorityBlockingQueue") && call.name.equals("poll") && call.desc.equals("()Ljava/lang/Object;")) polls++;
+                if (call.owner.equals("java/util/function/Consumer") && call.name.equals("accept") && call.desc.equals("(Ljava/lang/Object;)V")) publishes++;
+            }
+        }
+        assertEquals(1, polls, "SeedGen numbers each build at the actual queue poll");
+        assertEquals(2, publishes, "SeedGen freshness wraps both empty and populated results");
+        var task = new ClassNode();
+        new ClassReader("me.cortex.voxy.client.core.rendering.building.RenderGenerationService$BuildTask").accept(task, 0);
+        assertTrue(task.fields.stream().anyMatch(f -> f.name.equals("position") && f.desc.equals("J")));
+        var priority = task.methods.stream().filter(m -> m.name.equals("updatePriority")).findFirst().orElseThrow();
+        boolean min = false;
+        for (var instruction : priority.instructions) if (instruction instanceof MethodInsnNode call
+                && call.owner.equals("java/lang/Math") && call.name.equals("min") && call.desc.equals("(II)I")) min = true;
+        assertTrue(min, "SeedGen clamps extended LOD priorities at this call");
+        var queue = new ClassNode();
+        new ClassReader("me.cortex.voxy.client.core.rendering.building.MeshTaskQueue").accept(queue, 0);
+        var schedule = queue.methods.stream().filter(m -> m.name.equals("schedule")).findFirst().orElseThrow();
+        boolean used = false;
+        for (var instruction : schedule.instructions) if (instruction instanceof MethodInsnNode call
+                && call.owner.equals(task.name) && call.name.equals("updatePriority")) used = true;
+        assertTrue(used, "The compatible task must be used by the production state machine");
+    }
+
     @Test void upstreamDescriptorsLinkAndFractionalDistanceSurvivesBothWidenings() throws Exception {
         var node = new ClassNode();
         node.version = V21;

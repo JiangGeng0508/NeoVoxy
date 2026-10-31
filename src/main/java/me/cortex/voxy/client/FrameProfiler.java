@@ -2,6 +2,8 @@ package me.cortex.voxy.client;
 
 import me.cortex.voxy.client.core.util.GPUTiming;
 import me.cortex.voxy.common.Logger;
+import me.cortex.voxy.commonImpl.PerfStats;
+import me.cortex.voxy.common.thread.TaskTiming;
 import net.minecraft.client.Minecraft;
 
 import java.io.IOException;
@@ -11,6 +13,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
 
 public final class FrameProfiler {
     private FrameProfiler() {}
@@ -18,163 +21,115 @@ public final class FrameProfiler {
     private static final int SNAPSHOT_INTERVAL_MS = 500;
     private static final long STALL_THRESHOLD_MICROS = 40_000;
     private static final int MAX_STALL_CAPTURES = 40;
-
-    //Named so the report says what each stage is instead of a bare letter
-    private static final String[] STAGE_NAMES = {
-            "frame total", "voxy all", "voxy main", "voxy dynamic", "voxy postDyn",
-            "E maskRaster", "H modelBake", "F traversal", "G buildDrawCalls", "D downloadTick",
-            "A nodeUpload", "B scatterWrite", "C cleanerIds",
-    };
-
     private static volatile boolean active;
-    //Set when voxy's render begins and cleared when it ends, so the watchdog can tell an in-flight
-    //frame from an idle one. Sampling the render thread from the render thread itself only ever
-    //catches the profiler.
+    private static volatile long captureId;
+    private static long frameId;
     private static volatile long frameStartNanos;
     private static volatile Thread renderThread;
-    private static volatile boolean stallCapturedThisFrame;
+    private static volatile boolean insideVoxyRender;
     private static Thread watchdog;
-
     private static long startedAtMs;
     private static long endAtMs;
     private static long lastSnapshotMs;
-    private static long lastFrameNanos;
-
-    //frame wall time in micros; the stage timers are millis*1000 to keep everything integral
-    private static final List<long[]> frames = new ArrayList<>();
+    private static long initialForcedSyncs;
+    private static long initialDroppedGpu;
+    private static FrameCapture capture;
+    private static TaskTiming.Window workerTiming;
     private static final List<String> snapshots = new ArrayList<>();
     private static final List<String> stalls = new ArrayList<>();
 
-    public static boolean isActive() {
-        return active;
-    }
+    public static boolean isActive() { return active; }
+    public static long captureId() { return active ? captureId : 0; }
+    public static long frameId() { return frameId; }
 
     public static synchronized String start(int seconds) {
-        if (active) {
-            return "Frame capture already running, use /voxy debug capture again to stop it early";
-        }
-        frames.clear();
+        if (active) return "Frame capture already running, use /voxy debug capture again to stop it early";
+        capture = new FrameCapture();
+        workerTiming = TaskTiming.startCapture();
         snapshots.clear();
         stalls.clear();
         startedAtMs = System.currentTimeMillis();
         endAtMs = startedAtMs + seconds * 1000L;
         lastSnapshotMs = 0;
-        lastFrameNanos = 0;
-        //GPU timestamps are off by default; turn them on for the capture so the snapshots can separate
-        //"the GPU is busy" from "the render thread is busy". Left on afterwards would keep costing
-        //queries every frame, so stop() turns it back off.
-        GPUTiming.INSTANCE.setEnabled(true);
-        active = true;
+        initialForcedSyncs = PerfStats.uploadForcedSyncs.sum();
+        initialDroppedGpu = GPUTiming.INSTANCE.droppedSamples();
         frameStartNanos = 0;
-        watchdog = new Thread(FrameProfiler::runWatchdog, "Voxy frame capture watchdog");
+        insideVoxyRender = false;
+        long generation = ++captureId;
+        active = true;
+        watchdog = new Thread(() -> runWatchdog(generation), "Voxy frame capture watchdog");
         watchdog.setDaemon(true);
         watchdog.start();
         return "Frame capture armed for " + seconds + "s - move around the way that drops frames. "
                 + "It stops on its own, or run the command again to stop early.";
     }
 
-    //Called as voxy's render begins.
+    // Only RenderFrameEvent.Pre advances the game frame, including frames without Voxy terrain.
     public static void onFrameStart() {
-        if (!active) {
-            return;
-        }
+        frameId++;
+        if (!active) return;
+        long now = System.nanoTime();
         renderThread = Thread.currentThread();
-        stallCapturedThisFrame = false;
-        insideVoxyRender = true;
-        frameStartNanos = System.nanoTime();
+        frameStartNanos = now;
+        insideVoxyRender = false;
+        capture.begin(frameId, now);
     }
 
-    private static volatile boolean insideVoxyRender;
+    public static void onViewportStart() {
+        if (active) insideVoxyRender = true;
+    }
 
-    //Samples the render thread while a frame is overrunning. getStackTrace on another thread is a
-    //safepoint operation, so this runs once per frame and only past the threshold.
-    private static void runWatchdog() {
-        while (active) {
-            try {
-                Thread.sleep(4);
-            } catch (InterruptedException e) {
-                return;
-            }
+    public static void onViewportEnd(boolean main) {
+        if (!active) return;
+        capture.viewport(main, TimingStatistics.snapshotNanos());
+        insideVoxyRender = false;
+    }
+
+    public static void onGpuSample(long generation, long frame, boolean main, String[] labels, long[] nanos) {
+        if (active && generation == captureId) capture.gpu(frame, main, labels, nanos);
+    }
+
+    // Stack walking happens on the watchdog, never on the measured render thread.
+    private static void runWatchdog(long generation) {
+        long capturedStart = 0;
+        while (active && captureId == generation) {
+            try { Thread.sleep(4); }
+            catch (InterruptedException e) { return; }
             long start = frameStartNanos;
             Thread thread = renderThread;
-            if (start == 0 || thread == null || stallCapturedThisFrame) {
-                continue;
-            }
-            //The render thread is gone (renderer shut down, world left): onFrameEnd will never run
-            //again, so end the capture here rather than leaving it armed and unrecoverable
+            if (start == 0 || start == capturedStart || thread == null) continue;
             if (!thread.isAlive()) {
-                Logger.info(stopAndDump());
+                synchronized (FrameProfiler.class) {
+                    if (active && captureId == generation) Logger.info(stopAndDump());
+                }
                 return;
             }
             long elapsedMicros = (System.nanoTime() - start) / 1000;
-            if (elapsedMicros > 10_000_000) {
-                continue;
-            }
-            if (elapsedMicros < STALL_THRESHOLD_MICROS) {
-                continue;
-            }
-            stallCapturedThisFrame = true;
-            StackTraceElement[] trace;
-            try {
-                trace = thread.getStackTrace();
-            } catch (Throwable e) {
-                continue;
-            }
-            var sb = new StringBuilder();
-            sb.append("=== IN-FLIGHT stall (").append(insideVoxyRender ? "inside voxy render" : "outside voxy render").append("), blocked ")
-                    .append(elapsedMicros / 1000).append("ms so far, at t+")
-                    .append(System.currentTimeMillis() - startedAtMs).append("ms\n");
-            int limit = Math.min(trace.length, 22);
-            for (int i = 0; i < limit; i++) {
-                sb.append("      ").append(trace[i]).append('\n');
-            }
+            if (elapsedMicros < STALL_THRESHOLD_MICROS || elapsedMicros > 10_000_000) continue;
             synchronized (FrameProfiler.class) {
-                if (active && stalls.size() < MAX_STALL_CAPTURES) {
-                    stalls.add(sb.toString());
-                }
+                if (!active || captureId != generation || stalls.size() >= MAX_STALL_CAPTURES) continue;
+            }
+            capturedStart = start;
+            var sb = new StringBuilder();
+            sb.append("=== IN-FLIGHT stall (").append(insideVoxyRender ? "inside voxy render" : "outside voxy render")
+                    .append("), blocked ").append(elapsedMicros / 1000).append("ms so far\n");
+            try {
+                var trace = thread.getStackTrace();
+                for (int i = 0; i < Math.min(trace.length, 22); i++) sb.append("      ").append(trace[i]).append('\n');
+                sb.append(captureWorkerStacks(elapsedMicros));
+            } catch (Throwable e) { sb.append("<stack capture failed: ").append(e).append(">\n"); }
+            synchronized (FrameProfiler.class) {
+                if (active && captureId == generation && stalls.size() < MAX_STALL_CAPTURES) stalls.add(sb.toString());
             }
         }
     }
 
-    //Called at the end of each voxy render. Must stay cheap: it runs inside the frames being measured.
+    // Called once from RenderFrameEvent.Post. Polling never waits for the GPU.
     public static void onFrameEnd() {
-        if (!active) {
-            return;
-        }
-        long nowNanos = System.nanoTime();
-        long frameMicros = lastFrameNanos == 0 ? 0 : (nowNanos - lastFrameNanos) / 1000;
-        lastFrameNanos = nowNanos;
-        if (frameMicros > 0) {
-            TimingStatistics.update();
-            frames.add(new long[]{
-                    frameMicros,
-                    micros(TimingStatistics.all),
-                    micros(TimingStatistics.main),
-                    micros(TimingStatistics.dynamic),
-                    micros(TimingStatistics.postDynamic),
-                    micros(TimingStatistics.E),
-                    micros(TimingStatistics.H),
-                    micros(TimingStatistics.F),
-                    micros(TimingStatistics.G),
-                    micros(TimingStatistics.D),
-                    micros(TimingStatistics.A),
-                    micros(TimingStatistics.B),
-                    micros(TimingStatistics.C),
-            });
-            if (frameMicros >= STALL_THRESHOLD_MICROS) {
-                synchronized (FrameProfiler.class) {
-                    if (stalls.size() < MAX_STALL_CAPTURES) {
-                        stalls.add(captureWorkerStacks(frameMicros));
-                    }
-                }
-            }
-        }
-
-        //Keep watching: the rest of the frame (vanilla, shader pack, swap) can stall too
-        insideVoxyRender = false;
-        stallCapturedThisFrame = false;
-        frameStartNanos = System.nanoTime();
-
+        long now = active ? System.nanoTime() : 0;
+        if (active) capture.end(now);
+        GPUTiming.INSTANCE.poll();
+        if (!active) return;
         long nowMs = System.currentTimeMillis();
         if (nowMs - lastSnapshotMs >= SNAPSHOT_INTERVAL_MS) {
             lastSnapshotMs = nowMs;
@@ -184,21 +139,16 @@ public final class FrameProfiler {
             String msg = stopAndDump();
             Logger.info(msg);
             var player = Minecraft.getInstance().player;
-            if (player != null) {
-                player.displayClientMessage(net.minecraft.network.chat.Component.literal(msg), false);
-            }
+            if (player != null) player.displayClientMessage(net.minecraft.network.chat.Component.literal(msg), false);
         }
-    }
-
-    private static long micros(TimingStatistics.TimeSampler sampler) {
-        return (long) (sampler.getRolling() * 1000.0);
     }
 
     //Voxy's own threads plus the render thread. Anything blocking the render thread on a GL fence
     //usually has a partner thread doing the work, so both sides are needed to read a stall.
-    private static boolean isInterestingThread(Thread t) {
+    static boolean isInterestingThread(Thread t) {
         String name = t.getName();
         return name.startsWith("Voxy")
+                || name.startsWith("Dedicated Voxy Worker")
                 || name.startsWith("Async Node Manager")
                 || name.contains("Ingest")
                 || name.contains("Section saving")
@@ -250,94 +200,53 @@ public final class FrameProfiler {
     }
 
     public static synchronized String stopAndDump() {
-        if (!active) {
-            return "No frame capture running";
-        }
+        if (!active) return "No frame capture running";
         active = false;
+        TaskTiming.stopCapture();
         frameStartNanos = 0;
         insideVoxyRender = false;
         renderThread = null;
-        if (watchdog != null) {
-            watchdog.interrupt();
-            watchdog = null;
-        }
-        GPUTiming.INSTANCE.setEnabled(false);
-        if (frames.isEmpty()) {
+        if (watchdog != null) { watchdog.interrupt(); watchdog = null; }
+        if (capture.size() == 0) {
+            capture = null;
+            snapshots.clear();
+            stalls.clear();
             return "Frame capture produced no frames";
         }
-
-        var report = new StringBuilder();
-        report.append("voxy frame capture - ").append(frames.size()).append(" frames\n");
-        report.append(configLine()).append("\n\n");
-
-        String[] names = STAGE_NAMES;
-        report.append(String.format("%-18s %8s %8s %8s %8s %8s%n", "stage(ms)", "p50", "p90", "p99", "max", "mean"));
-        for (int col = 0; col < names.length; col++) {
-            long[] values = new long[frames.size()];
-            for (int i = 0; i < frames.size(); i++) {
-                values[i] = frames.get(i)[col];
-            }
-            Arrays.sort(values);
-            double mean = 0;
-            for (long v : values) mean += v;
-            mean /= values.length;
-            report.append(String.format("%-18s %8.2f %8.2f %8.2f %8.2f %8.2f%n", names[col],
-                    pct(values, 50) / 1000.0, pct(values, 90) / 1000.0, pct(values, 99) / 1000.0,
-                    values[values.length - 1] / 1000.0, mean / 1000.0));
+        var report = new StringBuilder(capture.report());
+        report.append('\n').append(workerTiming.report());
+        report.append('\n').append(configLine()).append('\n');
+        report.append("Upload stream forced glFinish calls: ")
+                .append(PerfStats.uploadForcedSyncs.sum() - initialForcedSyncs).append('\n');
+        report.append("GPU query batches dropped (capacity/invalid batch): ")
+                .append(GPUTiming.INSTANCE.droppedSamples() - initialDroppedGpu).append('\n');
+        report.append("GPU results still unavailable at stop are excluded, never replaced by zero.\n");
+        long[] intervals = capture.intervals();
+        Arrays.sort(intervals);
+        long median = FrameCapture.percentile(intervals, 50);
+        long stallCount = 0, stallNanos = 0;
+        for (long interval : intervals) {
+            if (interval >= STALL_THRESHOLD_MICROS * 1000) { stallCount++; stallNanos += interval; }
         }
-
-        //Frame-time distribution says whether this is a steady cost or a stutter
-        long[] totals = new long[frames.size()];
-        for (int i = 0; i < frames.size(); i++) totals[i] = frames.get(i)[0];
-        Arrays.sort(totals);
-        double medianMs = pct(totals, 50) / 1000.0;
-        report.append("\nimplied fps: p50=").append(String.format("%.0f", 1000.0 / Math.max(0.001, medianMs)))
-                .append("  p99-frame=").append(String.format("%.1fms", pct(totals, 99) / 1000.0))
-                .append("  worst=").append(String.format("%.1fms", totals[totals.length - 1] / 1000.0));
-
-        //How much of the frame budget is spent above the stall threshold at all
-        int stallFrames = 0;
-        long stallMicros = 0;
-        for (long t : totals) {
-            if (t >= STALL_THRESHOLD_MICROS) {
-                stallFrames++;
-                stallMicros += t;
-            }
-        }
-        report.append("\nstalls (>").append(STALL_THRESHOLD_MICROS / 1000).append("ms): ")
-                .append(stallFrames).append(" frames, ")
-                .append(String.format("%.2fs", stallMicros / 1_000_000.0)).append(" total\n");
-
-        if (!stalls.isEmpty()) {
-            report.append("\nstall stacks (").append(stalls.size()).append(" captured, cap ")
-                    .append(MAX_STALL_CAPTURES).append("):\n");
-            for (String s : stalls) {
-                report.append(s);
-            }
-        }
-
+        report.append(String.format(Locale.ROOT, "Stalls (>=40ms): %d intervals, %.3fs total%n", stallCount, stallNanos / 1e9));
+        report.append("\nstall stacks (").append(stalls.size()).append(" captured, cap ").append(MAX_STALL_CAPTURES).append("):\n");
+        for (String stall : stalls) report.append(stall);
         report.append("\nsubsystem snapshots (every ").append(SNAPSHOT_INTERVAL_MS).append("ms):\n");
-        for (String s : snapshots) {
-            report.append(s).append('\n');
-        }
-
+        for (String snapshot : snapshots) report.append(snapshot).append('\n');
         Path out = Minecraft.getInstance().gameDirectory.toPath().resolve("voxy-frame-capture.txt");
         try {
             Files.writeString(out, report.toString(), StandardCharsets.UTF_8);
+            return "Frame capture written to " + out.toAbsolutePath()
+                    + (intervals.length == 0 ? " (no complete frame intervals)"
+                    : String.format(Locale.ROOT, " (median %.1fms/frame)", median / 1e6));
         } catch (IOException e) {
             Logger.error("Failed to write frame capture", e);
             return "Frame capture failed to write: " + e;
+        } finally {
+            capture = null;
+            snapshots.clear();
+            stalls.clear();
         }
-        frames.clear();
-        snapshots.clear();
-        stalls.clear();
-        return "Frame capture written to " + out.toAbsolutePath() + " (median " + String.format("%.1f", medianMs) + "ms/frame)";
-    }
-
-    private static long pct(long[] sorted, int p) {
-        if (sorted.length == 0) return 0;
-        int idx = Math.min(sorted.length - 1, (int) ((long) sorted.length * p / 100));
-        return sorted[idx];
     }
 
     private static String configLine() {

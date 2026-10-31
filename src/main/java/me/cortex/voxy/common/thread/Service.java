@@ -2,6 +2,7 @@ package me.cortex.voxy.common.thread;
 
 import me.cortex.voxy.common.Logger;
 import me.cortex.voxy.common.util.Pair;
+import it.unimi.dsi.fastutil.longs.LongArrayFIFOQueue;
 
 import java.util.concurrent.Semaphore;
 import java.util.function.BooleanSupplier;
@@ -13,8 +14,12 @@ public class Service {
     final long weight;
     final String name;
     final BooleanSupplier limiter;
+    private final String queueTimingName;
+    private final String workTimingName;
 
     private final Semaphore tasks = new Semaphore(0);
+    private final LongArrayFIFOQueue enqueuedAt = new LongArrayFIFOQueue();
+    private int running;
     private volatile boolean isLive = true;
     private volatile boolean isStopping = false;
 
@@ -23,31 +28,42 @@ public class Service {
         this.weight = weight;
         this.name = name;
         this.limiter = limiter;
+        this.queueTimingName = "queue/" + name;
+        this.workTimingName = "work/" + name;
 
         this.executor = new PerThreadContextExecutor(ctxSupplier, e->sm.handleException(this, e));
     }
 
-    public void execute() {
+    public synchronized void execute() {
         if (this.isStopping) {
             Logger.error("Tried executing on a dead service");
             return;
         }
-        this.tasks.release();
+        this.enqueuedAt.enqueue(System.nanoTime());
         this.sm.execute(this);
+        this.tasks.release();
+        this.sm.wake();
     }
 
     boolean runJob() {
-        if (this.isStopping||!this.isLive) {
-            return false;
+        long queued;
+        synchronized (this) {
+            if (this.isStopping || !this.isLive || !this.tasks.tryAcquire()) return false;
+            queued = this.enqueuedAt.dequeueLong();
+            this.running++;
         }
-        if (!this.tasks.tryAcquire()) {
-            //Failed to get the job, probably due to a race condition
-            return false;
+        long start = System.nanoTime();
+        TaskTiming.record(this.queueTimingName, queued, start);
+        try {
+            if (!this.executor.run()) throw new IllegalStateException("Executor failed to run");
+            return true;
+        } finally {
+            TaskTiming.record(this.workTimingName, start, System.nanoTime());
+            synchronized (this) {
+                this.running--;
+                this.notifyAll();
+            }
         }
-        if (!this.executor.run()) {//Run the job
-            throw new IllegalStateException("Executor failed to run");
-        }
-        return true;
     }
 
     public boolean isLive() {
@@ -70,28 +86,35 @@ public class Service {
     }
 
     public int shutdown() {
-        if (this.isStopping) {
-            throw new IllegalStateException("Service not live");
+        synchronized (this) {
+            if (this.isStopping) throw new IllegalStateException("Service not live");
+            this.isStopping = true;
         }
-        this.isStopping = true;//First mark the service as stopping
         this.sm.removeService(this);//Remove the service this is so that new jobs are never executed
+        synchronized (this) {
+            while (this.running != 0) {
+                try { this.wait(); }
+                catch (InterruptedException e) { Thread.currentThread().interrupt(); throw new RuntimeException(e); }
+            }
+        }
         this.executor.shutdown();//Await shutdown of all running jobs
-        int remaining = this.tasks.drainPermits();//Drain the remaining tasks to 0
+        int remaining = this.drain();
         this.isLive = false;//Mark the service as dead
-        this.sm.remJobs(remaining);
         return remaining;
     }
 
-    public boolean steal() {
+    public synchronized boolean steal() {
         if (!this.tasks.tryAcquire()) {
             return false;
         }
         this.sm.remJobs(1);
+        TaskTiming.record(this.queueTimingName, this.enqueuedAt.dequeueLong(), System.nanoTime());
         return true;
     }
 
-    public int drain() {
+    public synchronized int drain() {
         int tasks = this.tasks.drainPermits();
+        this.enqueuedAt.clear();
         if (tasks != 0) {
             this.sm.remJobs(tasks);
         }

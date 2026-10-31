@@ -1,10 +1,10 @@
 package me.cortex.voxy.common.thread;
 
-import it.unimi.dsi.fastutil.HashCommon;
 import me.cortex.voxy.common.Logger;
 import me.cortex.voxy.common.util.Pair;
 
 import java.util.Arrays;
+import java.lang.ref.WeakReference;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 import java.util.function.IntConsumer;
@@ -12,16 +12,10 @@ import java.util.function.Supplier;
 
 public class ServiceManager {
     private static final class ThreadCtx {
-        int shiftFactor = 0;
-        long seed;//Random seed used for selecting service
-
-        ThreadCtx() {
-            this.seed = HashCommon.murmurHash3(System.nanoTime()^System.identityHashCode(this));
-        }
-
-        long rand(long size) {
-            return (this.seed = HashCommon.mix(this.seed))%size;
-        }
+        // Worker ThreadLocals must not retain removed services and their worlds after shutdown.
+        WeakReference<Service[]> services = new WeakReference<>(null);
+        int index;
+        long remaining;
     }
 
     private final IntConsumer jobRelease;
@@ -51,6 +45,8 @@ public class ServiceManager {
         return this.createService(ctxFactory, weight, name, null);
     }
     public synchronized Service createService(Supplier<Pair<Runnable, Runnable>> ctxFactory, long weight, String name, BooleanSupplier limiter) {
+        if (weight <= 0) throw new IllegalArgumentException("Service weight must be positive");
+        if (this.isShutdown) throw new IllegalStateException("Service manager is shutdown");
         Service newService = new Service(ctxFactory, this, weight, name, limiter);
         var newServices = Arrays.copyOf(this.services, this.services.length+1);
         newServices[newServices.length-1] = newService;
@@ -64,67 +60,45 @@ public class ServiceManager {
     }
 
     private int runAJob0() {//Executes a single job on the current thread
-        if (this.services.length == 0) return 1;
         var ctx = this.accelerationContext.get();
-        outer:
         while (true) {
-            long skipMsk = 0;
-            var services = this.services;//Capture the current services array
-            if (services.length == 0) return 1;
-            if (this.totalJobs.get()==0) return 1;
-            long totalWeight = 0;
-            int shiftFactor = ((ctx.shiftFactor++)&Integer.MAX_VALUE)%services.length;//We cycle and shift the starting service when choosing to prevent bias
-            Service selectedService = null;
-            for (int i = 0; i < services.length; i++) {
-                var service = services[(i+shiftFactor)%services.length];
-                if (!service.isLive()) {
-                    Thread.yield();
-                    continue outer;//We need to refetch the array and start over
+            var services = this.services;
+            if (services.length == 0 || this.totalJobs.get() == 0) return 1;
+            if (ctx.services.get() != services) {
+                ctx.services = new WeakReference<>(services);
+                ctx.index = 0;
+                ctx.remaining = services[0].weight;
+            }
+            boolean limited = false;
+            boolean raced = false;
+            for (int visited = 0; visited < services.length; visited++) {
+                var service = services[ctx.index];
+                if (service.isLive() && service.numJobs() != 0) {
+                    if (service.limiter != null && !service.limiter.getAsBoolean()) {
+                        limited = true;
+                    } else {
+                        // Consume the turn before invoking user work: it may help another service
+                        // recursively on this same thread while waiting on a pooled semaphore.
+                        if (--ctx.remaining == 0) advance(ctx, services);
+                        if (service.runJob()) {
+                            this.remJobs(1);
+                            return 0;
+                        }
+                        raced = true;
+                        break;
+                    }
                 }
-                if (service.limiter!=null && !service.limiter.getAsBoolean()) {
-                    skipMsk |= 1L<<i;
-                    continue;
-                }
-                long jc = service.numJobs();
-                if (jc!=0&&selectedService==null) selectedService=service;
-                totalWeight += jc * service.weight;
+                // Empty and limited services surrender their remaining turns immediately.
+                advance(ctx, services);
             }
-            if (totalWeight == 0) return skipMsk!=0?3:2;
-
-            long sample = ctx.rand(totalWeight);//Random number
-
-            for (int i = 0; i < services.length; i++) {
-                int idx = (i+shiftFactor)%services.length;
-                var service = services[idx];
-                if (service.limiter!=null && (((skipMsk&(1L<<i))!=0)|| !service.limiter.getAsBoolean())) {
-                    skipMsk |= 1L<<i;
-                    continue;
-                }
-                sample -= service.numJobs() * service.weight;
-                if (sample<=0) {
-                    selectedService = service;
-                    break;
-                }
-            }
-
-            if (selectedService == null) {
-                return skipMsk!=0?3:2;
-            }
-
-            if (!selectedService.isLive()) {
-                continue;//Failed to select a live service, try again
-            }
-
-            if (!selectedService.runJob()) {
-                //We failed to run the service, try again
-                continue;
-            }
-            if (this.totalJobs.decrementAndGet() < 0) {
-                throw new IllegalStateException("Job count <0");
-            }
-            break;
+            if (ctx.services.get() != this.services || raced) continue;
+            return limited ? 3 : 2;
         }
-        return 0;
+    }
+
+    private static void advance(ThreadCtx ctx, Service[] services) {
+        ctx.index = (ctx.index + 1) % services.length;
+        ctx.remaining = services[ctx.index].weight;
     }
 
     public void shutdown() {
@@ -165,6 +139,9 @@ public class ServiceManager {
 
     void execute(Service service) {
         this.totalJobs.incrementAndGet();
+    }
+
+    void wake() {
         this.jobRelease.accept(1);
     }
 

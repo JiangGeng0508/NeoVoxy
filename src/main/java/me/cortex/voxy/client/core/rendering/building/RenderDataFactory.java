@@ -352,7 +352,6 @@ public class RenderDataFactory {
         if (sectionData.length != 32*32*32*2 || rawSectionData.length != 32*32*32) {
             throw new IllegalStateException("Unexpected section buffer size");
         }
-        final var rawModelIds = this.modelMan._unsafeRawAccess();
         long opaque = 0;
         long notEmpty = 0;
         long pureFluid = 0;
@@ -370,7 +369,7 @@ public class RenderDataFactory {
                     sectionData[i2] = (block & (0xFFL << 56)) >>> 1;
                     sectionData[i2 + 1] = 0;
                 } else {
-                    int modelId = rawModelIds[Mapper.getBlockId(block)];
+                    int modelId = this.modelMan.getModelIdIfReady(Mapper.getBlockId(block));
                     if (modelId == -1) {//Failed, so just return error
                         return Mapper.getBlockId(block) | (1 << 31);
                     }

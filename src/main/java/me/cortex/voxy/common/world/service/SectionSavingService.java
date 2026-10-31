@@ -21,13 +21,20 @@ public class SectionSavingService {
     private final ConcurrentLinkedDeque<SaveEntry> saveQueue = new ConcurrentLinkedDeque<>();
 
     public SectionSavingService(ServiceManager sm) {
-        this.service = sm.createServiceNoCleanup(() -> this::processJob, 100, "Section saving service");
+        this(sm, System::nanoTime);
     }
 
     //Batch bounds: sections are uncompressed ~66KB each on the wire, so cap by count AND bytes or a
     //world import piles hundreds of MB of native memory into one write.
     private static final int MAX_BATCH_SECTIONS = 64;
     private static final long MAX_BATCH_BYTES = 4L << 20;
+    private static final long MAX_BATCH_NANOS = 4_000_000;
+    private final java.util.function.LongSupplier clock;
+
+    SectionSavingService(ServiceManager sm, java.util.function.LongSupplier clock) {
+        this.clock = clock;
+        this.service = sm.createServiceNoCleanup(() -> this::processJob, 2, "Section saving service");
+    }
 
     private static final ThreadLocal<Boolean> DRAINING = ThreadLocal.withInitial(() -> Boolean.FALSE);
 
@@ -39,13 +46,15 @@ public class SectionSavingService {
     //permits, so steal() would always fail and the big shutdown save would degrade to one at a time -
     //exactly the case batching is worth the most.
     private void processJob(boolean consumePermits) {
-        var task = this.saveQueue.poll();
+        SaveEntry task;
+        synchronized (this.saveQueue) { task = this.saveQueue.poll(); }
         if (task == null) {
             return;
         }
         boolean outermost = !DRAINING.get();
         var staged = new ArrayList<WorldSection>(MAX_BATCH_SECTIONS);
-        WorldEngine batchEngine = null;
+        long start = this.clock.getAsLong();
+        WorldEngine batchEngine = task.engine();
         SectionStorage.SectionSaveBatch batch = null;
         //Raised inside the try so nothing can throw between here and the finally that lowers it - a
         //flag stuck true would silently drop this thread's queue backpressure for the rest of its life.
@@ -53,37 +62,34 @@ public class SectionSavingService {
             if (outermost) {
                 DRAINING.set(Boolean.TRUE);
             }
+            try {
+                batch = batchEngine.storage.createSaveBatch();
+            } catch (Exception failure) {
+                task.section().exchangeIsInSaveQueue(false);
+                task.section().markDirty();
+                task.section().release();
+                Logger.error("Voxy saver failed to create a save batch", failure);
+                return;
+            }
+            int processed = 0;
             while (true) {
-                //A batch may only ever hold one engine's sections: the queue is shared across worlds,
-                //and a mixed batch would write one dimension's sections into another's database.
-                if (batchEngine != task.engine()) {
-                    if (batch != null) {
-                        this.finishBatch(batch, staged);
-                        batch.close();
-                        batch = null;
-                    }
-                    batchEngine = task.engine();
-                    batch = batchEngine.storage.createSaveBatch();
-                }
                 this.stageSection(batch, staged, task.section());
-                if (staged.size() >= MAX_BATCH_SECTIONS || batch.dataSize() >= MAX_BATCH_BYTES) {
-                    this.finishBatch(batch, staged);
-                }
-                //Every extra entry consumed must take its permit with it, or the queue length and the
-                //service's job count drift apart (blockTillEmpty would then hang on shutdown)
-                if (consumePermits && !this.service.steal()) {
-                    break;
-                }
-                task = this.saveQueue.poll();
-                if (task == null) {
-                    break;
+                if (++processed >= MAX_BATCH_SECTIONS || batch.dataSize() >= MAX_BATCH_BYTES
+                        || this.clock.getAsLong() - start >= MAX_BATCH_NANOS) break;
+                // Coordinate the peek and poll across saver workers. A different engine must get
+                // its own invocation, and every additional queue entry consumes one permit.
+                synchronized (this.saveQueue) {
+                    var next = this.saveQueue.peek();
+                    if (next == null || next.engine() != batchEngine) break;
+                    if (consumePermits && !this.service.steal()) break;
+                    task = this.saveQueue.poll();
                 }
             }
         } finally {
             try {
                 if (batch != null) {
-                    this.finishBatch(batch, staged);
-                    batch.close();
+                    try { this.finishBatch(batch, staged); }
+                    finally { batch.close(); }
                 }
             } finally {
                 if (outermost) {
@@ -159,8 +165,10 @@ public class SectionSavingService {
                 }
             }
 
-            this.saveQueue.add(new SaveEntry(in, section));
-            this.service.execute();
+            synchronized (this.saveQueue) {
+                this.saveQueue.add(new SaveEntry(in, section));
+                this.service.execute();
+            }
             return true;
         }
         return false;
@@ -169,7 +177,6 @@ public class SectionSavingService {
     public void shutdown() {
         if (this.service.numJobs() != 0) {
             Logger.error("Voxy section saving still in progress, estimated " + this.service.numJobs() + " sections remaining.");
-            this.service.blockTillEmpty();
         }
         this.service.shutdown();
         //Manually save any remaining entries. Permits are already zeroed by shutdown(), so drain

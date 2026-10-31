@@ -41,7 +41,6 @@ import net.minecraft.world.level.material.FluidState;
 import org.jetbrains.annotations.Nullable;
 import org.lwjgl.system.MemoryUtil;
 
-import java.lang.invoke.VarHandle;
 import java.util.*;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.locks.ReentrantLock;
@@ -96,6 +95,7 @@ public class ModelFactory {
 
     // 多个方块状态可以共享同一个内部模型 ID。
     private final int[] idMappings;
+    private final ModelReadiness readiness;
     private final Object2IntOpenHashMap<ModelEntry> modelTexture2id = new Object2IntOpenHashMap<>();
 
     // GPU 异步反馈期间的进行中集合，防止递归登记同一个状态。
@@ -134,6 +134,7 @@ public class ModelFactory {
         this.idMappings = new int[1 << 20];
         Arrays.fill(this.idMappings, -1);
         Arrays.fill(this.fluidStateLUT, -1);
+        this.readiness = new ModelReadiness(this.idMappings, this.fluidStateLUT);
 
         this.modelTexture2id.defaultReturnValue(-1);
         this.addEntry(0);
@@ -148,14 +149,14 @@ public class ModelFactory {
 
     /** 登记一个方块状态并把烘焙任务放入异步队列。 */
     public boolean addEntry(int blockId) {
-        if (this.idMappings[blockId] != -1) {
+        if (this.hasModelForBlockId(blockId)) {
             return false;
         }
 
         // 先占用状态再解析流体依赖，避免自引用或 A→B→A 的循环递归。
         this.blockStatesInFlightLock.lock();
         try {
-            if (this.idMappings[blockId] != -1 || !this.blockStatesInFlight.add(blockId)) {
+            if (this.hasModelForBlockId(blockId) || !this.blockStatesInFlight.add(blockId)) {
                 return false;
             }
         } finally {
@@ -173,7 +174,7 @@ public class ModelFactory {
             if (!isFluidBlockState(blockState) && !blockState.getFluidState().isEmpty()) {
                 int fluidStateId = this.mapper.getIdForBlockState(
                         blockState.getFluidState().createLegacyBlock());
-                if (this.idMappings[fluidStateId] == -1) {
+                if (!this.hasModelForBlockId(fluidStateId)) {
                     this.addEntry(fluidStateId);
                 }
             }
@@ -196,7 +197,7 @@ public class ModelFactory {
     private void retireFailedBake(int blockId) {
         // 某些异常发生在映射写入之后，不能把已成功烘焙的状态错误回退为空气。
         if (this.idMappings[blockId] == -1) {
-            this.idMappings[blockId] = 0;
+            this.readiness.publishBlock(blockId, 0);
         }
         this.blockStatesInFlightLock.lock();
         try {
@@ -543,7 +544,6 @@ public class ModelFactory {
                     conservativeComplexModel, completeComplexBlock);
             int possibleDuplicate = this.modelTexture2id.getInt(entry);
             if (possibleDuplicate != -1) {//Duplicate found
-                this.idMappings[blockId] = possibleDuplicate;
                 modelId = possibleDuplicate;
                 if (fluidKind != 0) {
                     this.fluidKinds[modelId] = fluidKind;
@@ -555,6 +555,7 @@ public class ModelFactory {
                     throw new IllegalStateException();
                 }
                 this.blockStatesInFlightLock.unlock();
+                this.readiness.publishBlock(blockId, modelId);
                 return null;
             } else {//Not a duplicate so create a new entry
                 modelId = this.modelTexture2id.size();
@@ -566,10 +567,10 @@ public class ModelFactory {
         }
 
         if (isFluid) {
-            this.fluidStateLUT[modelId] = modelId;
+            this.readiness.publishFluid(modelId, modelId);
             this.fluidKinds[modelId] = fluidKind;
         } else if (clientFluidStateId != -1) {
-            this.fluidStateLUT[modelId] = clientFluidStateId;
+            this.readiness.publishFluid(modelId, clientFluidStateId);
         }
 
 
@@ -846,7 +847,7 @@ public class ModelFactory {
 
 
         //Set the mapping at the very end
-        this.idMappings[blockId] = modelId;
+        this.readiness.publishBlock(blockId, modelId);
 
         this.blockStatesInFlightLock.lock();
         if (!this.blockStatesInFlight.remove(blockId)) {
@@ -1163,7 +1164,7 @@ public class ModelFactory {
     }
 
     public int getModelId(int blockId) {
-        int map = this.idMappings[blockId];
+        int map = this.getModelIdIfReady(blockId);
         if (map == -1) {
             throw new IdNotYetComputedException(blockId, true);
         }
@@ -1171,11 +1172,18 @@ public class ModelFactory {
     }
 
     public boolean hasModelForBlockId(int blockId) {
-        return this.idMappings[blockId] != -1;
+        return this.getModelIdIfReady(blockId) != -1;
     }
 
+    public int getModelIdIfReady(int blockId) { return this.readiness.block(blockId); }
+    public static long blockDependency(int blockId) { return ModelReadiness.blockDependency(blockId); }
+    public static long fluidDependency(int modelId) { return ModelReadiness.fluidDependency(modelId); }
+    public boolean isDependencyReady(long dependency) { return this.readiness.ready(dependency); }
+    public void addModelReadyListener(java.util.function.LongConsumer listener) { this.readiness.addListener(listener); }
+    public void removeModelReadyListener(java.util.function.LongConsumer listener) { this.readiness.removeListener(listener); }
+
     public int getFluidClientStateId(int clientBlockStateId) {
-        int map = this.fluidStateLUT[clientBlockStateId];
+        int map = this.readiness.fluid(clientBlockStateId);
         if (map == -1) {
             throw new IdNotYetComputedException(clientBlockStateId, false);
         }

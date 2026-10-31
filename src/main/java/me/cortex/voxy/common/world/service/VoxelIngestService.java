@@ -83,7 +83,7 @@ public class VoxelIngestService {
     }
 
     public VoxelIngestService(ServiceManager pool) {
-        this.service = pool.createServiceNoCleanup(()->this::processJob, 5000, "Ingest service");
+        this.service = pool.createServiceNoCleanup(()->this::processJob, 4, "Ingest service");
     }
 
     // ---- 后台任务 ------------------------------------------------------

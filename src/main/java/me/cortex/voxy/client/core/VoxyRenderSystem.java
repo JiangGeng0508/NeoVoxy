@@ -546,8 +546,8 @@ public class VoxyRenderSystem {
 
         TimingStatistics.all.start();
         // 标记帧正在执行，调试捕获器可以在 GPU/CPU 阻塞时采样。
-        FrameProfiler.onFrameStart();
-        GPUTiming.INSTANCE.marker();
+        FrameProfiler.onViewportStart();
+        GPUTiming.INSTANCE.beginViewport(FrameProfiler.frameId(), viewport.isMainViewport);
         TimingStatistics.main.start();
 
         for (int i = 0; i < this.savedBufferBindings.length; i++) {
@@ -627,7 +627,7 @@ public class VoxyRenderSystem {
         GPUTiming.INSTANCE.marker();
         TimingStatistics.postDynamic.stop();
 
-        GPUTiming.INSTANCE.tick();
+        GPUTiming.INSTANCE.endViewport();
 
         glBindFramebuffer(GlConst.GL_FRAMEBUFFER, previousFramebuffer);
         glViewport(this.viewportDimensions[0], this.viewportDimensions[1],
@@ -660,7 +660,7 @@ public class VoxyRenderSystem {
 
         TimingStatistics.all.stop();
 
-        FrameProfiler.onFrameEnd();
+        FrameProfiler.onViewportEnd(viewport.isMainViewport);
     }
 
     private long getModelBakeBudgetNanos() {
@@ -670,7 +670,7 @@ public class VoxyRenderSystem {
             fps = 60;
         }
 
-        int renderTasks = this.renderGen.getTaskCount();
+        int renderTasks = this.renderGen.getRunnableTaskCount();
 
         // When FPS is already low or the section generation queue is backing up, spend less
         // render-thread time on model baking. This keeps movement smooth and lets LOD catch up

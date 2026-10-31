@@ -83,6 +83,7 @@ public class UploadStream {
                 Logger.error("Upload stream full, preemptively committing, this could cause bad things to happen");
                 int attempts = 10;
                 while (--attempts != 0 && this.caddr == SIZE_LIMIT) {
+                    me.cortex.voxy.commonImpl.PerfStats.uploadForcedSyncs.increment();
                     glFinish();
                     this.tick(false);
                     this.caddr = this.allocationArena.alloc((int) size);

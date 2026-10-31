@@ -19,6 +19,7 @@ import net.neoforged.api.distmarker.Dist;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.neoforge.client.event.RegisterClientCommandsEvent;
+import net.neoforged.neoforge.client.event.RenderFrameEvent;
 
 @EventBusSubscriber(modid = "voxy", value = Dist.CLIENT)
 public class VoxyClient {
@@ -87,6 +88,16 @@ public class VoxyClient {
         if (EsCompatGate.shouldArm()) {
             SeasonalLod.view = new SeasonalMeshView();
         }
+    }
+
+    @SubscribeEvent
+    public static void onRenderFramePre(RenderFrameEvent.Pre event) {
+        FrameProfiler.onFrameStart();
+    }
+
+    @SubscribeEvent
+    public static void onRenderFramePost(RenderFrameEvent.Post event) {
+        FrameProfiler.onFrameEnd();
     }
 
     @SubscribeEvent

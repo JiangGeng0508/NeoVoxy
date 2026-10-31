@@ -107,7 +107,7 @@ public class WorldImporter implements IDataImporter {
         this.world = worldEngine;
         this.minBuildHeight = mcWorld.getMinBuildHeight();
         this.heightmapBits = 32 - Integer.numberOfLeadingZeros(mcWorld.getHeight());
-        this.service = sm.createService(()->new Pair<>(()->this.jobQueue.poll().run(), ()->{}), 3, "World importer", runChecker);
+        this.service = sm.createService(()->new Pair<>(()->this.jobQueue.poll().run(), ()->{}), 1, "World importer", runChecker);
 
         var biomeRegistry = mcWorld.registryAccess().registryOrThrow(Registries.BIOME);
         var defaultBiome = biomeRegistry.getHolder(Biomes.PLAINS).orElseThrow();

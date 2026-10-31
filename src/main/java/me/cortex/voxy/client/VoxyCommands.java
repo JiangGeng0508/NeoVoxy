@@ -321,9 +321,7 @@ public class VoxyCommands {
             ctx.getSource().sendFailure(Component.literal("A profile is already running"));
             return 0;
         }
-        //Timer queries are off by default (they cost a query object per pass per frame), so the window
-        //turns them on for its duration and back off after
-        me.cortex.voxy.client.core.util.GPUTiming.INSTANCE.setEnabled(true);
+        //GPUTiming observes the profile request independently of F3 and frame captures.
         me.cortex.voxy.commonImpl.VoxyProfile.start();
         ctx.getSource().sendSuccess(() -> Component.literal(
                 "Profiling for " + seconds + "s - fly the route that drops frames"), false);
@@ -333,8 +331,6 @@ public class VoxyCommands {
             @Override
             public void run() {
                 me.cortex.voxy.commonImpl.VoxyProfile.stop();
-                Minecraft.getInstance().execute(() ->
-                        me.cortex.voxy.client.core.util.GPUTiming.INSTANCE.setEnabled(false));
                 String msg = me.cortex.voxy.commonImpl.VoxyProfile.report();
                 me.cortex.voxy.common.Logger.info(msg);
                 //Chat is capped and this table is wide; the log has the readable copy

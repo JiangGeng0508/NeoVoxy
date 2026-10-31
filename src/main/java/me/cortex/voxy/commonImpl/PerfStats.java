@@ -6,6 +6,8 @@ public final class PerfStats {
     private PerfStats() {}
     public static final LongAdder sectionArrayPoolMiss = new LongAdder();
     public static final LongAdder sectionArrayPoolOverflow = new LongAdder();
+    // Monotonic lifetime counter: captures take deltas even if /stats is reset mid-capture.
+    public static final LongAdder uploadForcedSyncs = new LongAdder();
 
     //--- ingest hot path ---
     //Biome id resolution: a hit skipped a ResourceLocation.toString() + registry lookup (64x/section)
@@ -64,6 +66,7 @@ public final class PerfStats {
 
     public static String report() {
         StringBuilder sb = new StringBuilder("Voxy optimization stats:\n");
+        sb.append("  upload forced glFinish (lifetime) ").append(uploadForcedSyncs.sum()).append('\n');
         sb.append(ratio("biome-id cache", biomeCacheHit, biomeCacheMiss)).append('\n');
         sb.append(ratio("copycat material cache", copycatKeyHit, copycatKeyMiss)).append('\n');
         sb.append(ratio("train pose reuse", trainPoseCacheHit, trainPoseCacheMiss)).append('\n');

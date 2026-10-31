@@ -52,6 +52,11 @@ public class TimingStatistics {
             return this.rolling;
         }
 
+        /** Accumulated time since reset, without the F3 rolling/peak filter. */
+        public long getNanos() {
+            return this.runtime;
+        }
+
         public String pVal() {
             return String.format("%6.3f", this.rolling);
         }
@@ -80,6 +85,12 @@ public class TimingStatistics {
     public static TimeSampler G = new TimeSampler();
     public static TimeSampler H = new TimeSampler();
     public static TimeSampler I = new TimeSampler();
+
+    public static long[] snapshotNanos() {
+        return new long[]{all.getNanos(), main.getNanos(), dynamic.getNanos(), postDynamic.getNanos(),
+                E.getNanos(), H.getNanos(), F.getNanos(), G.getNanos(), D.getNanos(),
+                A.getNanos(), B.getNanos(), C.getNanos()};
+    }
 
 
     public static void update() {

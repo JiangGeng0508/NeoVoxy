@@ -14,6 +14,7 @@ public final class VoxyProfile {
     private static final Map<String, Entry> ENTRIES = new ConcurrentHashMap<>();
     private static volatile long windowStartNanos;
     private static Thread renderThread;
+    private static me.cortex.voxy.common.thread.TaskTiming.Window workerTiming;
 
     private static final class Entry {
         final LongAdder nanos = new LongAdder();
@@ -45,40 +46,48 @@ public final class VoxyProfile {
     }
 
     private static final Map<String, Entry> GPU = new ConcurrentHashMap<>();
-    private static volatile int gpuSamples;
+    private static volatile long gpuGeneration;
+    private static final int[] gpuSamples = new int[2];
+    private static final java.util.List<java.util.Set<Long>> gpuFrames =
+            java.util.List.of(new java.util.HashSet<>(), new java.util.HashSet<>());
 
-    public static void recordGpuMillis(String label, double millis) {
-        if (!enabled) {
-            return;
+    public static long gpuCaptureId() { return enabled ? gpuGeneration : 0; }
+
+    public static synchronized void recordGpuSample(long generation, long frameId, boolean main,
+                                                    String[] labels, long[] nanos) {
+        if (!enabled || generation == 0 || generation != gpuGeneration) return;
+        int group = main ? 0 : 1;
+        gpuSamples[group]++;
+        gpuFrames.get(group).add(frameId);
+        String prefix = main ? "main " : "secondary ";
+        for (int i = 0; i < nanos.length; i++) {
+            var entry = GPU.computeIfAbsent(prefix + labels[i], k -> new Entry());
+            entry.nanos.add(nanos[i]);
+            entry.calls.increment();
         }
-        var entry = GPU.computeIfAbsent(label, k -> new Entry());
-        entry.nanos.add((long) (millis * 1.0e6));
-        entry.calls.increment();
     }
 
-    public static void noteGpuFrame() {
-        if (enabled) {
-            gpuSamples++;
-        }
-    }
-
-    public static void start() {
+    public static synchronized void start() {
+        workerTiming = me.cortex.voxy.common.thread.TaskTiming.startProfile();
         ENTRIES.clear();
         GPU.clear();
-        gpuSamples = 0;
+        gpuGeneration++;
+        java.util.Arrays.fill(gpuSamples, 0);
+        gpuFrames.forEach(java.util.Set::clear);
         windowStartNanos = System.nanoTime();
         enabled = true;
     }
 
-    public static void stop() {
+    public static synchronized void stop() {
         enabled = false;
+        me.cortex.voxy.common.thread.TaskTiming.stopProfile();
     }
 
     public static boolean isRunning() {
         return enabled;
     }
 
-    public static String report() {
+    public static synchronized String report() {
         double windowMs = (System.nanoTime() - windowStartNanos) / 1.0e6;
         if (windowMs <= 0) {
             return "profile window is empty";
@@ -110,23 +119,30 @@ public final class VoxyProfile {
         sb.append("  ms/s on the render thread is milliseconds lost per second of play; anything not\n");
         sb.append("  marked 'on rt' is worker time and only costs frames through contention.\n");
 
+        if (workerTiming != null) sb.append('\n').append(workerTiming.report());
         if (GPU.isEmpty()) {
             sb.append("  (no GPU samples - the pipeline did not run, or timer queries are unsupported)");
             return sb.toString();
         }
         var gpuRows = new ArrayList<Map.Entry<String, Entry>>(GPU.entrySet());
         gpuRows.sort((a, b) -> Long.compare(b.getValue().nanos.sum(), a.getValue().nanos.sum()));
-        double gpuTotalPerFrame = 0;
-        sb.append(String.format("  GPU passes over %,d sampled frames:%n", gpuSamples));
-        for (var row : gpuRows) {
-            var e = row.getValue();
-            long calls = e.calls.sum();
-            double perFrame = calls == 0 ? 0 : (e.nanos.sum() / 1.0e6) / calls;
-            gpuTotalPerFrame += perFrame;
-            sb.append(String.format("  %-28s %19.3f ms/frame%n", row.getKey(), perFrame));
+        sb.append("  GPU values use completed viewport queries; pending queries are excluded.\n");
+        for (int group = 0; group < 2; group++) {
+            String prefix = group == 0 ? "main " : "secondary ";
+            sb.append(String.format("  GPU %s: %,d valid viewport samples from %,d game frames:%n",
+                    prefix.trim(), gpuSamples[group], gpuFrames.get(group).size()));
+            if (gpuSamples[group] == 0) continue;
+            long totalNanos = 0;
+            for (var row : gpuRows) {
+                if (!row.getKey().startsWith(prefix)) continue;
+                long nanos = row.getValue().nanos.sum();
+                totalNanos += nanos;
+                sb.append(String.format("  %-28s %19.3f ms/viewport%n", row.getKey(),
+                        nanos / 1e6 / gpuSamples[group]));
+            }
+            sb.append(String.format("  %-28s %19.3f ms/viewport%n", "== " + prefix + "gpu total",
+                    totalNanos / 1e6 / gpuSamples[group]));
         }
-        sb.append(String.format("  %-28s %19.3f ms/frame%n", "== gpu total", gpuTotalPerFrame));
-        sb.append("  16.7 ms/frame is the whole 60fps budget, spent inside voxy alone.");
         return sb.toString();
     }
 }
