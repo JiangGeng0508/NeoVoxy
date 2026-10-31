@@ -4,6 +4,8 @@
 
 需要本工程 Java 21/NeoForge 开发环境、Python 3，以及已有的测试世界。服务器仅绑定 `127.0.0.1`，以离线模式允许两个测试身份登录。脚本复制源世界，每次创建带时间戳的新目录，不修改源存档。会打开两个 640×360 的游戏窗口。
 
+消费者与补发扫描受异步预算限制，测试等待服务器 7200 tick、客户端 9000 tick，脚本在客户端启动后最多等待 480 秒；所有数据、容量和正常退出断言仍必须通过。结果记录总耗时，有限突发的完成时间不是同场景性能对照。
+
 ```powershell
 .\gradlew.bat writeNetworkStressLaunch -I scripts/network-stress.gradle -PstressPort=54187 --offline --console=plain
 python scripts/network-stress/run.py --fixture build/reports/lod-requests/server/smoke-world --port 54187
@@ -17,6 +19,7 @@ python scripts/network-stress/run.py --fixture build/reports/lod-requests/server
 - 对 2,304 个远景区段先后写入石头、泥土、金块，并重复通知，触发合并和 2,048 项队列溢出。两端最终必须收到并应用全部金块区段，排空后重新读取本地引擎验证最终状态。
 - Slow 客户端暂停 socket 读取 120 tick。测试服务器关闭网络压缩，让真实 Netty 不可写状态可以被触发；必须观测调度器因不可写而跳过发送。
 - 逐 tick 验证总包数/字节预算和队列上限，以及服务端准备载荷加任务预留不超过 32 MiB、在途不超过 64 项、全部缓存和任务不超过 1024 项；必须实际执行后台区段／映射准备与缓存复用。要求后台补发扫描结束、修复标记清零、队列排空，且三进程正常退出。
+- 逐 tick 验证客户端载荷、解码预留与映射表不超过 64 MiB、任务不超过 1024 项；等待异步工作与完成确认排空后读取本地存储，必须实际执行后台写入且无处理失败。探针只保留区段 key，不保留已收到的体素数组。
 
 原始日志、启动参数、源世界哈希、双方及服务器的通过标记、`result.json` 保存在 `build/reports/network-stress/run-*`。输出记录发送载荷字节、队列峰值、合并/溢出次数、不可写次数、扫描临时文件字节数、准备缓存统计，以及整个服务器 JVM 的已用堆采样。载荷字节含通道名及 16 字节封装预留，不含 TCP/IP；准备预算口径见 [服务端异步网络说明](../../docs/server-network-preparation.md)，堆采样包含游戏与存储分配，不能解释为独立的网络队列内存。
 

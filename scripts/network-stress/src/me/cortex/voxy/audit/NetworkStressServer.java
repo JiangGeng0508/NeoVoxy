@@ -79,6 +79,6 @@ public final class NetworkStressServer {
             Files.writeString(base.resolve("server.pass"), result);
             System.out.println(result); done = true;
         }
-        if (elapsed > 5400) throw new AssertionError("NETWORK_STRESS server timeout");
+        if (elapsed > 7200) throw new AssertionError("NETWORK_STRESS server timeout");
     }
 }

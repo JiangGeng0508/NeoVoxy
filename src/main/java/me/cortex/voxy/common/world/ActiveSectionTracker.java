@@ -30,6 +30,7 @@ public class ActiveSectionTracker {
         public volatile int preAcquireCount;
         public volatile int postAcquireCount;
         public volatile T obj;
+        public volatile Throwable failure;
     }
 
     private final AtomicInteger loadedSections = new AtomicInteger();
@@ -194,7 +195,19 @@ public class ActiveSectionTracker {
                         WorldEngine.getZ(key),
                         this);
 
-                status = loadFrom.load(section);
+                try {
+                    status = loadFrom.load(section);
+                } catch (RuntimeException | Error failure) {
+                    // A failed cold read must not leave an unpublished holder that every retry joins.
+                    long failedStamp = lock.writeLock();
+                    try {
+                        if (cache.get(key) == holder) cache.remove(key);
+                        this.loadedSections.decrementAndGet();
+                        holder.failure = failure;
+                    } finally { lock.unlockWrite(failedStamp); }
+                    if (section.trySetFreed()) section._releaseArray();
+                    throw failure;
+                }
                 section.dataAvailable = status == 0;
 
                 if (status < 0) {
@@ -229,6 +242,9 @@ public class ActiveSectionTracker {
         } else {
             VarHandle.fullFence();
             while ((section = holder.obj) == null) {
+                var failure = holder.failure;
+                if (failure instanceof RuntimeException exception) throw exception;
+                if (failure instanceof Error error) throw error;
                 VarHandle.fullFence();
                 Thread.onSpinWait();
                 Thread.yield();

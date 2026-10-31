@@ -142,6 +142,8 @@ python scripts/summarize-gpu-tests.py --expect-run --output build/reports/gpu-su
 
 区段冷读取、序列化和映射页编码由权重 2 的有界后台服务执行，重复需求共享版本化结果。`LodServerPreparationTest` / `LodServerPreparationDispatchTest` 与调度器回归覆盖缓存失效、映射追加、容量拒绝重试、后台读取、多人复用及关闭引用释放。完整预算和本批证据见 [服务端异步网络说明](server-network-preparation.md)。
 
+客户端映射和体素处理由单个权重 2 的消费者执行，主线程只登记载荷和处理有界完成确认。`LodClientIngestionTest` 覆盖旧载荷／确认竞争、缺映射通知、字节／条目预算、满载时映射恢复、串行消费与世界引用关闭；连接和请求测试继续验证修复与重试。完整预算及本轮证据见 [客户端异步网络说明](client-network-ingestion.md)。
+
 ## 验证记录与边界
 
 T1 在 2026-10-21 实测普通 `check` 为 92 项通过、20 项 GPU 跳过，启用 GPU 的 `build` 为 112 项通过；故意注入的 JUnit 断言让 `check/build` 均返回退出码 1，无匹配测试过滤器也返回 1。T2 新增 10 项 GPU 测试后，共 32 个测试类、122 项，其中 30 项需显式启用 GPU。以当次 XML 报告为准，不把 skipped 当成 passed。

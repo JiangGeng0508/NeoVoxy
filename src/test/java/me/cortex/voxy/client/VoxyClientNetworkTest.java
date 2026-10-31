@@ -1,13 +1,13 @@
 package me.cortex.voxy.client;
 
 import me.cortex.voxy.common.world.WorldEngine;
+import me.cortex.voxy.common.thread.ServiceManager;
 import me.cortex.voxy.commonImpl.network.VoxyNetwork;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
-import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -16,6 +16,9 @@ class VoxyClientNetworkTest {
     private LodSectionRequests originalRequests;
     private boolean originalAuthoritative;
     private long originalHelloTime;
+    private ServiceManager manager;
+    private WorldEngine world;
+    private LodClientIngestion queue;
 
     @BeforeEach
     void isolateSession() throws Exception {
@@ -25,13 +28,26 @@ class VoxyClientNetworkTest {
         this.originalRequests = get("sectionRequests");
         this.originalAuthoritative = get("serverAuthoritative");
         this.originalHelloTime = get("lastHelloNanos");
-        set("sectionRequests", new LodSectionRequests());
+        var requests = new LodSectionRequests();
+        set("sectionRequests", requests);
         set("serverAuthoritative", false);
+        this.manager = new ServiceManager(n -> {});
+        this.world = LodClientIngestionTest.world();
+        this.queue = new LodClientIngestion(manager, dim -> world, new LodClientIngestion.Confirmations() {
+            public void section(LodSectionRequests.Request request, LodClientIngestion.Result result) {
+                if (result == LodClientIngestion.Result.APPLIED || result == LodClientIngestion.Result.MISSING)
+                    requests.complete(request, result == LodClientIngestion.Result.MISSING);
+                else requests.retry(request, System.nanoTime());
+            }
+            public void mappings(String dimension, LodClientIngestion.Snapshot snapshot) {}
+        });
+        set("ingestion", this.queue);
     }
 
     @AfterEach
     void restoreSession() throws Exception {
         VoxyClientNetwork.onLoggingOut(null);
+        this.queue.close(); this.manager.shutdown(); this.world.free();
         set("sectionRequests", this.originalRequests);
         set("serverAuthoritative", this.originalAuthoritative);
         set("lastHelloNanos", this.originalHelloTime);
@@ -67,6 +83,9 @@ class VoxyClientNetworkTest {
             this.handler.handleSectionData(new VoxyNetwork.SectionDataS2C("minecraft:overworld", 0, i, 0, 0, new byte[0]));
         }
         assertEquals(0, requests.inFlightCount());
+        assertEquals(512, this.queue.stats().tasks(), "empty responses must obey the same ordered completion path");
+        while (this.manager.tryRunAJob() == 0) {}
+        this.queue.drain(Long.MAX_VALUE);
         this.handler.handleHello(new VoxyNetwork.HelloS2C(VoxyNetwork.PROTOCOL_VERSION));
         for (int i = 0; i < 512; i++) requests.request("minecraft:overworld", key(i));
         assertEquals(88, requests.pendingCount(), "hello must also keep server-confirmed absences");
@@ -78,6 +97,7 @@ class VoxyClientNetworkTest {
     @Test
     void responseCannotRemainHeldWhenWorldLookupFails() throws Exception {
         LodSectionRequests requests = get("sectionRequests");
+        VoxyClientNetwork.stopIngestion(null);
         requests.request("minecraft:overworld", key(1));
         requests.pump("minecraft:overworld", 0, r -> true);
         // The JUnit process has no Minecraft singleton. Exercise the failure before
@@ -96,19 +116,17 @@ class VoxyClientNetworkTest {
         LodSectionRequests old = get("sectionRequests");
         old.request("minecraft:overworld", key(1));
         this.handler.handleHello(new VoxyNetwork.HelloS2C(VoxyNetwork.PROTOCOL_VERSION));
-        Map<String, int[]> blocks = get("serverBlockToClient");
-        Map<String, int[]> biomes = get("serverBiomeToClient");
-        Map<LodSectionRequests.Request, VoxyNetwork.SectionDataS2C> deferred = get("pendingSections");
-        blocks.put("minecraft:overworld", new int[]{1});
-        biomes.put("minecraft:overworld", new int[]{2});
-        deferred.put(new LodSectionRequests.Request("minecraft:overworld", key(1)),
-                new VoxyNetwork.SectionDataS2C("minecraft:overworld", 0, 1, 0, 0, new byte[]{1}));
+        this.queue.mapping("minecraft:overworld", new VoxyNetwork.BiomeMapBatchS2C(0, java.util.List.of("example:forest")));
+        this.manager.tryRunAJob(); this.queue.drain(Long.MAX_VALUE);
+        assertTrue(this.queue.stats().bytes() > 0);
+        this.handler.handleSectionData(new VoxyNetwork.SectionDataS2C("minecraft:overworld", 0, 1, 0, 0, new byte[]{1}));
+        assertTrue(this.world.isWorldUsed());
         VoxyClientNetwork.onLoggingOut(null);
         assertFalse(VoxyClientNetwork.isServerAuthoritative());
         assertEquals(0L, (long) get("lastHelloNanos"));
-        assertTrue(blocks.isEmpty());
-        assertTrue(biomes.isEmpty());
-        assertTrue(deferred.isEmpty());
+        assertEquals(0, this.queue.stats().bytes());
+        assertEquals(0, this.queue.stats().tasks()); assertFalse(this.world.isWorldUsed());
+        assertNull(get("ingestion"));
         old.request("minecraft:overworld", key(2));
         assertEquals(0, old.pendingCount());
         LodSectionRequests current = get("sectionRequests");

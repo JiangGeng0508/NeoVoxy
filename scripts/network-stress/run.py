@@ -22,6 +22,7 @@ run = base / datetime.datetime.now().strftime('run-%Y%m%d-%H%M%S')
 run.mkdir(parents=True)
 processes = []
 readers = []
+run_started = time.monotonic()
 results = {'state': 'running', 'run': str(run), 'port': args.port,
            'worldSha256': hashlib.sha256((fixture / 'level.dat').read_bytes()).hexdigest()}
 (run / 'result.json').write_text(json.dumps(results, indent=2))
@@ -94,7 +95,7 @@ try:
             raise TimeoutError('server startup')
         time.sleep(0.5)
     fast = start('Fast'); slow = start('Slow')
-    deadline = time.monotonic() + 360
+    deadline = time.monotonic() + 480
     while any(p.poll() is None for p in (fast, slow)):
         if server.poll() is not None:
             raise RuntimeError('server exited during load')
@@ -132,4 +133,5 @@ finally:
                     proc.kill(); proc.wait(timeout=15)
             else:
                 proc.kill(); proc.wait(timeout=15)
+    results['elapsedSeconds'] = round(time.monotonic() - run_started, 3)
     (run / 'result.json').write_text(json.dumps(results, indent=2), encoding='utf-8')

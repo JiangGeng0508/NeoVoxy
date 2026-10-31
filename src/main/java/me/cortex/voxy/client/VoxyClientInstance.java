@@ -99,6 +99,7 @@ public class VoxyClientInstance extends VoxyInstance {
 
     @Override
     public void shutdown() {
+        VoxyClientNetwork.stopIngestion(this);
         me.cortex.voxy.client.compat.pingwheel.PingWheelCompat.stop();
         me.cortex.voxy.client.compat.xaero.XaeroSurfaceCompat.stop();
         super.shutdown();
