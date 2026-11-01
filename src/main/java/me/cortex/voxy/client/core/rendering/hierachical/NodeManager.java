@@ -261,6 +261,8 @@ public class NodeManager {
             }
         }
 
+        if (geometry.isEmpty()) geometry.free();
+
         if (previousGeometry != newGeometry) {
             this.nodeData.setNodeGeometry(node, newGeometry);
         }

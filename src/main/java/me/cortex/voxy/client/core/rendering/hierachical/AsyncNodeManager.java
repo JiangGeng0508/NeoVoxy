@@ -69,8 +69,9 @@ public class AsyncNodeManager {
 
     private final AtomicInteger workCounter = new AtomicInteger();
 
+    private final SyncResults[] syncStorage = {new SyncResults(), new SyncResults()};
     @SuppressWarnings("FieldMayBeFinal")
-    private volatile SyncResults results = null, resultCache1 = new SyncResults(), resultCache2 = new SyncResults();
+    private volatile SyncResults results = null, resultCache1 = this.syncStorage[0], resultCache2 = this.syncStorage[1];
 
 
     //locals for during iteration
@@ -362,7 +363,7 @@ public class AsyncNodeManager {
                 var iter = this.geometryManager.getUploads().int2ObjectEntrySet().fastIterator();
                 while (iter.hasNext()) {
                     var val = iter.next();
-                    results.geometryUpload.upload(val.getIntKey(), val.getValue());
+                    results.geometryUpload.upload(val.getIntKey(), val.getValue().geometryBuffer);
                     val.getValue().free();
                 }
                 this.geometryManager.getUploads().clear();
@@ -409,7 +410,7 @@ public class AsyncNodeManager {
                 var iter = add.int2ObjectEntrySet().fastIterator();
                 while (iter.hasNext()) {
                     var val = iter.next();
-                    results.geometryUpload.upload(val.getIntKey(), val.getValue());
+                    results.geometryUpload.upload(val.getIntKey(), val.getValue().geometryBuffer);
                     val.getValue().free();
                 }
                 add.clear();
@@ -628,12 +629,14 @@ public class AsyncNodeManager {
     }
 
     private void submitGeometryResult(BuiltSection geometry) {
-        if (!this.running) {
-            geometry.free();
-            return;
+        synchronized (this.geometryUpdateQueue) {
+            if (!this.running) {
+                geometry.free();
+                return;
+            }
+            this.geometryUpdateQueue.add(geometry);
+            this.addWork();
         }
-        this.geometryUpdateQueue.add(geometry);
-        this.addWork();
     }
 
     public void submitRemoveBatch(MemoryBuffer batch) {//Only called from render thread
@@ -685,7 +688,9 @@ public class AsyncNodeManager {
         if (!this.running) {
             throw new IllegalStateException();
         }
-        this.running = false;
+        synchronized (this.geometryUpdateQueue) {
+            this.running = false;
+        }
         LockSupport.unpark(this.thread);
         try {
             while (this.thread.isAlive()) {
@@ -713,6 +718,7 @@ public class AsyncNodeManager {
             if (buffer == null) break;
             buffer.free();
         }
+        this.geometryManager.freePendingUploads();
 
         while (true) {
             var section = this.childUpdateQueue.poll();
@@ -722,20 +728,17 @@ public class AsyncNodeManager {
 
         if (RESULT_HANDLE.get(this) != null) {
             var result = (SyncResults)RESULT_HANDLE.getAndSet(this, null);
-            result.geometryUpload.free();
-            result.scatterWriteBuffer.free();
+            result.free();
         }
 
         if (RESULT_CACHE_1_HANDLE.get(this) != null) {//Clear cache 1
             var result = (SyncResults)RESULT_CACHE_1_HANDLE.getAndSet(this, null);
-            result.geometryUpload.free();
-            result.scatterWriteBuffer.free();
+            result.free();
         }
 
         if (RESULT_CACHE_2_HANDLE.get(this) != null) {//Clear cache 2
             var result = (SyncResults)RESULT_CACHE_2_HANDLE.getAndSet(this, null);
-            result.geometryUpload.free();
-            result.scatterWriteBuffer.free();
+            result.free();
         }
 
         this.scatterWrite.free();
@@ -743,7 +746,14 @@ public class AsyncNodeManager {
     }
 
     public void addDebug(List<String> debug) {
-        debug.add("UC/GC,#N: " + (this.getUsedGeometryCapacity()/(1<<20))+"/"+(this.getGeometryCapacity()/(1<<20)) + "," + (this.geometryData.getSectionCount()));
+        debug.add("GPU geometry used/capacity MiB, sections: " + (this.getUsedGeometryCapacity()/(1<<20))+"/"+(this.getGeometryCapacity()/(1<<20)) + "," + (this.geometryData.getSectionCount()));
+        debug.add("Node sync native capacity KiB: " + (this.getSyncNativeBytes() >> 10));
+    }
+
+    public long getSyncNativeBytes() {
+        long bytes = 0;
+        for (var storage : this.syncStorage) bytes += storage.scatterCapacity + storage.geometryUpload.nativeCapacity;
+        return bytes;
     }
 
     public boolean hasWork() {
@@ -784,11 +794,18 @@ public class AsyncNodeManager {
 
         //Scatter writes for both geometry and node metadata
         private MemoryBuffer scatterWriteBuffer = new MemoryBuffer(8192*2);
+        private volatile long scatterCapacity = this.scatterWriteBuffer.size;
         private final Int2IntOpenHashMap scatterWriteLocationMap = new Int2IntOpenHashMap(1024);
         {this.scatterWriteLocationMap.defaultReturnValue(-1);}
 
         //Cleaner operations
         private final IntOpenHashSet cleanerOperations = new IntOpenHashSet();
+
+        public void free() {
+            this.geometryUpload.free();
+            this.scatterWriteBuffer.free();
+            this.scatterCapacity = 0;
+        }
 
         public void reset() {
             this.cleanerOperations.clear();
@@ -835,6 +852,7 @@ public class AsyncNodeManager {
                 this.scatterWriteBuffer.cpyTo(newBuffer.address);
                 this.scatterWriteBuffer.free();
                 this.scatterWriteBuffer = newBuffer;
+                this.scatterCapacity = newSize;
             }
         }
     }
@@ -844,6 +862,7 @@ public class AsyncNodeManager {
         public int maxElementAccess;
         private MemoryBuffer scratchHeaderBuffer = new MemoryBuffer(1<<16);
         private MemoryBuffer scratchDataBuffer = new MemoryBuffer(1<<20);
+        private volatile long nativeCapacity = this.scratchHeaderBuffer.size + this.scratchDataBuffer.size;
 
         private final AllocationArena arena = new AllocationArena();
         private final Int2IntOpenHashMap dataUploadPoints = new Int2IntOpenHashMap();//Points to the header index
@@ -934,6 +953,7 @@ public class AsyncNodeManager {
                     this.scratchHeaderBuffer.cpyTo(newScratch.address);
                     this.scratchHeaderBuffer.free();
                     this.scratchHeaderBuffer = newScratch;
+                    this.nativeCapacity = this.scratchHeaderBuffer.size + this.scratchDataBuffer.size;
                 }
 
                 long headerPtr = this.scratchHeaderBuffer.address + header*16L;//Header resize has happened so this is a stable address
@@ -962,6 +982,7 @@ public class AsyncNodeManager {
                 this.scratchDataBuffer.cpyTo(newScratch.address);
                 this.scratchDataBuffer.free();
                 this.scratchDataBuffer = newScratch;
+                this.nativeCapacity = this.scratchHeaderBuffer.size + this.scratchDataBuffer.size;
             }
             return pos;
         }
@@ -976,6 +997,7 @@ public class AsyncNodeManager {
         public void free() {
             this.scratchHeaderBuffer.free(); this.scratchHeaderBuffer = null;
             this.scratchDataBuffer.free(); this.scratchDataBuffer = null;
+            this.nativeCapacity = 0;
         }
     }
 }

@@ -42,7 +42,8 @@ public class RenderDataFactory {
 
 
     // 每个方向最多 65536 个四边形；布局由几何管理器和着色器共同约定。
-    private final MemoryBuffer quadBuffer = new MemoryBuffer(8 * (8 * (1 << 16)));
+    public static final long MAX_GEOMETRY_BYTES = 8L * (8 * (1 << 16));
+    private final MemoryBuffer quadBuffer = new MemoryBuffer(MAX_GEOMETRY_BYTES);
     private final long quadBufferPtr = this.quadBuffer.address;
     private final int[] quadCounters = new int[8];
     //Set when a bucket filled up and quads were dropped; reported once per build rather than per quad,

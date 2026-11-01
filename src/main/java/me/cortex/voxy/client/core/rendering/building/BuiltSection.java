@@ -4,6 +4,7 @@ import me.cortex.voxy.common.util.MemoryBuffer;
 import me.cortex.voxy.commonImpl.VoxyCommon;
 
 import java.util.Arrays;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class BuiltSection {
     public static final boolean VERIFY_BUILT_SECTION_OFFSETS = VoxyCommon.isVerificationFlagOn("verifyBuiltSectionOffsets");
@@ -13,6 +14,8 @@ public final class BuiltSection {
     public final MemoryBuffer geometryBuffer;
     public final int[] offsets;
     public final MemoryBuffer occupancy;
+    private final AtomicBoolean freed = new AtomicBoolean();
+    private MeshResultBudget.Reservation reservation;
 
     private BuiltSection(long position, byte children) {
         this(position, children, -1, null, null, null);
@@ -46,12 +49,21 @@ public final class BuiltSection {
         return new BuiltSection(this.position, this.childExistence, this.aabb, this.geometryBuffer!=null?this.geometryBuffer.copy():null, this.offsets!=null?Arrays.copyOf(this.offsets, this.offsets.length):null, this.occupancy!=null?this.occupancy.copy():null);
     }
 
+    void retainReservation(MeshResultBudget.Reservation reservation) {
+        if (this.reservation != null || this.freed.get()) throw new IllegalStateException("Mesh is not owned by builder");
+        reservation.retain((this.geometryBuffer == null ? 0 : this.geometryBuffer.size)
+                + (this.occupancy == null ? 0 : this.occupancy.size),
+                this.offsets == null ? 0 : (long) this.offsets.length * Integer.BYTES);
+        this.reservation = reservation;
+    }
+
     public void free() {
-        if (this.geometryBuffer != null) {
-            this.geometryBuffer.free();
-        }
-        if (this.occupancy != null) {
-            this.occupancy.free();
+        if (!this.freed.compareAndSet(false, true)) return;
+        try {
+            if (this.geometryBuffer != null) this.geometryBuffer.free();
+            if (this.occupancy != null) this.occupancy.free();
+        } finally {
+            if (this.reservation != null) this.reservation.close();
         }
     }
 

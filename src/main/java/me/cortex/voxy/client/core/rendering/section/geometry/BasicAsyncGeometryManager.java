@@ -25,7 +25,8 @@ public class BasicAsyncGeometryManager implements IGeometryManager {
     //Changes that need to be applied to the underlying data store to match this state
     private final IntOpenHashSet invalidatedIds = new IntOpenHashSet(1024);//Ids that need to be invalidated
     //Note!: the int part is an unsigned int ptr, must be scaled by GEOMETRY_ELEMENT_SIZE
-    private final Int2ObjectOpenHashMap<MemoryBuffer> heapUploads = new Int2ObjectOpenHashMap<>(1024);//Uploads into the buffer at the given location
+    // Keep the complete result (including its reservation and occupancy) until copied or removed.
+    private final Int2ObjectOpenHashMap<BuiltSection> heapUploads = new Int2ObjectOpenHashMap<>(1024);
     private final IntOpenHashSet heapRemoveUploads = new IntOpenHashSet(1024);//Any removals are added here, so that it can be properly synced
     private long usedCapacity = 0;
 
@@ -115,7 +116,7 @@ public class BasicAsyncGeometryManager implements IGeometryManager {
         }
         this.usedCapacity += upsized;
         //Create upload
-        if (this.heapUploads.put(addr, section.geometryBuffer) != null) {
+        if (this.heapUploads.put(addr, section) != null) {
             throw new IllegalStateException("Addr: " + addr);
         }
         this.heapRemoveUploads.remove(addr);
@@ -128,8 +129,13 @@ public class BasicAsyncGeometryManager implements IGeometryManager {
         throw new IllegalStateException("Not yet implemented");
     }
 
-    public Int2ObjectOpenHashMap<MemoryBuffer> getUploads() {
+    public Int2ObjectOpenHashMap<BuiltSection> getUploads() {
         return this.heapUploads;
+    }
+
+    public void freePendingUploads() {
+        for (var section : this.heapUploads.values()) section.free();
+        this.heapUploads.clear();
     }
 
     public IntOpenHashSet getHeapRemovals() {

@@ -7,6 +7,7 @@ import java.util.BitSet;
 import java.util.Random;
 
 public class OccupancySet {
+    public static final int MAX_SERIALIZED_BYTES = 8 + 64 * 8 * Long.BYTES;
     private long topLvl;//4x4x4
     private final long[] bottomLvl = new long[(4*4*4)*8];
     public void set(final int pos) {

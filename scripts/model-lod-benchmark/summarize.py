@@ -23,6 +23,10 @@ def distribution(values, scale=1):
 
 
 def validate_profile(data, metadata, log, profile):
+    mesh = data["meshResultBudget"]
+    require(mesh["samples"] > 0 and 0 < mesh["peakEntries"] <= 1024, f"{profile}: mesh results not exercised or over capacity")
+    require(0 <= mesh["peakNativeBytes"] <= 64 * 1024 * 1024
+            and 0 <= mesh["peakHeapBytes"] <= 32 * 1024, f"{profile}: mesh memory budget exceeded")
     require("SECTION_SNAPSHOT_PASS cases=5" in log, f"{profile}: missing section snapshot geometry check")
     require("MODEL_LOD_BENCH ASYNC_PASS " in log, f"{profile}: missing async pipeline PASS")
     queue = data["asyncPipeline"]
@@ -77,7 +81,8 @@ def validate_profile(data, metadata, log, profile):
 
 def summarize(data):
     result = {"pipeline": data["pipeline"], "renderer": data["renderer"], "glVersion": data["glVersion"],
-              "javaVersion": data["javaVersion"], "asyncPipeline": data["asyncPipeline"], "modes": {}, "blocks": [], "bakes": []}
+              "javaVersion": data["javaVersion"], "asyncPipeline": data["asyncPipeline"],
+              "meshResultBudget": data["meshResultBudget"], "modes": {}, "blocks": [], "bakes": []}
     for mode in ("full", "lod"):
         rows = [row for row in data["frames"] if row["mode"] == mode]
         result["modes"][mode] = {"samples": len(rows),

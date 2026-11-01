@@ -48,6 +48,7 @@ public class RenderGenerationService {
     private final Models models;
     private volatile Consumer<BuiltSection> resultConsumer;
     private final Service service;
+    private final MeshResultBudget resultBudget;
     private final MeshTaskQueue tasks;
     private final PriorityBlockingQueue<BuildTask> taskQueue = MeshTaskQueue.createRunnableQueue();
     private final ThreadLocal<Function<WorldSection, BuiltSection>> alternateBuilder = new ThreadLocal<>();
@@ -55,6 +56,7 @@ public class RenderGenerationService {
 
     public RenderGenerationService(WorldEngine world, ModelBakerySubsystem modelBakery, ServiceManager sm, boolean emitMeshlets) {
         this.world = world;
+        this.resultBudget = new MeshResultBudget();
         this.models = new Models() {
             public boolean hasBlock(int block) { return modelBakery.factory.hasModelForBlockId(block); }
             public boolean ready(long dependency) { return modelBakery.factory.isDependencyReady(dependency); }
@@ -66,7 +68,7 @@ public class RenderGenerationService {
             var factory = new RenderDataFactory(world, modelBakery.factory, emitMeshlets);
             var missing = new IntOpenHashSet(128);
             return new Pair<>(() -> this.processJob(factory, missing), factory::free);
-        }, 4, "Section mesh generation service");
+        }, 4, "Section mesh generation service", this.resultBudget::canReserve);
         this.tasks = new MeshTaskQueue(this.service::execute, this.models::ready, this.taskQueue);
         this.modelReady = this.tasks::dependencyReady;
         this.models.addListener(this.modelReady);
@@ -74,8 +76,15 @@ public class RenderGenerationService {
 
     RenderGenerationService(WorldEngine world, Models models, ServiceManager sm,
                             Supplier<Pair<Function<WorldSection, BuiltSection>, Runnable>> builders) {
+        this(world, models, sm, builders, new MeshResultBudget());
+    }
+
+    RenderGenerationService(WorldEngine world, Models models, ServiceManager sm,
+                            Supplier<Pair<Function<WorldSection, BuiltSection>, Runnable>> builders,
+                            MeshResultBudget resultBudget) {
         this.world = world;
         this.models = models;
+        this.resultBudget = resultBudget;
         this.service = sm.createService(() -> {
             var builder = builders.get();
             var missing = new IntOpenHashSet(128);
@@ -84,7 +93,7 @@ public class RenderGenerationService {
                 try { this.processJob(null, missing); }
                 finally { this.alternateBuilder.remove(); }
             }, builder.right());
-        }, 4, "Section mesh generation service");
+        }, 4, "Section mesh generation service", this.resultBudget::canReserve);
         this.tasks = new MeshTaskQueue(this.service::execute, this.models::ready, this.taskQueue);
         this.modelReady = this.tasks::dependencyReady;
         this.models.addListener(this.modelReady);
@@ -119,16 +128,27 @@ public class RenderGenerationService {
     // Keep the factory signature, queue poll and both Consumer.accept sites for SeedGen's
     // freshness hooks; the task state transition shares the queue's monitor.
     private void processJob(RenderDataFactory factory, IntOpenHashSet missing) {
+        var reservation = this.resultBudget.tryReserve();
+        if (reservation == null) {
+            // Another worker may reserve between the scheduler's check and this call.
+            // Return this service permit without polling: the task still owns only its key.
+            this.service.execute();
+            return;
+        }
         BuildTask task;
         synchronized (this.tasks) { task = this.tasks.claim(this.taskQueue.poll()); }
-        if (task == null) return;
+        if (task == null) { reservation.close(); return; }
         LongOpenHashSet dependencies = null;
         try {
             var section = this.world.acquireIfExists(task.position);
             BuiltSection mesh;
             if (section == null) {
+                mesh = BuiltSection.empty(task.position);
+                mesh.retainReservation(reservation);
+                reservation = null;
                 var consumer = this.resultConsumer;
-                if (consumer != null) consumer.accept(BuiltSection.empty(task.position));
+                if (consumer != null) consumer.accept(mesh);
+                else mesh.free();
                 return;
             } else {
                 try {
@@ -148,10 +168,18 @@ public class RenderGenerationService {
                     section.release();
                 }
             }
+            try {
+                mesh.retainReservation(reservation);
+            } catch (RuntimeException | Error failure) {
+                mesh.free();
+                throw failure;
+            }
+            reservation = null;
             var consumer = this.resultConsumer;
             if (consumer != null) consumer.accept(mesh);
             else mesh.free();
         } finally {
+            if (reservation != null) reservation.close();
             if (dependencies != null) this.tasks.await(task, dependencies);
             else this.tasks.complete(task);
         }
@@ -173,9 +201,16 @@ public class RenderGenerationService {
         }
         debug.add("RSSQ/WAIT/ALL/TFC: " + getRunnableTaskCount() + "/" + getWaitingTaskCount()
                 + "/" + getTaskCount() + "/" + MESH_FAILED_COUNTER.get());
+        var memory = this.resultBudget.stats();
+        debug.add("Mesh CPU native retained/reserved/limit KiB: " + (memory.resultNativeBytes() >> 10)
+                + "/" + (memory.nativeBytes() >> 10) + "/" + (memory.nativeLimit() >> 10));
+        debug.add("Mesh heap arrays/reserved/limit B: " + memory.resultHeapBytes() + "/"
+                + memory.heapBytes() + "/" + memory.heapLimit() + "; results/building: "
+                + (memory.entries() - memory.building()) + "/" + memory.building());
     }
 
     public int getTaskCount() { return this.tasks.taskCount(); }
     public int getRunnableTaskCount() { return this.tasks.runnableCount(); }
     public int getWaitingTaskCount() { return this.tasks.waitingCount(); }
+    public MeshResultBudget.Stats getResultMemoryStats() { return this.resultBudget.stats(); }
 }

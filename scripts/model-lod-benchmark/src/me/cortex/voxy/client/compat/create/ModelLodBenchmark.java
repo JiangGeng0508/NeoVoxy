@@ -49,6 +49,7 @@ public final class ModelLodBenchmark {
     private static boolean shaderVerified;
     private static boolean capturing;
     private static CreateMeshQueue.Stats asyncPipeline;
+    private static long meshBudgetSamples, meshPeakNativeBytes, meshPeakHeapBytes, meshPeakEntries;
     private record CapturedSource(String name, DistantMesh mesh, long captureNanos) {}
     private static final List<CapturedSource> capturedSources = new ArrayList<>();
 
@@ -64,6 +65,19 @@ public final class ModelLodBenchmark {
     @SubscribeEvent public static void tick(ClientTickEvent.Post event) throws Exception {
         var mc = Minecraft.getInstance();
         if (++ticks > 12000 && !finished) throw new AssertionError("Model LOD benchmark timeout");
+        if (mc.level != null && !finished) {
+            var renderer = ((IGetVoxyRenderSystem)mc.levelRenderer).voxy$getRenderSystem();
+            if (renderer != null) {
+                var stats = renderer.getMeshResultMemoryStats();
+                check(stats.nativeBytes() >= 0 && stats.nativeBytes() <= stats.nativeLimit(), "mesh native budget");
+                check(stats.heapBytes() >= 0 && stats.heapBytes() <= stats.heapLimit(), "mesh heap array budget");
+                check(stats.entries() >= 0 && stats.entries() <= stats.entryLimit(), "mesh result entry budget");
+                meshBudgetSamples++;
+                meshPeakNativeBytes = Math.max(meshPeakNativeBytes, stats.nativeBytes());
+                meshPeakHeapBytes = Math.max(meshPeakHeapBytes, stats.heapBytes());
+                meshPeakEntries = Math.max(meshPeakEntries, stats.entries());
+            }
+        }
         if (mc.level == null || mc.player == null || ready || finished) return;
         if (++worldTicks < 100) return;
         var activeSystem = ((IGetVoxyRenderSystem)mc.levelRenderer).voxy$getRenderSystem();
@@ -341,6 +355,9 @@ public final class ModelLodBenchmark {
         report.put("blockOrder", List.of("full", "lod", "lod", "full"));
         report.put("bakes", bakeRows); report.put("frames", samples);
         report.put("asyncPipeline", asyncPipeline);
+        check(meshBudgetSamples > 0 && meshPeakEntries > 0, "mesh result budget was not exercised");
+        report.put("meshResultBudget", Map.of("samples", meshBudgetSamples, "peakNativeBytes", meshPeakNativeBytes,
+                "peakHeapBytes", meshPeakHeapBytes, "peakEntries", meshPeakEntries));
         report.put("scope", "Same captured Create geometry, full vs adaptive mesh policy in one binary; actual shader pipeline renders an offscreen scene during normal Minecraft frames. GPU timers cover scene draws. frameNs is RenderFrameEvent Pre/Post wall time including the scene and normal game rendering, excluding presentation/vsync. CPU payload excludes Java object overhead and is freed after upload; shared index/FBO/texture memory is common to both modes.");
         Files.writeString(Path.of("results.json"), new GsonBuilder().setPrettyPrinting().create().toJson(report));
         for (var fixture : fixtures) { fixture.full.free(); fixture.lod.free(); }

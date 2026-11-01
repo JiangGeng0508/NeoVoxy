@@ -110,6 +110,10 @@ public class VoxyRenderSystem {
 
     /** Includes model waiters: generation must not grow a blocked downstream indefinitely. */
     public int getPendingMeshCount() { return this.renderGen.getTaskCount(); }
+    public double getMeshResultPressure() { return this.renderGen.getResultMemoryStats().pressure(); }
+    public me.cortex.voxy.client.core.rendering.building.MeshResultBudget.Stats getMeshResultMemoryStats() {
+        return this.renderGen.getResultMemoryStats();
+    }
 
     private static AbstractSectionRenderer.Factory<?, ? extends IGeometryData> getRenderBackendFactory() {
         return MDICSectionRenderer.FACTORY;

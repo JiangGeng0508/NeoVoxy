@@ -32,4 +32,13 @@ class GenerationBackpressureTest {
         assertFalse(gate.paused());
         assertTrue(gate.allow(0, 0, 0, 0.7, MAX - 1, MAX));
     }
+
+    @Test void retainedMeshBytesPauseGenerationEvenWithNoQueuedMeshKeys() {
+        var gate = new GenerationBackpressure();
+        assertFalse(gate.allow(0, 0, 0, 0, 0.751, 0, MAX));
+        assertFalse(gate.allow(0, 0, 0, 0, 0.50, 0, MAX));
+        assertFalse(gate.allow(0, 0, 0, 0.50, 0.49, 0, MAX));
+        assertTrue(gate.allow(0, 0, 0, 0.49, 0.49, 0, MAX));
+        assertTrue(gate.allow(0, 0, 0, 0, 0.75, 0, MAX));
+    }
 }
