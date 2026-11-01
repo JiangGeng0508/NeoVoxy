@@ -13,7 +13,8 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 //Client-side state for distant trains: baked carriage meshes keyed by shape id plus the latest two
-//pose samples per carriage for interpolation. All access happens on the render/main thread.
+//pose samples per carriage for interpolation. Mutations happen on the render/main thread;
+//Flywheel can query published readiness from a visual worker.
 public final class DistantTrainManager {
     private DistantTrainManager() {}
 
@@ -52,19 +53,26 @@ public final class DistantTrainManager {
 
     private static final Map<UUID, TrainState> TRAINS = new ConcurrentHashMap<>();
     private static final Map<Long, ShapeEntry> SHAPES = new ConcurrentHashMap<>();
+    private static final Map<Long, CarriageShapePayload> SOURCES = new HashMap<>();
+    private static final java.util.Set<Long> PENDING = new java.util.HashSet<>();
+    private static final java.util.Set<Long> NEEDS_BUILD = new java.util.HashSet<>();
+    private record ShapeKey(long id) {}
 
     //Diagnostics for /voxy debug trains
     public static volatile int shapesReceived;
-    public static volatile int bakesFailed;
 
     public static void handleShape(CarriageShapePayload payload) {
         if (!me.cortex.voxy.client.ServerCapabilities.trains()) return;
         shapesReceived++;
-        try {
-            var existing = SHAPES.remove(payload.shapeId());
-            if (existing != null) {
-                existing.close();
-            }
+        SOURCES.put(payload.shapeId(), payload);
+        NEEDS_BUILD.add(payload.shapeId());
+        queueShape(payload);
+    }
+
+    private static void queueShape(CarriageShapePayload payload) {
+        for (var bogey : payload.bogeys()) DistantBogeyMeshes.getOrCapture(bogey);
+        var bounds = new net.minecraft.world.phys.AABB[1];
+        boolean accepted = CreateMeshService.request(new ShapeKey(payload.shapeId()), () -> {
             //Rebuild copycat ModelData from the material slices the server attached to the shape
             java.util.Map<net.minecraft.core.BlockPos, net.neoforged.neoforge.client.model.data.ModelData> blockEntityData = null;
             for (var block : payload.blocks()) {
@@ -80,18 +88,22 @@ public final class DistantTrainManager {
                     blockEntityData.put(new net.minecraft.core.BlockPos(block.x(), block.y(), block.z()), data);
                 }
             }
-            var baked = CarriageMeshBaker.bake(payload.blocks(), blockEntityData);
-            if (baked != null) {
-                SHAPES.put(payload.shapeId(), new ShapeEntry(baked, payload.initialYaw(), payload.bogeys()));
-            } else {
-                bakesFailed++;
+            var captured = CarriageMeshBaker.capture(payload.blocks(), blockEntityData);
+            bounds[0] = captured == null ? null : captured.bounds();
+            return captured == null ? null : captured.cpu();
+        }, mesh -> {
+            PENDING.remove(payload.shapeId());
+            NEEDS_BUILD.remove(payload.shapeId());
+            if (mesh == null) {
+                var old = SHAPES.remove(payload.shapeId());
+                if (old != null) old.close();
+                return;
             }
-        } catch (Throwable e) {
-            //enqueueWork futures swallow exceptions; surface them ourselves
-            bakesFailed++;
-            me.cortex.voxy.common.Logger.error("Distant train shape handling failed (shapeId="
-                    + Long.toHexString(payload.shapeId()) + ")", e);
-        }
+            var baked = new CarriageMeshBaker.BakedCarriage(mesh, bounds[0]);
+            var old = SHAPES.put(payload.shapeId(), new ShapeEntry(baked, payload.initialYaw(), payload.bogeys()));
+            if (old != null) old.close();
+        }, () -> PENDING.remove(payload.shapeId()));
+        if (accepted) PENDING.add(payload.shapeId());
     }
 
     public static void handlePoses(TrainPosesPayload payload) {
@@ -122,6 +134,8 @@ public final class DistantTrainManager {
     }
 
     public static void clearAll() {
+        for (long id : SOURCES.keySet()) CreateMeshService.cancel(new ShapeKey(id));
+        SOURCES.clear(); PENDING.clear(); NEEDS_BUILD.clear();
         TRAINS.clear();
         for (var baked : SHAPES.values()) {
             baked.close();
@@ -134,7 +148,18 @@ public final class DistantTrainManager {
     }
 
     public static ShapeEntry shape(long shapeId) {
+        if (!PENDING.contains(shapeId) && NEEDS_BUILD.contains(shapeId)) {
+            var source = SOURCES.get(shapeId);
+            if (source != null) queueShape(source);
+        }
         return SHAPES.get(shapeId);
+    }
+
+    public static void invalidateMeshes() {
+        for (long id : SOURCES.keySet()) CreateMeshService.cancel(new ShapeKey(id));
+        for (var shape : SHAPES.values()) shape.close();
+        SHAPES.clear(); PENDING.clear();
+        NEEDS_BUILD.addAll(SOURCES.keySet());
     }
 
     public static boolean hasRenderable(UUID trainId, int carriageIndex, ResourceLocation dimension) {
@@ -143,7 +168,9 @@ public final class DistantTrainManager {
             return false;
         }
         var track = state.carriages.get(carriageIndex);
-        return track != null && track.cur != null && SHAPES.containsKey(track.shapeId);
+        if (track == null || track.cur == null) return false;
+        var shape = SHAPES.get(track.shapeId);
+        return shape != null && shape.bogeys().stream().allMatch(DistantBogeyMeshes::ready);
     }
 
     public static CarriageTrack track(UUID trainId, int carriageIndex, ResourceLocation dimension) {

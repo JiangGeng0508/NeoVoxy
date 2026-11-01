@@ -54,6 +54,11 @@ public class Voxy {
 
         if (FMLLoader.getDist() == Dist.CLIENT) {
             registerClientEvents(container);
+            if (ModList.get().isLoaded("create")) {
+                modEventBus.addListener((net.neoforged.neoforge.client.event.RegisterClientReloadListenersEvent event) ->
+                        event.registerReloadListener((net.minecraft.server.packs.resources.ResourceManagerReloadListener)
+                                resources -> me.cortex.voxy.client.compat.create.CreateMeshService.reload()));
+            }
         }
     }
 

@@ -48,6 +48,7 @@ public final class DistantContraptionManager {
         //Set once a bake ran on a non-empty contraption but produced no drawable mesh (all non-MODEL
         //blocks); stops the per-tick 64KB re-bake retry for structures that can never draw.
         boolean bakeGaveNothing;
+        boolean pending;
         boolean movedWhileSeen;
         long remoteUpdatedAtNanos;
         //Network id of the entity behind the last refresh, for the renderer's frame-time lookup -
@@ -129,13 +130,9 @@ public final class DistantContraptionManager {
             var snap = SNAPSHOTS.computeIfAbsent(ce.getUUID(), k -> new Snapshot());
             snap.trackingBlocks = ce.getType().clientTrackingRange() * 16.0;
             snap.live = true;
-            if (snap.mesh == null && !snap.bakeGaveNothing) {
+            if (snap.mesh == null && !snap.bakeGaveNothing && !snap.pending) {
                 if (!contraption.getBlocks().isEmpty()) {
-                    var collected = collectBlocks(contraption);
-                    snap.mesh = bakeBlocks(collected);
-                    snap.source = snap.mesh == null ? null : collected;
-                    snap.boundRadius = snap.source == null ? 0.0 : boundRadiusOf(collected);
-                    snap.bakeGaveNothing = snap.mesh == null;
+                    queueBake(snap, () -> collectBlocks(contraption));
                 }
             } else if (snap.bakeGaveNothing) {
                 me.cortex.voxy.commonImpl.PerfStats.contraptionRebakeSkipped.increment();
@@ -234,6 +231,7 @@ public final class DistantContraptionManager {
             //refills it is a live re-sighting, which mints its own fields anyway. Nothing on disk
             //either - the save rejects a null source.
             if (s.mesh == null && s.source == null && now - s.lastSeenMs >= 2000) {
+                CreateMeshService.cancel(s);
                 return true;
             }
             double sx = s.x - camX, sy = s.y - camY, sz = s.z - camZ;
@@ -244,9 +242,7 @@ public final class DistantContraptionManager {
                 double bodyReach = presenceRadius + s.boundRadius;
                 if (anchorDistSq <= bodyReach * bodyReach
                         && now - s.lastSeenMs >= 2000 && disassembledInPlace(level, s)) {
-                    if (s.mesh != null) {
-                        s.mesh.close();
-                    }
+                    dropMesh(s);
                     if (storage != null) {
                         ContraptionStore.remove(storage, entry.getKey());
                     }
@@ -262,9 +258,7 @@ public final class DistantContraptionManager {
             if (!level.isLoaded(net.minecraft.core.BlockPos.containing(s.x, s.y, s.z))) {
                 return false;
             }
-            if (s.mesh != null) {
-                s.mesh.close();
-            }
+            dropMesh(s);
             //Presence removal means the structure no longer exists - the record goes with it, or the
             //same ghost restores at the next world entry and has to be walked to all over again.
             if (storage != null) {
@@ -480,8 +474,28 @@ public final class DistantContraptionManager {
         return new Source(blocks, blockEntityData, renderNbt);
     }
 
-    private static CarriageMeshBaker.BakedCarriage bakeBlocks(Source source) {
-        return CarriageMeshBaker.bake(source.blocks(), source.modelData());
+    private static void queueBake(Snapshot snap, java.util.function.Supplier<Source> sourceFactory) {
+        if (snap.pending) return;
+        var bounds = new net.minecraft.world.phys.AABB[1];
+        snap.pending = CreateMeshService.request(snap, () -> {
+            var source = sourceFactory.get();
+            snap.source = source; snap.boundRadius = boundRadiusOf(source);
+            var captured = CarriageMeshBaker.capture(source.blocks(), source.modelData());
+            bounds[0] = captured == null ? null : captured.bounds();
+            return captured == null ? null : captured.cpu();
+        }, mesh -> {
+            snap.pending = false;
+            if (!SNAPSHOTS.containsValue(snap)) { if (mesh != null) mesh.free(); return; }
+            var old = snap.mesh;
+            snap.mesh = mesh == null ? null : new CarriageMeshBaker.BakedCarriage(mesh, bounds[0]);
+            snap.bakeGaveNothing = mesh == null;
+            snap.lastMeshBytes = mesh == null ? 0 : mesh.gpuByteSize();
+            residentGpuBytes += snap.lastMeshBytes - (old == null ? 0 : old.mesh.gpuByteSize());
+            if (old != null) old.close();
+            var mc = Minecraft.getInstance();
+            if (snap.lightPacked < 0 && mc.level != null) snap.lightPacked = DistantLightSampler.samplePeek(mc.level,
+                    (int) Math.floor(snap.x), (int) Math.floor(snap.y), (int) Math.floor(snap.z));
+        }, () -> snap.pending = false);
     }
 
 
@@ -544,6 +558,7 @@ public final class DistantContraptionManager {
 
 
     private static void dropMesh(Snapshot snap) {
+        CreateMeshService.cancel(snap);
         if (snap.mesh != null) {
             snap.lastMeshBytes = snap.mesh.mesh.gpuByteSize();
             snap.mesh.close();
@@ -555,7 +570,7 @@ public final class DistantContraptionManager {
     //A snapshot that still knows what it is made of but has no mesh right now. It draws nothing and
     //costs no vertex memory until something brings it back.
     private static boolean isDormant(Snapshot snap) {
-        return snap.mesh == null && snap.source != null && !snap.bakeGaveNothing;
+        return snap.mesh == null && snap.source != null && !snap.bakeGaveNothing && !snap.pending;
     }
 
     private static void enforceGpuBudget(double camX, double camY, double camZ) {
@@ -599,11 +614,13 @@ public final class DistantContraptionManager {
         residentGpuBytes = resident;
     }
 
-    //Rebuilds a few dormant snapshots per tick, nearest first, while there is budget for them. Same
-    //pacing as the restore path for the same reason: baking uploads a buffer.
+    //Admit dormant snapshots nearest first, including known sizes of pending rebuilds so asynchronous
+    //preparation cannot spend the same GPU headroom repeatedly before publication.
     private static void bakeDormant(double camX, double camY, double camZ, double maxDist) {
         long budget = (long) VoxyConfig.CONFIG.distantContraptionGpuBudgetMiB * 1024L * 1024L;
         double maxDistSq = maxDist * maxDist;
+        long pendingBytes = 0;
+        for (var snap : SNAPSHOTS.values()) if (snap.pending && snap.mesh == null) pendingBytes += snap.lastMeshBytes;
         //Candidates rejected for size this tick. Without this the loop keeps picking the same nearest
         //one, finds it does not fit, and burns its whole allowance doing nothing.
         var tooBig = new java.util.HashSet<Snapshot>();
@@ -629,25 +646,13 @@ public final class DistantContraptionManager {
                 return;
             }
             if (budget > 0 && nearest.lastMeshBytes > 0
-                    && residentGpuBytes + nearest.lastMeshBytes > budget) {
+                    && residentGpuBytes + pendingBytes + nearest.lastMeshBytes > budget) {
                 tooBig.add(nearest);
                 continue;
             }
-            var mesh = bakeBlocks(nearest.source);
-            if (mesh == null) {
-                nearest.bakeGaveNothing = true;
-                continue;
-            }
-            nearest.mesh = mesh;
-            nearest.lastMeshBytes = mesh.mesh.gpuByteSize();
-            if (nearest.lightPacked < 0) {
-                var mc = Minecraft.getInstance();
-                if (mc.level != null) {
-                    nearest.lightPacked = DistantLightSampler.samplePeek(mc.level,
-                            (int) Math.floor(nearest.x), (int) Math.floor(nearest.y), (int) Math.floor(nearest.z));
-                }
-            }
-            residentGpuBytes += mesh.mesh.gpuByteSize();
+            Source source = nearest.source;
+            queueBake(nearest, () -> source);
+            if (nearest.pending) pendingBytes += nearest.lastMeshBytes;
         }
     }
 
@@ -718,6 +723,7 @@ public final class DistantContraptionManager {
     //snapshot must go immediately. Only unloading (the player walking away) freezes a leave-behind.
     public static void removeDead(UUID id) {
         Snapshot snap = SNAPSHOTS.remove(id);
+        if (snap != null) CreateMeshService.cancel(snap);
         if (snap != null && snap.mesh != null) {
             snap.mesh.close();
         }
@@ -733,6 +739,7 @@ public final class DistantContraptionManager {
 
     public static void clearAll() {
         for (var snap : SNAPSHOTS.values()) {
+            CreateMeshService.cancel(snap);
             if (snap.mesh != null) {
                 snap.mesh.close();
             }
@@ -741,5 +748,10 @@ public final class DistantContraptionManager {
         REMOTE_POSES.clear();
         loadedFor = null;
         snapshotCount = 0;
+    }
+
+    public static void invalidateMeshes() {
+        for (var snap : SNAPSHOTS.values()) { dropMesh(snap); snap.bakeGaveNothing = false; }
+        residentGpuBytes = 0;
     }
 }

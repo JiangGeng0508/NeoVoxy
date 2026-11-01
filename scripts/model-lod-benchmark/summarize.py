@@ -23,6 +23,12 @@ def distribution(values, scale=1):
 
 
 def validate_profile(data, metadata, log, profile):
+    require("MODEL_LOD_BENCH ASYNC_PASS " in log, f"{profile}: missing async pipeline PASS")
+    queue = data["asyncPipeline"]
+    require(queue["prepared"] >= 4 and queue["published"] >= 4 and queue["failed"] == 0
+            and queue["oversized"] == 0, f"{profile}: async preparation/publication failed")
+    require(0 < queue["peakReserved"] <= 32 * 1024 * 1024
+            and 0 < queue["peakFrameBytes"] <= 2 * 1024 * 1024, f"{profile}: async budget exceeded")
     pipeline = "IrisVoxyRenderPipeline" if profile == "iris" else "NormalRenderPipeline"
     require(data["pipeline"] == pipeline, f"{profile}: unexpected pipeline")
     require(f"MODEL_LOD_BENCH PASS frames=480 pipeline={pipeline}" in log, f"{profile}: missing PASS")
@@ -70,7 +76,7 @@ def validate_profile(data, metadata, log, profile):
 
 def summarize(data):
     result = {"pipeline": data["pipeline"], "renderer": data["renderer"], "glVersion": data["glVersion"],
-              "javaVersion": data["javaVersion"], "modes": {}, "blocks": [], "bakes": []}
+              "javaVersion": data["javaVersion"], "asyncPipeline": data["asyncPipeline"], "modes": {}, "blocks": [], "bakes": []}
     for mode in ("full", "lod"):
         rows = [row for row in data["frames"] if row["mode"] == mode]
         result["modes"][mode] = {"samples": len(rows),
@@ -105,6 +111,12 @@ def markdown(report):
         "with 30 settling frames per block and 240 measured frames per mode. p95 uses the nearest-rank definition.", ""]
     for profile, result in report["profiles"].items():
         lines += [f"## {profile}", "", f"{result['renderer']} / {result['glVersion']}; Java {result['javaVersion']}.", ""]
+        queue = result["asyncPipeline"]
+        lines += [f"Async Create pipeline: {queue['prepared']} prepared, {queue['published']} published; "
+                  f"peak retained CPU reservation {queue['peakReserved']:,} bytes; "
+                  f"peak frame upload {queue['peakFrameBytes']:,} bytes; "
+                  f"peak capture/upload work {queue['peakFrameNanos'] / 1e6:.3f} ms "
+                  "(time checked at work-unit boundaries).", ""]
         if profile == "iris":
             metadata = result["metadata"]
             lines += [f"Iris {metadata['iris']}; {metadata['shaderPack']}; {metadata['shaderOptions']}. "

@@ -47,8 +47,22 @@ public final class KineticSnapshots {
         final Map<BlockPos, Snap> geoms = new HashMap<>();
         DistantMesh mesh;
         boolean dirty;
+        boolean pending, closed;
+        java.util.Set<BlockPos> meshPositions = java.util.Set.of();
+
+        void dirty() {
+            for (BlockPos pos : this.meshPositions) {
+                var snap = this.geoms.get(pos);
+                if (snap == null || snap.hollow()) DRAWABLE.remove(pos);
+            }
+            CreateMeshService.cancel(this);
+            this.dirty = true;
+        }
 
         void close() {
+            this.closed = true;
+            DRAWABLE.removeAll(this.meshPositions);
+            CreateMeshService.cancel(this);
             if (this.mesh != null) {
                 this.mesh.free();
                 this.mesh = null;
@@ -59,6 +73,8 @@ public final class KineticSnapshots {
     private static final it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<Bucket> SECTIONS =
             new it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<>();
     private static final Queue<BlockPos> CAPTURE_QUEUE = new ConcurrentLinkedQueue<>();
+    private static final java.util.Set<BlockPos> QUEUED_CAPTURES = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private static final java.util.Set<BlockPos> DRAWABLE = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private static final Queue<BlockPos> REMOVE_QUEUE = new ConcurrentLinkedQueue<>();
     private static ResourceLocation dim;
     private static final java.util.Set<BlockPos> BEARING_POSITIONS = new java.util.HashSet<>();
@@ -132,7 +148,8 @@ public final class KineticSnapshots {
         if (me.cortex.voxy.client.compat.ShipBorne.isShipBorne(pos)) {
             return;
         }
-        CAPTURE_QUEUE.add(pos.immutable());
+        pos = pos.immutable();
+        if (QUEUED_CAPTURES.add(pos)) CAPTURE_QUEUE.add(pos);
     }
 
     //Called on return to the live path or when a fresh visual spawns for the position
@@ -226,6 +243,7 @@ public final class KineticSnapshots {
         }
         SECTIONS.clear();
         CAPTURE_QUEUE.clear();
+        QUEUED_CAPTURES.clear(); DRAWABLE.clear();
         REMOVE_QUEUE.clear();
         BEARING_POSITIONS.clear();
         ANCHOR_RECAPTURED.clear();
@@ -259,7 +277,7 @@ public final class KineticSnapshots {
                 Bucket bucket = SECTIONS.get(sectionKey(pos));
                 Snap removed = bucket == null ? null : bucket.geoms.remove(pos);
                 if (removed != null && !removed.hollow()) {
-                    bucket.dirty = true;
+                    bucket.dirty();
                     PRIORITY_REBAKE.add(sectionKey(pos));
             }
                 BEARING_POSITIONS.remove(pos);
@@ -272,11 +290,13 @@ public final class KineticSnapshots {
             KineticCull.cachedReachSq = reachSq;
             captureBudget = CAPTURES_PER_TICK;
             while (captureBudget > 16 && (pos = CAPTURE_QUEUE.poll()) != null) {
+                QUEUED_CAPTURES.remove(pos);
                 //Raced back inside the live path between the queue and this tick: the visual draws it
                 if (pos.distToCenterSqr(cam.x, cam.y, cam.z) < reachSq) {
                     continue;
             }
                 if (loadedBlockEntity(level, pos) instanceof KineticBlockEntity be) {
+                    if (hasCurrentSnap(pos, be.getBlockState())) continue;
                     capture(level, be);
                     captureBudget--;
             }
@@ -371,7 +391,8 @@ public final class KineticSnapshots {
                         if (levelChunk.getBlockEntities().get(snapPos) instanceof KineticBlockEntity) {
                             return false;
                         }
-                        bucket.dirty = true;
+                        bucket.dirty();
+                        DRAWABLE.remove(snapPos);
                         BEARING_POSITIONS.remove(snapPos);
                         return true;
                     });
@@ -397,7 +418,7 @@ public final class KineticSnapshots {
                         Snap removed = bucket == null ? null : bucket.geoms.remove(bePos);
                         if (removed != null) {
                             if (!removed.hollow()) {
-                                bucket.dirty = true;
+                                bucket.dirty();
                                 PRIORITY_REBAKE.add(sectionKey(bePos));
                             }
                             BEARING_POSITIONS.remove(bePos);
@@ -431,12 +452,7 @@ public final class KineticSnapshots {
     }
 
     static boolean drawsSnapAt(BlockPos pos) {
-        Bucket bucket = SECTIONS.get(sectionKey(pos));
-        if (bucket == null || bucket.mesh == null) {
-            return false;
-        }
-        Snap snap = bucket.geoms.get(pos);
-        return snap != null && !snap.hollow();
+        return DRAWABLE.contains(pos);
     }
 
     //Present-and-current test for the dedup sites: a snap (hollow or real) for the same interned
@@ -570,7 +586,7 @@ public final class KineticSnapshots {
                 Snap prior = bucket.geoms.put(pos.immutable(),
                         new Snap(state, null, 0.0f, 0, 0, false, null, null, 0.0f, false, null, null, null, false));
                 if (prior != null && !prior.hollow()) {
-                    bucket.dirty = true; //the old state had geometry; rebuild the mesh without it
+                    bucket.dirty(); //the old state had geometry; rebuild the mesh without it
                 }
                 logCapture(pos.toShortString() + " SKIP " + state.getBlock().getDescriptionId()
                         + " (chunk-visible or empty json, no partials)");
@@ -589,7 +605,7 @@ public final class KineticSnapshots {
                     skyLight, blockLight,
                     bakeJson, shaftHalfFacing, bearingFacing, bearingTopAngle, woodenTop, chains, bnbChain, generic,
                     gantryCarriage));
-            bucket.dirty = true;
+            bucket.dirty();
             if (bearingFacing != null) {
                 BEARING_POSITIONS.add(pos.immutable());
                 if (!inManagerRecapture) {
@@ -804,10 +820,28 @@ public final class KineticSnapshots {
     }
 
     private static void rebake(Bucket bucket) {
-        if (bucket.mesh != null) {
-            bucket.mesh.free();
-            bucket.mesh = null;
-        }
+        if (bucket.closed || bucket.pending) return;
+        var positions = new java.util.HashSet<BlockPos>();
+        bucket.pending = CreateMeshService.request(bucket, () -> {
+            positions.clear();
+            bucket.geoms.forEach((pos, snap) -> { if (!snap.hollow()) positions.add(pos); });
+            return captureMesh(bucket);
+        }, mesh -> {
+            bucket.pending = false;
+            var old = bucket.mesh;
+            bucket.mesh = mesh;
+            DRAWABLE.removeAll(bucket.meshPositions);
+            bucket.meshPositions = mesh == null ? java.util.Set.of() : java.util.Set.copyOf(positions);
+            DRAWABLE.addAll(bucket.meshPositions);
+            if (old != null) old.free();
+        }, () -> { bucket.pending = false; bucket.dirty = !bucket.closed; });
+        bucket.dirty = !bucket.pending;
+        int count = 0;
+        for (Bucket b : SECTIONS.values()) for (Snap snap : b.geoms.values()) if (!snap.hollow()) count++;
+        snapshotCount = count;
+    }
+
+    static DistantMeshBuilder.CpuMesh captureMesh(Bucket bucket) {
         var builder = new DistantMeshBuilder(true);
         try {
             var shaper = Minecraft.getInstance().getModelManager().getBlockModelShaper();
@@ -854,19 +888,11 @@ public final class KineticSnapshots {
                     }
                 }
             }
-            bucket.mesh = builder.build();
+            return builder.capture();
         } catch (Throwable e) {
             builder.discard();
+            throw e;
         }
-        int count = 0;
-        for (Bucket b : SECTIONS.values()) {
-            for (Snap s2 : b.geoms.values()) {
-                if (!s2.hollow()) {
-                    count++;
-                }
-            }
-        }
-        snapshotCount = count;
     }
 
     private static long sectionKey(BlockPos pos) {

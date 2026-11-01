@@ -141,7 +141,7 @@ public final class DistantTrainRenderer implements LodPipelineHooks.Renderer {
                         continue;
                     }
                     var entry = DistantTrainManager.shape(track.shapeId);
-                    if (entry == null) {
+                    if (entry == null || !entry.bogeys().stream().allMatch(DistantBogeyMeshes::ready)) {
                         continue;
                     }
                     if (distSq < liveProbeSq
@@ -229,6 +229,7 @@ public final class DistantTrainRenderer implements LodPipelineHooks.Renderer {
     @SubscribeEvent
     public void onLogout(ClientPlayerNetworkEvent.LoggingOut event) {
         DistantTrainManager.clearAll();
+        DistantBogeyMeshes.clearAll();
         beginDepthFrame(null);
     }
 

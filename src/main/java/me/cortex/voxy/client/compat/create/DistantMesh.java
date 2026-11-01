@@ -62,6 +62,8 @@ public final class DistantMesh {
     private final int quadCount;
     private int lodBuffer;
     private int coarseVbo;
+    private int privateIndexBuffer;
+    private long privateIndexBytes;
     private boolean freed;
     private final float[] grids;
     private final int[] lodCounts;
@@ -85,20 +87,24 @@ public final class DistantMesh {
     //Vertex bytes held on the GPU. The shared index buffer is not counted - it is one allocation for
     //every mesh in the game, so charging it per mesh would say the wrong thing about what a mesh costs.
     public long gpuByteSize() {
-        return (long) this.quadCount * 4L * STRIDE + this.lodBytes;
+        return (long) this.quadCount * 4L * STRIDE + this.lodBytes + this.privateIndexBytes;
     }
 
     //Mesh-local extent, so a draw can frustum-test without the caller having to know what went in
     public float minX, minY, minZ, maxX, maxY, maxZ;
 
     DistantMesh(ByteBuffer vertexData, int quadCount, DistantMeshLod lod) {
+        this(vertexData, quadCount, lod, false);
+    }
+
+    private DistantMesh(ByteBuffer vertexData, int quadCount, DistantMeshLod lod, boolean staged) {
         this.quadCount = quadCount;
         this.grids = lod.grids;
         this.lodBytes = lod.byteSize();
         this.lodCounts = new int[lod.grids.length];
         this.lodOffsets = new long[lod.grids.length];
         try {
-            this.upload(vertexData, lod);
+            if (!staged) this.upload(vertexData, lod);
         } catch (RuntimeException | Error failure) {
             this.free();
             throw failure;
@@ -125,10 +131,14 @@ public final class DistantMesh {
         this.vbo = glCreateBuffers();
         glNamedBufferData(this.vbo, vertexData, GL_STATIC_DRAW);
 
+        this.setupVao();
+    }
+
+    private void setupVao() {
         this.vao = glCreateVertexArrays();
         glVertexArrayVertexBuffer(this.vao, 0, this.vbo, 0, STRIDE);
-        glVertexArrayElementBuffer(this.vao, sharedIndexBuffer);
-        this.boundElementBuffer = sharedIndexBuffer;
+        this.boundElementBuffer = this.privateIndexBuffer != 0 ? this.privateIndexBuffer : sharedIndexBuffer;
+        glVertexArrayElementBuffer(this.vao, this.boundElementBuffer);
 
         glEnableVertexArrayAttrib(this.vao, 0);
         glVertexArrayAttribFormat(this.vao, 0, 3, GL_FLOAT, false, 0);
@@ -271,7 +281,8 @@ public final class DistantMesh {
                     level == 0 ? 0 : this.lodOffsets[level - 1], STRIDE);
             this.boundLevel = level;
         }
-        int elementBuffer = level == 0 || this.coarseVbo != 0 ? sharedIndexBuffer : this.lodBuffer;
+        int elementBuffer = level == 0 || this.coarseVbo != 0
+                ? (this.privateIndexBuffer != 0 ? this.privateIndexBuffer : sharedIndexBuffer) : this.lodBuffer;
         if (this.boundElementBuffer != elementBuffer) {
             glVertexArrayElementBuffer(this.vao, elementBuffer);
             this.boundElementBuffer = elementBuffer;
@@ -292,6 +303,86 @@ public final class DistantMesh {
         glDeleteBuffers(this.vbo);
         if (this.lodBuffer != 0) glDeleteBuffers(this.lodBuffer);
         if (this.coarseVbo != 0) glDeleteBuffers(this.coarseVbo);
+        if (this.privateIndexBuffer != 0) glDeleteBuffers(this.privateIndexBuffer);
         this.cachedSelection = null;
+    }
+
+    /** Render-thread upload with unpublished buffers. Each step transfers at most 64 KiB. */
+    static final class Upload implements CreateMeshQueue.Upload {
+        private DistantMesh mesh;
+        private final ByteBuffer vertices;
+        private final DistantMeshLod lod;
+        private int vertexOffset, level, levelOffset, indexOffset;
+
+        Upload(ByteBuffer vertices, int quads, DistantMeshLod lod,
+               float minX, float minY, float minZ, float maxX, float maxY, float maxZ) {
+            this.vertices = vertices; this.lod = lod;
+            this.mesh = new DistantMesh(vertices, quads, lod, true);
+            try {
+                var mesh = this.mesh;
+                mesh.minX = minX; mesh.minY = minY; mesh.minZ = minZ;
+                mesh.maxX = maxX; mesh.maxY = maxY; mesh.maxZ = maxZ;
+                mesh.vbo = glCreateBuffers(); glNamedBufferData(mesh.vbo, vertices.limit(), GL_STATIC_DRAW);
+                if (lod.byteSize() != 0) {
+                    int buffer = glCreateBuffers();
+                    if (lod.vertices == null) mesh.lodBuffer = buffer; else mesh.coarseVbo = buffer;
+                    glNamedBufferData(buffer, lod.byteSize(), GL_STATIC_DRAW);
+                    long offset = 0;
+                    for (int i = 0; i < lod.grids.length; i++) {
+                        mesh.lodOffsets[i] = offset; mesh.lodCounts[i] = lod.indexCount(i);
+                        offset += (lod.vertices == null ? lod.indices[i] : lod.vertices[i]).length * 4L;
+                    }
+                }
+                // Reuse existing shared indices when possible. Growing the shared buffer in pieces
+                // would invalidate already-visible meshes, so larger staged uploads own their indices.
+                if (quads > sharedIndexQuadCapacity) {
+                    mesh.privateIndexBuffer = glCreateBuffers(); mesh.privateIndexBytes = quads * 24L;
+                    glNamedBufferData(mesh.privateIndexBuffer, mesh.privateIndexBytes, GL_STATIC_DRAW);
+                }
+            } catch (RuntimeException | Error failure) { this.close(); throw failure; }
+        }
+
+        @Override public long step(long budget) {
+            int count = (int) Math.min(64 * 1024, budget) & ~3;
+            if (count == 0 || this.done()) return 0;
+            if (this.vertexOffset < this.vertices.limit()) {
+                count = Math.min(count, this.vertices.limit() - this.vertexOffset);
+                var part = this.vertices.duplicate(); part.position(this.vertexOffset).limit(this.vertexOffset + count);
+                glNamedBufferSubData(this.mesh.vbo, this.vertexOffset, part);
+                this.vertexOffset += count;
+            } else if (this.level < this.lod.grids.length) {
+                int[] source = this.lod.vertices == null ? this.lod.indices[this.level] : this.lod.vertices[this.level];
+                count = Math.min(count, source.length * 4 - this.levelOffset);
+                int[] part = java.util.Arrays.copyOfRange(source, this.levelOffset / 4, (this.levelOffset + count) / 4);
+                glNamedBufferSubData(this.mesh.coarseVbo != 0 ? this.mesh.coarseVbo : this.mesh.lodBuffer,
+                        this.mesh.lodOffsets[this.level] + this.levelOffset, part);
+                this.levelOffset += count;
+                if (this.levelOffset == source.length * 4) { this.level++; this.levelOffset = 0; }
+            } else {
+                count = (int) Math.min(count, this.mesh.privateIndexBytes - this.indexOffset);
+                int[] part = new int[count / 4];
+                for (int i = 0; i < part.length; i++) {
+                    int index = this.indexOffset / 4 + i;
+                    part[i] = index / 6 * 4 + switch (index % 6) { case 0, 5 -> 0; case 1 -> 1; case 2, 3 -> 2; default -> 3; };
+                }
+                glNamedBufferSubData(this.mesh.privateIndexBuffer, this.indexOffset, part);
+                this.indexOffset += count;
+            }
+            return count;
+        }
+
+        @Override public boolean done() {
+            return this.vertexOffset == this.vertices.limit() && this.level == this.lod.grids.length
+                    && this.indexOffset == this.mesh.privateIndexBytes;
+        }
+
+        @Override public DistantMesh finish() {
+            if (!this.done()) throw new IllegalStateException("Upload is incomplete");
+            this.mesh.setupVao();
+            var result = this.mesh; this.mesh = null;
+            return result;
+        }
+
+        @Override public void close() { if (this.mesh != null) { this.mesh.free(); this.mesh = null; } }
     }
 }

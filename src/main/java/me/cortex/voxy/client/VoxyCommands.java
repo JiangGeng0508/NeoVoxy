@@ -400,7 +400,7 @@ public class VoxyCommands {
                 .append(" bogeyMeshes=").append(me.cortex.voxy.client.compat.create.DistantTrainRenderer.bogeyMeshProvider != null)
                 .append(" drawnLastFrame=").append(me.cortex.voxy.client.compat.create.DistantTrainRenderer.lastFrameCarriagesDrawn)
                 .append(" shapesReceived=").append(me.cortex.voxy.client.compat.create.DistantTrainManager.shapesReceived)
-                .append(" bakesFailed=").append(me.cortex.voxy.client.compat.create.DistantTrainManager.bakesFailed)
+                .append(' ').append(me.cortex.voxy.client.compat.create.CreateMeshService.debug())
                 .append(" meshCount=").append(me.cortex.voxy.client.compat.create.DistantTrainManager.meshCount());
         if (net.neoforged.fml.ModList.get().isLoaded("create")) {
             sb.append(" trackTiles=").append(me.cortex.voxy.client.compat.create.DistantTrackRenderer.tileCount)

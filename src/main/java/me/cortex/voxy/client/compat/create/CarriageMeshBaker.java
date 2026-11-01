@@ -92,6 +92,16 @@ public final class CarriageMeshBaker {
     @Nullable
     public static BakedCarriage bake(List<ShapeBlock> blocks,
                                      @Nullable Map<BlockPos, net.neoforged.neoforge.client.model.data.ModelData> blockEntityData) {
+        var captured = capture(blocks, blockEntityData);
+        if (captured == null) return null;
+        var mesh = DistantMeshBuilder.upload(captured.cpu());
+        return mesh == null ? null : new BakedCarriage(mesh, captured.bounds());
+    }
+
+    record Captured(DistantMeshBuilder.CpuMesh cpu, AABB bounds) {}
+
+    static Captured capture(List<ShapeBlock> blocks,
+                            @Nullable Map<BlockPos, net.neoforged.neoforge.client.model.data.ModelData> blockEntityData) {
         if (blocks.isEmpty()) {
             return null;
         }
@@ -158,23 +168,18 @@ public final class CarriageMeshBaker {
                         builder.transformedModel(model, kineticTransform, 15, 0);
                     }
                 }
+            } catch (CreateMeshQueue.Capacity capacity) {
+                builder.discard(); throw capacity;
             } catch (Throwable ignored) {
                 //A single broken third party model must not sink the whole carriage
             }
         }
 
-        DistantMesh mesh;
-        try {
-            mesh = builder.build();
-        } catch (Throwable t) {
-            builder.discard();
-            me.cortex.voxy.common.Logger.error("Distant carriage bake failed for " + blocks.size() + " blocks", t);
-            return null;
-        }
+        DistantMeshBuilder.CpuMesh mesh = builder.capture();
         if (mesh == null) {
             me.cortex.voxy.common.Logger.error("Distant carriage bake produced no geometry from " + blocks.size() + " blocks");
             return null;
         }
-        return new BakedCarriage(mesh, new AABB(minX, minY, minZ, maxX + 1, maxY + 1, maxZ + 1));
+        return new Captured(mesh, new AABB(minX, minY, minZ, maxX + 1, maxY + 1, maxZ + 1));
     }
 }

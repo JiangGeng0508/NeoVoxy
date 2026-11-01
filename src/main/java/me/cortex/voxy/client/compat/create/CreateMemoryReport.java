@@ -10,6 +10,7 @@ public final class CreateMemoryReport {
 
     public static String dump() {
         var sb = new StringBuilder("distant Create memory:").append('\n');
+        sb.append("  ").append(CreateMeshService.debug()).append('\n');
 
         long kineticGpu = 0, kineticSource = 0, kineticGeneric = 0;
         int buckets = 0, snaps = 0, withGeneric = 0, hollowSnaps = 0;

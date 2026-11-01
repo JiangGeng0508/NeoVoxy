@@ -61,7 +61,13 @@ public final class KineticCull {
             return false;
         }
         Vec3 cam = ctx.camera().getPosition();
-        return beyond(pos, cam.x, cam.y, cam.z);
+        return beyond(pos, cam.x, cam.y, cam.z) && readyForHandoff(pos);
+    }
+
+    private static boolean readyForHandoff(BlockPos pos) {
+        if (KineticSnapshots.drawsSnapAt(pos)) return true;
+        KineticSnapshots.queueCapture(pos);
+        return false;
     }
 
     //Vanilla-BER fallback path (Flywheel backend off): the camera comes from the game renderer.
@@ -80,7 +86,7 @@ public final class KineticCull {
         double dz = pos.getZ() + 0.5 - cam.z;
         double distSq = dx * dx + dy * dy + dz * dz;
         if (distSq > reachSq()) {
-            return true;
+            return readyForHandoff(pos);
         }
         double reach = Math.sqrt(reachSq());
         double inner = Math.max(0, reach - 16.0);

@@ -4,7 +4,6 @@ import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
 import com.simibubi.create.AllBogeyStyles;
 import com.simibubi.create.content.trains.bogey.BogeySizes;
-import me.cortex.voxy.common.Logger;
 import me.cortex.voxy.commonImpl.compat.create.DistantTrainProtocol.ShapeBogey;
 import net.minecraft.client.renderer.LightTexture;
 import net.minecraft.client.renderer.MultiBufferSource;
@@ -16,30 +15,29 @@ import java.util.Map;
 
 public final class DistantBogeyMeshes {
     private static final Map<String, DistantMesh> CACHE = new HashMap<>();
-    private static boolean errored;
+    private static final java.util.Set<String> PENDING = new java.util.HashSet<>();
+    private static final java.util.Set<String> READY = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private record Key(String style) {}
 
     private DistantBogeyMeshes() {}
 
-    //Null when the style is unknown client side or capture failed (cached either way)
+    static boolean ready(ShapeBogey info) {
+        return READY.contains(info.styleId() + "|" + info.sizeId());
+    }
+
+    //Null while pending, or when the style is unknown client side (cached as an empty result).
     public static DistantMesh getOrCapture(ShapeBogey info) {
         String key = info.styleId() + "|" + info.sizeId();
         if (CACHE.containsKey(key)) {
             return CACHE.get(key);
         }
-        DistantMesh mesh = null;
-        try {
-            mesh = capture(info);
-        } catch (Throwable e) {
-            if (!errored) {
-                errored = true;
-                Logger.error("Distant bogey capture failed for " + key + " (logged once)", e);
-            }
-        }
-        CACHE.put(key, mesh);
-        return mesh;
+        if (!PENDING.contains(key) && CreateMeshService.request(new Key(key), () -> capture(info),
+                mesh -> { PENDING.remove(key); CACHE.put(key, mesh); READY.add(key); },
+                () -> PENDING.remove(key))) PENDING.add(key);
+        return null;
     }
 
-    private static DistantMesh capture(ShapeBogey info) {
+    static DistantMeshBuilder.CpuMesh capture(ShapeBogey info) {
         var style = AllBogeyStyles.BOGEY_STYLES.get(info.styleId());
         if (style == null) {
             return null;
@@ -71,7 +69,15 @@ public final class DistantBogeyMeshes {
             builder.discard();
             throw e;
         }
-        return builder.build();
+        return builder.capture();
+    }
+
+    public static void clearAll() {
+        READY.clear();
+        for (String key : java.util.List.copyOf(PENDING)) CreateMeshService.cancel(new Key(key));
+        PENDING.clear();
+        for (var mesh : CACHE.values()) if (mesh != null) mesh.free();
+        CACHE.clear();
     }
 
     private static final class CaptureBufferSource implements MultiBufferSource, VertexConsumer {

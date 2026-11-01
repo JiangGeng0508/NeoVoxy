@@ -47,6 +47,10 @@ public final class ModelLodBenchmark {
     private static String pipelineName;
     private static Throwable failure;
     private static boolean shaderVerified;
+    private static boolean capturing;
+    private static CreateMeshQueue.Stats asyncPipeline;
+    private record CapturedSource(String name, DistantMesh mesh, long captureNanos) {}
+    private static final List<CapturedSource> capturedSources = new ArrayList<>();
 
     private record Fixture(String name, DistantMesh full, DistantMesh lod) {}
     private record Pending(int query, Sample sample) {}
@@ -61,7 +65,16 @@ public final class ModelLodBenchmark {
         var mc = Minecraft.getInstance();
         if (++ticks > 12000 && !finished) throw new AssertionError("Model LOD benchmark timeout");
         if (mc.level == null || mc.player == null || ready || finished) return;
-        if (++worldTicks != 100) return;
+        if (++worldTicks < 100) return;
+        if (!capturing) { capturing = true; captureFixtures(); return; }
+        if (capturedSources.size() != 4) return;
+        var queue = CreateMeshService.stats();
+        check(queue != null && queue.prepared() >= 4 && queue.published() >= 4 && queue.failed() == 0,
+                "Create background pipeline was not exercised");
+        check(queue.peakReserved() <= CreateMeshQueue.MAX_BYTES && queue.peakFrameBytes() <= CreateMeshQueue.FRAME_BYTES,
+                "Create preparation/upload budget");
+        asyncPipeline = queue;
+        System.out.println("MODEL_LOD_BENCH ASYNC_PASS " + queue);
         var system = ((IGetVoxyRenderSystem)mc.levelRenderer).voxy$getRenderSystem();
         check(system != null && system.isIrisPipeline() == Boolean.getBoolean("voxy.benchmarkShaders"), "pipeline");
         // Freeze time/weather in the disposable copy; no source world is modified.
@@ -72,7 +85,11 @@ public final class ModelLodBenchmark {
             level.getGameRules().getRule(net.minecraft.world.level.GameRules.RULE_DAYLIGHT).set(false, level.getServer());
         });
         VoxyConfig.CONFIG.subDivisionSize = 256;
-        captureFixtures();
+        for (var source : capturedSources) {
+            try { capture(source.name(), source.mesh(), source.captureNanos()); }
+            finally { source.mesh().free(); }
+        }
+        capturedSources.clear();
         makeFramebuffer();
         for (int i = 0; i < 32; i++) queries.add(glGenQueries());
         LodPipelineHooks.register(ModelLodBenchmark::render);
@@ -200,23 +217,32 @@ public final class ModelLodBenchmark {
         for (int z = 0; z < 16; z++) for (int x = 0; x < 4; x++) for (int y = 0; y < 4; y++) {
             if (y == 0 || y == 3 || x == 0 || x == 3) blocks.add(new ShapeBlock((byte)x, (byte)y, (byte)z, casing));
         }
-        long start = System.nanoTime();
-        var carriage = CarriageMeshBaker.bake(blocks);
-        check(carriage != null, "carriage bake"); capture("carriage", carriage.mesh, System.nanoTime() - start);
-        carriage.mesh.free();
+        requestFixture("carriage", () -> {
+            var captured = CarriageMeshBaker.capture(blocks, null);
+            return captured == null ? null : captured.cpu();
+        });
         for (var size : List.of(BogeySizes.SMALL, BogeySizes.LARGE)) {
-            start = System.nanoTime();
-            var mesh = DistantBogeyMeshes.getOrCapture(new ShapeBogey(ResourceLocation.parse("create:standard"), size.id(), .5f, new CompoundTag()));
-            check(mesh != null, "bogey bake"); capture("bogey-" + size.id(), mesh, System.nanoTime() - start);
+            requestFixture("bogey-" + size.id(), () -> DistantBogeyMeshes.capture(
+                    new ShapeBogey(ResourceLocation.parse("create:standard"), size.id(), .5f, new CompoundTag())));
         }
         var bucket = new KineticSnapshots.Bucket();
         var shaft = BuiltInRegistries.BLOCK.get(ResourceLocation.parse("create:shaft")).defaultBlockState();
         var cog = BuiltInRegistries.BLOCK.get(ResourceLocation.parse("create:large_cogwheel")).defaultBlockState();
         for (int z = 0; z < 12; z++) bucket.geoms.put(new BlockPos(0, 64, 0).offset(0, 0, z), new KineticSnapshots.Snap(z % 2 == 0 ? shaft : cog,
                 Direction.Axis.Y, z * .13f, 15, 3, true, null, null, 0, false, null, null, null, false));
-        var rebake = KineticSnapshots.class.getDeclaredMethod("rebake", KineticSnapshots.Bucket.class); rebake.setAccessible(true);
-        start = System.nanoTime(); rebake.invoke(null, bucket);
-        check(bucket.mesh != null, "kinetic bake"); capture("kinetic-section", bucket.mesh, System.nanoTime() - start); bucket.mesh.free();
+        requestFixture("kinetic-section", () -> KineticSnapshots.captureMesh(bucket));
+    }
+
+    private static void requestFixture(String name, java.util.function.Supplier<DistantMeshBuilder.CpuMesh> capture) {
+        long[] nanos = new long[1];
+        check(CreateMeshService.request("benchmark:" + name, () -> {
+            long start = System.nanoTime();
+            var mesh = capture.get(); nanos[0] = System.nanoTime() - start;
+            return mesh;
+        }, mesh -> {
+            check(mesh != null, "empty source " + name);
+            capturedSources.add(new CapturedSource(name, mesh, nanos[0]));
+        }, () -> failure = new AssertionError("source cancelled: " + name)), "source admission " + name);
     }
 
     private static void capture(String name, DistantMesh sourceMesh, long sourceCaptureNs) throws Exception {
@@ -312,6 +338,7 @@ public final class ModelLodBenchmark {
         report.put("javaVersion", System.getProperty("java.version"));
         report.put("blockOrder", List.of("full", "lod", "lod", "full"));
         report.put("bakes", bakeRows); report.put("frames", samples);
+        report.put("asyncPipeline", asyncPipeline);
         report.put("scope", "Same captured Create geometry, full vs adaptive mesh policy in one binary; actual shader pipeline renders an offscreen scene during normal Minecraft frames. GPU timers cover scene draws. frameNs is RenderFrameEvent Pre/Post wall time including the scene and normal game rendering, excluding presentation/vsync. CPU payload excludes Java object overhead and is freed after upload; shared index/FBO/texture memory is common to both modes.");
         Files.writeString(Path.of("results.json"), new GsonBuilder().setPrettyPrinting().create().toJson(report));
         for (var fixture : fixtures) { fixture.full.free(); fixture.lod.free(); }

@@ -16,6 +16,12 @@ import java.util.function.Predicate;
 
 /** 在 CPU 端收集兼容模组网格，并按固定顶点步长上传到 GPU。 */
 public final class DistantMeshBuilder {
+    interface Allocation {
+        void resize(int previous, int next);
+        void release(int capacity);
+    }
+    static final ThreadLocal<Allocation> ALLOCATION = new ThreadLocal<>();
+    private final Allocation allocation;
     private ByteBuffer buffer;
     private int vertexCount;
     private boolean allowLod;
@@ -33,7 +39,13 @@ public final class DistantMeshBuilder {
     /** Enable only for opaque geometry suitable for planar collapse or a voxel shell. */
     public DistantMeshBuilder(boolean allowLod) {
         this.allowLod = allowLod;
-        this.buffer = MemoryUtil.memAlloc(64 * 1024);
+        this.allocation = ALLOCATION.get();
+        if (this.allocation != null) this.allocation.resize(0, 64 * 1024);
+        try { this.buffer = MemoryUtil.memAlloc(64 * 1024); }
+        catch (RuntimeException | Error failure) {
+            if (this.allocation != null) this.allocation.release(64 * 1024);
+            throw failure;
+        }
     }
 
     /** Keep layer order and attributes, allowing only adjacent coplanar affine merges. */
@@ -246,7 +258,14 @@ public final class DistantMeshBuilder {
 
     private void ensure(int bytes) {
         if (this.buffer.remaining() < bytes) {
-            this.buffer = MemoryUtil.memRealloc(this.buffer, Math.max(this.buffer.capacity() * 2, this.buffer.capacity() + bytes));
+            int previous = this.buffer.capacity();
+            int next = Math.max(previous * 2, previous + bytes);
+            if (this.allocation != null) this.allocation.resize(previous, next);
+            try { this.buffer = MemoryUtil.memRealloc(this.buffer, next); }
+            catch (RuntimeException | Error failure) {
+                if (this.allocation != null) this.allocation.resize(next, previous);
+                throw failure;
+            }
         }
     }
 
@@ -267,13 +286,40 @@ public final class DistantMeshBuilder {
 
     public static final class CpuMesh {
         private ByteBuffer buffer;
-        public final int quadCount;
-        private DistantMeshLod lod;
+        public int quadCount;
+        private DistantMeshLod lod = DistantMeshLod.EMPTY;
+        private final Allocation allocation;
+        private final boolean allowLod, mergeTranslucent;
+        private boolean prepared;
         public float minX, minY, minZ, maxX, maxY, maxZ;
 
-        private CpuMesh(ByteBuffer buffer, int quadCount) {
+        private CpuMesh(ByteBuffer buffer, int quadCount, Allocation allocation, boolean allowLod, boolean mergeTranslucent) {
             this.buffer = buffer;
             this.quadCount = quadCount;
+            this.allocation = allocation;
+            this.allowLod = allowLod;
+            this.mergeTranslucent = mergeTranslucent;
+        }
+
+        /** Exclusive owner only. No Minecraft callbacks or GL; safe on a worker. */
+        public void prepare() {
+            if (this.buffer == null) throw new IllegalStateException("CPU mesh has already been consumed");
+            if (this.prepared) return;
+            if (this.mergeTranslucent) {
+                this.quadCount = DistantQuadMerger.compact(this.buffer, this.quadCount);
+                this.buffer.limit(this.quadCount * 4 * DistantMesh.STRIDE);
+            }
+            this.lod = this.allowLod ? DistantMeshLod.build(this.buffer, this.quadCount) : DistantMeshLod.EMPTY;
+            this.prepared = true;
+        }
+
+        public long nativeBytes() { return this.buffer == null ? 0 : this.buffer.capacity(); }
+        public long heapBytes() { return this.lod == null ? 0 : this.lod.byteSize(); }
+
+        DistantMesh.Upload beginUpload() {
+            if (!this.prepared || this.buffer == null) throw new IllegalStateException("CPU mesh is not prepared");
+            return new DistantMesh.Upload(this.buffer, this.quadCount, this.lod,
+                    this.minX, this.minY, this.minZ, this.maxX, this.maxY, this.maxZ);
         }
 
         public int byteSize() {
@@ -282,42 +328,44 @@ public final class DistantMeshBuilder {
 
         public void free() {
             if (this.buffer != null) {
+                int capacity = this.buffer.capacity();
                 MemoryUtil.memFree(this.buffer);
                 this.buffer = null;
                 this.lod = null;
+                if (this.allocation != null) this.allocation.release(capacity);
             }
         }
     }
 
     //Hands the assembled buffer over; returns null for empty meshes. No GL, safe off the render thread.
     public CpuMesh assemble() {
+        var cpu = this.capture();
+        if (cpu == null) return null;
+        try { cpu.prepare(); return cpu; }
+        catch (RuntimeException | Error failure) { cpu.free(); throw failure; }
+    }
+
+    /** Transfers an exclusive raw snapshot without merging or simplification. */
+    public CpuMesh capture() {
         try {
-            return this.assemble0();
+            return this.capture0();
         } catch (RuntimeException | Error failure) {
             this.discard();
             throw failure;
         }
     }
 
-    private CpuMesh assemble0() {
+    private CpuMesh capture0() {
         if (this.buffer == null) return null;
         int quadCount = this.vertexCount / 4;
         if (quadCount == 0) {
-            MemoryUtil.memFree(this.buffer);
-            this.buffer = null;
+            this.discard();
             return null;
         }
         //Truncate any trailing partial quad from a capture stream
         this.buffer.flip();
         this.buffer.limit(quadCount * 4 * DistantMesh.STRIDE);
-        if (this.mergeTranslucent) {
-            quadCount = DistantQuadMerger.compact(this.buffer, quadCount);
-            this.buffer.limit(quadCount * 4 * DistantMesh.STRIDE);
-        }
-        // Compute before transferring ownership: discard() can still free a failed bake.
-        var lod = this.allowLod ? DistantMeshLod.build(this.buffer, quadCount) : DistantMeshLod.EMPTY;
-        var cpu = new CpuMesh(this.buffer, quadCount);
-        cpu.lod = lod;
+        var cpu = new CpuMesh(this.buffer, quadCount, this.allocation, this.allowLod, this.mergeTranslucent);
         cpu.minX = this.minX; cpu.minY = this.minY; cpu.minZ = this.minZ;
         cpu.maxX = this.maxX; cpu.maxY = this.maxY; cpu.maxZ = this.maxZ;
         //Ownership moves to the CpuMesh - discard() must not free it from under the new owner
@@ -332,6 +380,7 @@ public final class DistantMeshBuilder {
         }
         try {
             if (cpu.buffer == null) throw new IllegalStateException("CPU mesh has already been consumed");
+            cpu.prepare();
             var mesh = new DistantMesh(cpu.buffer, cpu.quadCount, cpu.lod);
             mesh.minX = cpu.minX; mesh.minY = cpu.minY; mesh.minZ = cpu.minZ;
             mesh.maxX = cpu.maxX; mesh.maxY = cpu.maxY; mesh.maxZ = cpu.maxZ;
@@ -368,8 +417,10 @@ public final class DistantMeshBuilder {
     //the memAlloc'd buffer (which only build() frees) does not leak on every failed rebake.
     public void discard() {
         if (this.buffer != null) {
+            int capacity = this.buffer.capacity();
             MemoryUtil.memFree(this.buffer);
             this.buffer = null;
+            if (this.allocation != null) this.allocation.release(capacity);
         }
     }
 }

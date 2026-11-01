@@ -93,6 +93,7 @@ public class VoxyClient {
     @SubscribeEvent
     public static void onRenderFramePre(RenderFrameEvent.Pre event) {
         FrameProfiler.onFrameStart();
+        me.cortex.voxy.client.compat.create.CreateMeshService.frame();
     }
 
     @SubscribeEvent
