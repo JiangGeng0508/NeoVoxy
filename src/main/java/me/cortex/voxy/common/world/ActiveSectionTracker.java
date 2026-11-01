@@ -1,6 +1,5 @@
 package me.cortex.voxy.common.world;
 
-import it.unimi.dsi.fastutil.longs.Long2ObjectLinkedOpenHashMap;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import me.cortex.voxy.common.Logger;
 import me.cortex.voxy.common.world.other.Mapper;
@@ -38,9 +37,7 @@ public class ActiveSectionTracker {
     private final StampedLock[] locks;
     private final SectionLoader loader;
 
-    private final int lruSize;
-    private final StampedLock lruLock = new StampedLock();
-    private final Long2ObjectLinkedOpenHashMap<WorldSection> lruSecondaryCache;
+    private final SecondarySectionCache secondaryCache;
 
     @Nullable
     public final WorldEngine engine;
@@ -49,15 +46,19 @@ public class ActiveSectionTracker {
         this(numSlicesBits, loader, cacheSize, null);
     }
 
-    @SuppressWarnings("unchecked")
     public ActiveSectionTracker(int numSlicesBits, SectionLoader loader, int cacheSize, WorldEngine engine) {
+        this(numSlicesBits, loader, new SecondarySectionCache(cacheSize,
+                SecondarySectionCache.defaultByteLimit(Runtime.getRuntime().maxMemory())), engine);
+    }
+
+    @SuppressWarnings("unchecked")
+    public ActiveSectionTracker(int numSlicesBits, SectionLoader loader, SecondarySectionCache secondaryCache, WorldEngine engine) {
         this.engine = engine;
 
         this.loader = loader;
         this.loadedSectionCache = new Long2ObjectOpenHashMap[1<<numSlicesBits];
-        this.lruSecondaryCache = new Long2ObjectLinkedOpenHashMap<>(cacheSize);
+        this.secondaryCache = secondaryCache;
         this.locks = new StampedLock[1<<numSlicesBits];
-        this.lruSize = cacheSize;
         for (int i = 0; i < this.loadedSectionCache.length; i++) {
             this.loadedSectionCache[i] = new Long2ObjectOpenHashMap<>(1024);
             this.locks[i] = new StampedLock();
@@ -92,13 +93,7 @@ public class ActiveSectionTracker {
         } finally {
             lock.unlockRead(stamp);
         }
-        boolean inLru;
-        long lruStamp = this.lruLock.readLock();
-        try {
-            inLru = this.lruSecondaryCache.containsKey(key);
-        } finally {
-            this.lruLock.unlockRead(lruStamp);
-        }
+        boolean inLru = this.secondaryCache.contains(this, key);
         return inLru ? this.acquire(key, true, missLoader) : null;
     }
 
@@ -156,19 +151,9 @@ public class ActiveSectionTracker {
 
         if (isLoader) {
             this.loadedSections.incrementAndGet();
-            WorldSection removal = null;
             long stamp2 = lock.readLock();
             try {
-                long stamp = this.lruLock.writeLock();
-                try {
-                    section = this.lruSecondaryCache.remove(key);
-
-                    if (section == null && (!this.lruSecondaryCache.isEmpty()) && this.lruSize+100<this.lruSecondaryCache.size()+this.getLoadedCacheCount()) {//Add a self clamping lru case for when there are alot of loaded sections
-                        removal = this.lruSecondaryCache.removeFirst();
-                    }
-                } finally {
-                    this.lruLock.unlockWrite(stamp);
-                }
+                section = this.secondaryCache.take(this, key);
                 if (section != null) {
                     section.primeForReuse();
                     section.acquire(1);
@@ -178,9 +163,6 @@ public class ActiveSectionTracker {
                 lock.unlockRead(stamp2);
             }
 
-            if (removal != null) {
-                removal._releaseArray();
-            }
         } else {
             VolatileHolder.PRE_ACQUIRE_COUNT.getAndAdd(holder, 1);
         }
@@ -341,37 +323,13 @@ public class ActiveSectionTracker {
                 sec = section;
             }
 
-            WorldSection aa = null;
             if (sec != null) {
                 if ((hints & WorldSection.RELEASE_HINT_DONT_CACHE) != 0) {
-                    lock.unlockWrite(stamp);
-                    stamp = 0;
-                    aa = sec;
+                    sec._releaseArray();
                 } else {
-                    long stamp2 = this.lruLock.writeLock();
-                    try {
-                        lock.unlockWrite(stamp);
-                        stamp = 0;
-                        WorldSection a = this.lruSecondaryCache.put(section.key, section);
-                        if (a != null) {
-                            throw new IllegalStateException("duplicate sections in cache is impossible");
-                        }
-                        //If cache is bigger than its ment to be, remove the least recently used and free it
-                        if (this.lruSize < this.lruSecondaryCache.size()) {
-                            aa = this.lruSecondaryCache.removeFirst();
-                        }
-                    } finally {
-                        this.lruLock.unlockWrite(stamp2);
-                    }
+                    // Publish to the shared LRU before another acquire can observe the shard miss.
+                    this.secondaryCache.put(sec);
                 }
-            } else {
-                lock.unlockWrite(stamp);
-                stamp = 0;
-            }
-
-
-            if (aa != null) {
-                aa._releaseArray();
             }
 
             if (sec != null) {
@@ -413,14 +371,14 @@ public class ActiveSectionTracker {
     }
 
     public int getSecondaryCacheSize() {
-        return this.lruSecondaryCache.size();
+        return this.secondaryCache.size(this);
     }
 
+    public SecondarySectionCache.Stats getSecondaryCacheStats() { return this.secondaryCache.stats(); }
+    public void clearSecondaryCache() { this.secondaryCache.clear(this); }
+
     public void iterateSecondaryPositions(java.util.function.LongConsumer consumer) {
-        long[] keys;
-        long stamp = this.lruLock.readLock();
-        try { keys = this.lruSecondaryCache.keySet().toLongArray(); }
-        finally { this.lruLock.unlockRead(stamp); }
+        long[] keys = this.secondaryCache.keys(this);
         for (long key : keys) consumer.accept(key);
     }
 

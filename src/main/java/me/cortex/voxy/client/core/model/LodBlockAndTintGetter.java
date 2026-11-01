@@ -2,6 +2,7 @@ package me.cortex.voxy.client.core.model;
 
 import me.cortex.voxy.common.world.WorldEngine;
 import me.cortex.voxy.common.world.WorldSection;
+import me.cortex.voxy.common.world.SectionSnapshot;
 import me.cortex.voxy.common.world.other.Mapper;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -19,13 +20,21 @@ public final class LodBlockAndTintGetter implements BlockAndTintGetter, AutoClos
     private final WorldEngine world;
     private final WorldSection center;
     private final long[] data;
-    private final WorldSection[] neighbors = new WorldSection[27];
+    private final SectionSnapshot[] neighbors;
     private final boolean[] queried = new boolean[27];
+    private final boolean[] present = new boolean[27];
 
     public LodBlockAndTintGetter(WorldEngine world, WorldSection center, long[] data) {
+        this(world, center, data, new SectionSnapshot[27]);
+    }
+
+    /** Reusable scratch belongs to this worker and must not be shared by concurrent views. */
+    public LodBlockAndTintGetter(WorldEngine world, WorldSection center, long[] data, SectionSnapshot[] neighbors) {
+        if (neighbors.length != 27) throw new IllegalArgumentException("Expected 27 snapshot slots");
         this.world = world;
         this.center = center;
         this.data = data;
+        this.neighbors = neighbors;
     }
 
     @Override
@@ -42,13 +51,19 @@ public final class LodBlockAndTintGetter implements BlockAndTintGetter, AutoClos
             }
             int slot = (sx + 1) + (sz + 1) * 3 + (sy + 1) * 9;
             if (!this.queried[slot]) {
-                this.neighbors[slot] = this.world.acquireIfExists(this.center.lvl,
+                var neighbor = this.world.acquireIfExists(this.center.lvl,
                         this.center.x + sx, this.center.y + sy, this.center.z + sz);
+                if (neighbor != null) {
+                    try {
+                        if (this.neighbors[slot] == null) this.neighbors[slot] = new SectionSnapshot();
+                        this.neighbors[slot].capture(neighbor);
+                        this.present[slot] = true;
+                    } finally { neighbor.release(); }
+                }
                 this.queried[slot] = true;
             }
-            WorldSection neighbor = this.neighbors[slot];
-            if (neighbor == null) return Blocks.AIR.defaultBlockState();
-            voxel = neighbor.get(index);
+            if (!this.present[slot]) return Blocks.AIR.defaultBlockState();
+            voxel = this.neighbors[slot].get(index);
         }
         return this.world.getMapper().getBlockStateFromBlockId(Mapper.getBlockId(voxel));
     }
@@ -64,11 +79,6 @@ public final class LodBlockAndTintGetter implements BlockAndTintGetter, AutoClos
 
     @Override
     public void close() {
-        for (int i = 0; i < this.neighbors.length; i++) {
-            if (this.neighbors[i] != null) {
-                this.neighbors[i].release();
-                this.neighbors[i] = null;
-            }
-        }
+        // Section references are released immediately after their private snapshot is captured.
     }
 }

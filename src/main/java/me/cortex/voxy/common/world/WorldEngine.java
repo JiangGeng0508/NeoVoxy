@@ -91,16 +91,12 @@ public class WorldEngine {
     public WorldEngine(SectionStorage storage, @Nullable VoxyInstance instance) {
         this.instanceIn = instance;
 
-        int cacheSize = 1024;
-        if (Runtime.getRuntime().maxMemory() >= (1L << 32) - (200L << 20)) {
-            cacheSize = 2048;
-        }
-
         this.storage = storage;
         this.mapper = new Mapper(this.storage);
         this.beaconIndex = new BeaconIndex(this.storage);
         // 6 位分片索引使活动区块缓存拥有 64 个独立映射，减少并发访问冲突。
-        this.sectionTracker = new ActiveSectionTracker(6, storage::loadSection, cacheSize, this);
+        this.sectionTracker = new ActiveSectionTracker(6, storage::loadSection,
+                instance == null ? new SecondarySectionCache() : instance.getSecondarySectionCache(), this);
     }
 
     public WorldSection acquireIfCached(int lvl, int x, int y, int z) {
@@ -227,7 +223,10 @@ public class WorldEngine {
     public void addDebugData(List<String> debug) {
         debug.add("ACC/SCC: " + this.sectionTracker.getLoadedCacheCount()
                 + "/" + this.sectionTracker.getSecondaryCacheSize());
+        debug.add("SCC instance: " + this.sectionTracker.getSecondaryCacheStats());
     }
+
+    public SecondarySectionCache.Stats getSecondaryCacheStats() { return this.sectionTracker.getSecondaryCacheStats(); }
 
     public int getActiveSectionCount() {
         return this.sectionTracker.getLoadedCacheCount();
@@ -243,6 +242,8 @@ public class WorldEngine {
         if (this.sectionTracker.getLoadedCacheCount() != 0) {
             throw new IllegalStateException();
         }
+
+        this.sectionTracker.clearSecondaryCache();
 
         this.thisTracker.free();
         try {

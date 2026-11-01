@@ -182,7 +182,7 @@ public final class SeasonalSnowRefresher {
                         flipped += changed;
                         rewritten++;
                         engine.markDirty(section, WorldEngine.UPDATE_TYPE_BLOCK_BIT, 0);
-                        remipIntoParents(engine, mapper, section, section._rawOrNull());
+                        remipIntoParents(engine, mapper, section, SNAPSHOT.get().capture(section).data());
                     }
                 } finally {
                     section.release(WorldSection.RELEASE_HINT_DONT_CACHE);
@@ -225,17 +225,22 @@ public final class SeasonalSnowRefresher {
         }
     }
 
+    private static final ThreadLocal<me.cortex.voxy.common.world.SectionSnapshot> SNAPSHOT =
+            ThreadLocal.withInitial(me.cortex.voxy.common.world.SectionSnapshot::new);
+    private static final ThreadLocal<long[]> ABOVE_FACE = ThreadLocal.withInitial(() -> new long[1024]);
+
     /** @return how many voxels changed */
     private static int refreshSection(WorldEngine engine, Level level, Mapper mapper, BiomeCache biomes,
                                       WorldSection section,
                                       boolean glowBlocksSnow, int glowLevel, boolean snowyTree) {
-        long[] data = section._rawOrNull();
-        if (data == null) {
+        var snapshot = SNAPSHOT.get().capture(section);
+        if (snapshot.isUniform()) {
             //Uniform: every voxel's own copy sits directly above it. Nothing solid is sky-exposed under
             //itself, and uniform air has no block to cover, so there is nothing here to decide.
             return 0;
         }
 
+        long[] data = snapshot.data();
         int chunkX = section.x << 1;
         int chunkZ = section.z << 1;
         boolean[] quadrantLoaded = {
@@ -286,12 +291,13 @@ public final class SeasonalSnowRefresher {
                             if (!aboveResolved) {
                                 aboveResolved = true;
                                 above = engine.acquireIfExists(section.lvl, section.x, section.y + 1, section.z);
+                                if (above != null) above.copyFaceInto(2, ABOVE_FACE.get(), 0);
                             }
                             if (above == null) {
                                 //No evidence about what is over this voxel, so do not guess
                                 continue;
                             }
-                            aboveVoxel = above.get(WorldSection.getIndex(x, 0, z));
+                            aboveVoxel = ABOVE_FACE.get()[WorldSection.getIndex(x, 0, z)];
                         }
 
                         int verdict = shouldBeSnowy(level, mapper, biomes, section, x, y, z,
@@ -308,13 +314,13 @@ public final class SeasonalSnowRefresher {
                         //Deciding took long enough for ingest to have replaced this voxel. Writing a
                         //value derived from the stale read would roll its work back, and it will have
                         //used the current season anyway - so re-read and only write if nothing moved.
-                        long current = data[idx];
-                        if (Mapper.getBlockId(current) != storedId) {
-                            continue;
+                        synchronized (section) {
+                            long current = section.get(idx);
+                            if (Mapper.getBlockId(current) != storedId) continue;
+                            int newId = wantSnowy ? MAX_BLOCK_ID - baseId : baseId;
+                            section.materialize()[idx] = (current & ~BLOCK_ID_MASK) | (Integer.toUnsignedLong(newId) << BLOCK_ID_SHIFT);
+                            changed++;
                         }
-                        int newId = wantSnowy ? MAX_BLOCK_ID - baseId : baseId;
-                        data[idx] = (current & ~BLOCK_ID_MASK) | (Integer.toUnsignedLong(newId) << BLOCK_ID_SHIFT);
-                        changed++;
                     }
                 }
             }
@@ -377,41 +383,43 @@ public final class SeasonalSnowRefresher {
             return;
         }
         try {
-            long[] pdata = parent._rawOrNull();
-            if (pdata == null) {
-                //Uniform parent: one value over the whole thing, so there is no per-voxel snow state to
-                //correct. Materialising it here would cost 256KiB to write nothing.
-                return;
-            }
-            //Where this section lands inside the parent: its 32 blocks are 32>>lvl of the parent's voxels
-            int ox = (section.x << (5 - lvl)) & 31;
-            int oy = (section.y << (5 - lvl)) & 31;
-            int oz = (section.z << (5 - lvl)) & 31;
-
             boolean touched = false;
-            for (int y = 0; y < side; y++) {
-                for (int z = 0; z < side; z++) {
-                    for (int x = 0; x < side; x++) {
-                        long want = computed[cubeIndex(x, y, z, side)];
-                        int pidx = WorldSection.getIndex(ox + x, oy + y, oz + z);
-                        long have = pdata[pidx];
-                        if (want == have) {
-                            continue;
+            synchronized (parent) {
+                long[] pdata = parent._rawOrNull();
+                if (pdata == null) {
+                    //Uniform parent: one value over the whole thing, so there is no per-voxel snow state to
+                    //correct. Materialising it here would cost 256KiB to write nothing.
+                    return;
+                }
+                //Where this section lands inside the parent: its 32 blocks are 32>>lvl of the parent's voxels
+                int ox = (section.x << (5 - lvl)) & 31;
+                int oy = (section.y << (5 - lvl)) & 31;
+                int oz = (section.z << (5 - lvl)) & 31;
+
+                for (int y = 0; y < side; y++) {
+                    for (int z = 0; z < side; z++) {
+                        for (int x = 0; x < side; x++) {
+                            long want = computed[cubeIndex(x, y, z, side)];
+                            int pidx = WorldSection.getIndex(ox + x, oy + y, oz + z);
+                            long have = pdata[pidx];
+                            if (want == have) {
+                                continue;
+                            }
+                            int wantId = Mapper.getBlockId(want);
+                            int haveId = Mapper.getBlockId(have);
+                            boolean wantSnowy = wantId >= stateCount;
+                            boolean haveSnowy = haveId >= stateCount;
+                            int wantBase = wantSnowy ? MAX_BLOCK_ID - wantId : wantId;
+                            int haveBase = haveSnowy ? MAX_BLOCK_ID - haveId : haveId;
+                            //Disagreeing about which block this is means the mip picked differently than
+                            //ingest did - not something a season change should be rewriting
+                            if (wantBase != haveBase || wantSnowy == haveSnowy) {
+                                continue;
+                            }
+                            int newId = wantSnowy ? MAX_BLOCK_ID - haveBase : haveBase;
+                            pdata[pidx] = (have & ~BLOCK_ID_MASK) | (Integer.toUnsignedLong(newId) << BLOCK_ID_SHIFT);
+                            touched = true;
                         }
-                        int wantId = Mapper.getBlockId(want);
-                        int haveId = Mapper.getBlockId(have);
-                        boolean wantSnowy = wantId >= stateCount;
-                        boolean haveSnowy = haveId >= stateCount;
-                        int wantBase = wantSnowy ? MAX_BLOCK_ID - wantId : wantId;
-                        int haveBase = haveSnowy ? MAX_BLOCK_ID - haveId : haveId;
-                        //Disagreeing about which block this is means the mip picked differently than
-                        //ingest did - not something a season change should be rewriting
-                        if (wantBase != haveBase || wantSnowy == haveSnowy) {
-                            continue;
-                        }
-                        int newId = wantSnowy ? MAX_BLOCK_ID - haveBase : haveBase;
-                        pdata[pidx] = (have & ~BLOCK_ID_MASK) | (Integer.toUnsignedLong(newId) << BLOCK_ID_SHIFT);
-                        touched = true;
                     }
                 }
             }

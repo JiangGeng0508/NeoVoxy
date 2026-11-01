@@ -31,6 +31,8 @@ public final class CreateConnectedTextures {
     // One instance per mesh worker; neither live chunks nor model data survive a renderer reload.
     private final Int2ByteOpenHashMap candidates = new Int2ByteOpenHashMap();
     private final Map<TextureKey, Integer> variants = new HashMap<>();
+    private final me.cortex.voxy.common.world.SectionSnapshot[] neighbors = new me.cortex.voxy.common.world.SectionSnapshot[27];
+    private long[] substituted;
 
     private record TextureKey(BlockState state, String indices) { }
 
@@ -40,7 +42,7 @@ public final class CreateConnectedTextures {
         if (!enabled()) return raw;
         Mapper mapper = world.getMapper();
         long[] result = raw;
-        try (var view = new LodBlockAndTintGetter(world, section, raw)) {
+        try (var view = new LodBlockAndTintGetter(world, section, raw, this.neighbors)) {
             var pos = new BlockPos.MutableBlockPos();
             for (int i = 0; i < raw.length; i++) {
                 int blockId = Mapper.getBlockId(raw[i]);
@@ -65,7 +67,11 @@ public final class CreateConnectedTextures {
                     descriptor.putIntArray("indices", indices);
                     return mapper.getIdForBlockStateVariant(state, VARIANT_TYPE, key, descriptor);
                 });
-                if (result == raw) result = raw.clone();
+                if (result == raw) {
+                    if (this.substituted == null) this.substituted = new long[raw.length];
+                    System.arraycopy(raw, 0, this.substituted, 0, raw.length);
+                    result = this.substituted;
+                }
                 result[i] = Mapper.withBlockBiome(raw[i], variant, Mapper.getBiomeId(raw[i]));
             }
         } catch (ReflectiveOperationException | LinkageError | RuntimeException e) {

@@ -222,6 +222,30 @@ public final class WorldSection {
         return this.data;
     }
 
+    /** Caller holds a reference. Face order: -X,+X,-Y,+Y,-Z,+Z; never expands shared data. */
+    public synchronized boolean copyFaceInto(int face, long[] target, int offset) {
+        if (face < 0 || face >= 6 || offset < 0 || offset > target.length - 1024) {
+            throw new IllegalArgumentException("Invalid section face destination");
+        }
+        long[] source = this.data;
+        if (source == null) {
+            Arrays.fill(target, offset, offset + 1024, this.uniformValue);
+            return true;
+        }
+        for (int i = 0; i < 1024; i++) {
+            int index = switch (face) {
+                case 0 -> i << 5;
+                case 1 -> (i << 5) | 31;
+                case 2 -> i;
+                case 3 -> i | (31 << 10);
+                case 4 -> Integer.expand(i, 0b11111_00000_11111);
+                default -> Integer.expand(i, 0b11111_00000_11111) | (31 << 5);
+            };
+            target[offset + i] = source[index];
+        }
+        return false;
+    }
+
     public long[] materialize() {
         long[] d = this.data;
         if (d != null) {
@@ -327,6 +351,7 @@ public final class WorldSection {
 
     //Returns true on success, false on failure
     boolean trySetFreed() {
+        if (this.isDirty || this.inSaveQueue) return false;
         int witness = (int) ATOMIC_STATE_HANDLE.compareAndExchange(this, 1, 0);
         if ((witness & 1) == 0 && witness != 0) {
             throw new IllegalStateException("Section marked as free but has refs");

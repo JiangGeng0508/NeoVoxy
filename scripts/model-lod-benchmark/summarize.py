@@ -23,6 +23,7 @@ def distribution(values, scale=1):
 
 
 def validate_profile(data, metadata, log, profile):
+    require("SECTION_SNAPSHOT_PASS cases=5" in log, f"{profile}: missing section snapshot geometry check")
     require("MODEL_LOD_BENCH ASYNC_PASS " in log, f"{profile}: missing async pipeline PASS")
     queue = data["asyncPipeline"]
     require(queue["prepared"] >= 4 and queue["published"] >= 4 and queue["failed"] == 0

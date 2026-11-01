@@ -17,6 +17,28 @@ import static org.junit.jupiter.api.Assertions.*;
 
 @Timeout(10)
 class SectionSavingServiceTest {
+    @Test void trackedSectionEntersSecondaryCacheOnlyAfterRetryCommits() {
+        var manager = new ServiceManager(n -> {});
+        var storage = new Storage(); storage.failCommit = true;
+        var world = new WorldEngine(storage);
+        var saver = new SectionSavingService(manager, storage.clock::get);
+        world.setSaveCallback(saver::enqueueSave);
+        try {
+            var section = world.acquire(0, 0, 0, 0);
+            synchronized (section) { java.util.Arrays.fill(section.materialize(), Mapper.airWithLight(15)); }
+            world.markDirty(section); section.release();
+            assertEquals(1, world.getActiveSectionCount()); assertEquals(0, world.getSecondaryCacheStats().entries());
+            assertEquals(0, manager.tryRunAJob());
+            assertEquals(1, world.getActiveSectionCount()); assertEquals(0, world.getSecondaryCacheStats().entries());
+            assertFalse(section.isFreed());
+            storage.failCommit = false;
+            assertEquals(0, manager.tryRunAJob());
+            assertEquals(0, world.getActiveSectionCount()); assertEquals(1, world.getSecondaryCacheStats().entries());
+            assertEquals(WorldSection.SECTION_VOLUME * 8L, world.getSecondaryCacheStats().voxelBytes());
+            assertEquals(0, storage.loadSection(WorldSection._createRawUntrackedUnsafeSection(0, 0, 0, 0)));
+        } finally { storage.failCommit = false; saver.shutdown(); manager.shutdown(); world.free(); }
+    }
+
     static class Storage extends SectionSerializationStorage {
         final List<Integer> batches = new ArrayList<>();
         long bytesPerSection;

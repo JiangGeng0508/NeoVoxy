@@ -29,6 +29,10 @@ public abstract class VoxyInstance {
 
     private final StampedLock activeWorldLock = new StampedLock();
     private final HashMap<WorldIdentifier, WorldEngine> activeWorlds = new HashMap<>();
+    private final me.cortex.voxy.common.world.SecondarySectionCache secondarySectionCache =
+            new me.cortex.voxy.common.world.SecondarySectionCache();
+
+    public me.cortex.voxy.common.world.SecondarySectionCache getSecondarySectionCache() { return this.secondarySectionCache; }
 
     protected final ImportManager importManager;
 

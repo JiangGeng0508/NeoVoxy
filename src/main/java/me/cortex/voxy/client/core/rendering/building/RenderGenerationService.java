@@ -102,9 +102,11 @@ public class RenderGenerationService {
         if (failure.substitutedSection != null) {
             for (long state : failure.substitutedSection) collectModel(missing, state);
         } else {
-            long[] raw = section._rawOrNull();
-            if (raw == null) collectModel(missing, section.getUniformValue());
-            else for (long state : raw) collectModel(missing, state);
+            synchronized (section) {
+                long[] raw = section._rawOrNull();
+                if (raw == null) collectModel(missing, section.getUniformValue());
+                else for (long state : raw) collectModel(missing, state);
+            }
         }
         if (failure.auxData != null) {
             for (int face = 0; face < 6; face++) {

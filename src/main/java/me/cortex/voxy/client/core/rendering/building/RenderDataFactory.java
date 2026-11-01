@@ -434,119 +434,28 @@ public class RenderDataFactory {
         Arrays.fill(this.neighboringFaces, slice * 32 * 32, (slice + 1) * 32 * 32, value);
     }
 
-    private boolean fillSliceIfUniform(WorldSection sec, int slice) {
-        if (!sec.isUniform()) {
-            return false;
-        }
-        this.fillNeighborFaceSlice(slice, sec.getUniformValue());
-        me.cortex.voxy.commonImpl.PerfStats.neighborFaceUniformFill.increment();
-        return true;
-    }
+    private final me.cortex.voxy.common.world.SectionSnapshot meshSnapshot = new me.cortex.voxy.common.world.SectionSnapshot();
 
-    private int acquireNeighborData(WorldSection section, int msk) {
-        int unavailableMsk = 0;
-        if ((msk&1)!=0) {//-x
-            var sec = this.world.acquireIfExists(section.lvl, section.x - 1, section.y, section.z);
-            if (sec == null) {
-                unavailableMsk |= 1;
-                this.clearNeighborFaceSlice(0);
-            } else {
-                //Note this is not thread safe! (but eh, fk it)
-                if (!this.fillSliceIfUniform(sec, 0)) {
-                    var raw = sec.materialize();
-                    for (int i = 0; i < 32*32; i++) {
-                        this.neighboringFaces[i] = raw[(i<<5)+31];//pull the +x faces from the section
-                    }
-                }
-                sec.release(WorldSection.RELEASE_HINT_POSSIBLE_REUSE);
+    private int acquireNeighborData(WorldSection section, int mask) {
+        int unavailable = 0;
+        for (int face = 0; face < 6; face++) {
+            if ((mask & (1 << face)) == 0) continue;
+            int dx = face == 0 ? -1 : face == 1 ? 1 : 0;
+            int dy = face == 2 ? -1 : face == 3 ? 1 : 0;
+            int dz = face == 4 ? -1 : face == 5 ? 1 : 0;
+            var neighbor = this.world.acquireIfExists(section.lvl, section.x + dx, section.y + dy, section.z + dz);
+            if (neighbor == null) {
+                unavailable |= 1 << face;
+                this.fillNeighborFaceSlice(face, face == 3 ? Mapper.airWithLight(0x0F) : 0);
+                continue;
             }
-        }
-        if ((msk&2)!=0) {//+x
-            var sec = this.world.acquireIfExists(section.lvl, section.x + 1, section.y, section.z);
-            if (sec == null) {
-                unavailableMsk |= 2;
-                this.clearNeighborFaceSlice(1);
-            } else {
-                //Note this is not thread safe! (but eh, fk it)
-                if (!this.fillSliceIfUniform(sec, 1)) {
-                    var raw = sec.materialize();
-                    for (int i = 0; i < 32*32; i++) {
-                        this.neighboringFaces[i+32*32] = raw[(i<<5)];//pull the -x faces from the section
-                    }
+            try {
+                if (neighbor.copyFaceInto(face ^ 1, this.neighboringFaces, face * 1024)) {
+                    me.cortex.voxy.commonImpl.PerfStats.neighborFaceUniformFill.increment();
                 }
-                sec.release(WorldSection.RELEASE_HINT_POSSIBLE_REUSE);
-            }
+            } finally { neighbor.release(WorldSection.RELEASE_HINT_POSSIBLE_REUSE); }
         }
-
-        if ((msk&4)!=0) {//-y
-            var sec = this.world.acquireIfExists(section.lvl, section.x, section.y - 1, section.z);
-            if (sec == null) {
-                unavailableMsk |= 4;
-                this.clearNeighborFaceSlice(2);
-            } else {
-                //Note this is not thread safe! (but eh, fk it)
-                if (!this.fillSliceIfUniform(sec, 2)) {
-                    var raw = sec.materialize();
-                    for (int i = 0; i < 32*32; i++) {
-                        this.neighboringFaces[i+32*32*2] = raw[i|(0x1F<<10)];//pull the +y faces from the section
-                    }
-                }
-                sec.release(WorldSection.RELEASE_HINT_POSSIBLE_REUSE);
-            }
-        }
-        if ((msk&8)!=0) {//+y
-            var sec = this.world.acquireIfExists(section.lvl, section.x, section.y + 1, section.z);
-            if (sec == null) {
-                unavailableMsk |= 8;
-                long skyAir = Mapper.airWithLight(0x0F);
-                for (int i = 0; i < 32*32; i++) {
-                    this.neighboringFaces[i+32*32*3] = skyAir;
-                }
-            } else {
-                //Note this is not thread safe! (but eh, fk it)
-                if (!this.fillSliceIfUniform(sec, 3)) {
-                    var raw = sec.materialize();
-                    for (int i = 0; i < 32*32; i++) {
-                        this.neighboringFaces[i+32*32*3] = raw[i];//pull the -y faces from the section
-                    }
-                }
-                sec.release(WorldSection.RELEASE_HINT_POSSIBLE_REUSE);
-            }
-        }
-
-        if ((msk&16)!=0) {//-z
-            var sec = this.world.acquireIfExists(section.lvl, section.x, section.y, section.z - 1);
-            if (sec == null) {
-                unavailableMsk |= 16;
-                this.clearNeighborFaceSlice(4);
-            } else {
-                //Note this is not thread safe! (but eh, fk it)
-                if (!this.fillSliceIfUniform(sec, 4)) {
-                    var raw = sec.materialize();
-                    for (int i = 0; i < 32*32; i++) {
-                        this.neighboringFaces[i+32*32*4] = raw[Integer.expand(i,0b11111_00000_11111)|(0x1F<<5)];//pull the +z faces from the section
-                    }
-                }
-                sec.release(WorldSection.RELEASE_HINT_POSSIBLE_REUSE);
-            }
-        }
-        if ((msk&32)!=0) {//+z
-            var sec = this.world.acquireIfExists(section.lvl, section.x, section.y, section.z + 1);
-            if (sec == null) {
-                unavailableMsk |= 32;
-                this.clearNeighborFaceSlice(5);
-            } else {
-                //Note this is not thread safe! (but eh, fk it)
-                if (!this.fillSliceIfUniform(sec, 5)) {
-                    var raw = sec.materialize();
-                    for (int i = 0; i < 32*32; i++) {
-                        this.neighboringFaces[i+32*32*5] = raw[Integer.expand(i,0b11111_00000_11111)];//pull the -z faces from the section
-                    }
-                }
-                sec.release(WorldSection.RELEASE_HINT_POSSIBLE_REUSE);
-            }
-        }
-        return unavailableMsk;
+        return unavailable;
     }
 
     private static final long LM = (0xFFL << 55);
@@ -2359,8 +2268,9 @@ public class RenderDataFactory {
     //section is already acquired and gets released by the parent
     /** 读取区段快照、生成所有方向面，并返回 GPU 上传所需的不可变结果。 */
     public BuiltSection generateMesh(WorldSection section) {
-        if (section.isUniform() && Mapper.isAir(section.getUniformValue())) {
-            return BuiltSection.emptyWithChildren(section.key, section.getNonEmptyChildren());
+        this.meshSnapshot.capture(section);
+        if (this.meshSnapshot.isUniform() && Mapper.isAir(this.meshSnapshot.get(0))) {
+            return BuiltSection.emptyWithChildren(section.key, this.meshSnapshot.children());
         }
         // this can result in the state of all block meshes and well _everything_ from being incorrect
         //THE EXCEPTION THAT THIS THROWS CAUSES MAJOR ISSUES
@@ -2408,13 +2318,12 @@ public class RenderDataFactory {
         Arrays.fill(this.fluidMasks, 0);
 
         //Prepare everything
-        long[] rawSection = section.materialize();
+        long[] rawSection = this.meshSnapshot.data();
         rawSection = this.connectedTextures.substitute(this.world, section, rawSection);
         var seasonalView = me.cortex.voxy.client.core.compat.eclipticseasons.SeasonalLod.view;
         if (seasonalView != null) {
             try {
-                //materialize() returns the section's shared backing array; the view either hands it
-                //back untouched or returns a private copy - it never writes through
+                // Both passes see worker-owned snapshots, never shared section storage.
                 rawSection = seasonalView.substituteSection(this.world, section, rawSection);
             } catch (LinkageError e) {
                 //An ES build the version gate lets through can still lack a symbol the view only
@@ -2456,6 +2365,7 @@ public class RenderDataFactory {
             this.generateXFaces();
             this.generateFluidFaces(unavailableNeighborMsk);
         } catch (IdNotYetComputedException e) {
+            e.substitutedSection = rawSection;
             e.auxBitMsk = neighborMsk;
             e.auxData = this.neighboringFaces;
             throw e;
@@ -2469,7 +2379,7 @@ public class RenderDataFactory {
         // if the connecting type of the translucent block is the same AND the face is full, discard it
         // this stops e.g. multiple layers of glass (and ocean) from having 3000 layers of quads etc
         if (this.quadCount == 0) {
-            return BuiltSection.emptyWithChildren(section.key, section.getNonEmptyChildren());
+            return BuiltSection.emptyWithChildren(section.key, this.meshSnapshot.children());
         }
 
         if (this.quadCount >= 1<<16) {
@@ -2509,7 +2419,7 @@ public class RenderDataFactory {
             this.occupancy.write(occupancy.address, false);
         }
 
-        return new BuiltSection(section.key, section.getNonEmptyChildren(), aabb, buff, offsets, occupancy);
+        return new BuiltSection(section.key, this.meshSnapshot.children(), aabb, buff, offsets, occupancy);
     }
 
     /** 释放固定四边形缓冲；调用后实例不可再次生成网格。 */

@@ -12,6 +12,29 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
 class LodBlockAndTintGetterTest {
+    @Test void neighborSnapshotsStayStableAcrossWritesAndScratchReuseReadsTheNextVersion() {
+        var world = new WorldEngine(new SectionSerializationStorage(new MemoryStorageBackend()));
+        var center = world.acquire(0, 0, 0, 0);
+        var neighbor = world.acquire(0, -1, 0, 0);
+        var snapshots = new me.cortex.voxy.common.world.SectionSnapshot[27];
+        int stone = world.getMapper().getIdForBlockState(Blocks.STONE.defaultBlockState());
+        int water = world.getMapper().getIdForBlockState(Blocks.WATER.defaultBlockState());
+        neighbor.setUniform(Mapper.composeMappingId((byte) 0, stone, 0));
+        var edge = new BlockPos(-1, 0, 0);
+        try {
+            try (var view = new LodBlockAndTintGetter(world, center, new long[WorldSection.SECTION_VOLUME], snapshots)) {
+                assertEquals(Blocks.STONE.defaultBlockState(), view.getBlockState(edge));
+                assertEquals(1, neighbor.getRefCount(), "view must release the section after copying");
+                synchronized (neighbor) { neighbor.materialize()[WorldSection.getIndex(31, 0, 0)] = Mapper.composeMappingId((byte) 0, water, 0); }
+                assertEquals(Blocks.STONE.defaultBlockState(), view.getBlockState(edge));
+            }
+            try (var view = new LodBlockAndTintGetter(world, center, new long[WorldSection.SECTION_VOLUME], snapshots)) {
+                assertEquals(Blocks.WATER.defaultBlockState(), view.getBlockState(edge));
+            }
+        } finally { neighbor.release(); center.release(); world.free(); }
+        assertEquals(0, world.getSecondaryCacheStats().entries());
+    }
+
     @Test
     void readsAll26NeighborsAtEveryLodLevelAndReleasesThem() {
         var world = new WorldEngine(new SectionSerializationStorage(new MemoryStorageBackend()));

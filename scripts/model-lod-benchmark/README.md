@@ -1,5 +1,7 @@
 This benchmark compares the full-mesh submission policy used before dedicated model LOD with adaptive LOD in the current binary. Both modes use identical captured Create geometry, world snapshot, shaders, resolution and camera path. It is a controlled comparison of the mesh policy, not a benchmark of two historical mod binaries.
 
+Before timed frames, `SectionSnapshotCheck` meshes air, stone, glass, water and Create casing using both uniform and expanded storage. It compares geometry bytes, offsets, bounds and child metadata, and verifies that model substitutions do not modify either source. Both builds pin the same 26 neighbouring sections so a first-read storage miss cannot change lighting between the pair. Completion requires `SECTION_SNAPSHOT_PASS cases=5`. This checks real model integration, not seasonal visual appearance or historical-binary performance.
+
 Run from the repository root with Java 21 and an existing Minecraft 1.21.1 world:
 
 ```powershell

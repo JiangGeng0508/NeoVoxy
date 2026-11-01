@@ -66,6 +66,8 @@ public final class ModelLodBenchmark {
         if (++ticks > 12000 && !finished) throw new AssertionError("Model LOD benchmark timeout");
         if (mc.level == null || mc.player == null || ready || finished) return;
         if (++worldTicks < 100) return;
+        var activeSystem = ((IGetVoxyRenderSystem)mc.levelRenderer).voxy$getRenderSystem();
+        if (activeSystem == null || !SectionSnapshotCheck.step(activeSystem)) return;
         if (!capturing) { capturing = true; captureFixtures(); return; }
         if (capturedSources.size() != 4) return;
         var queue = CreateMeshService.stats();

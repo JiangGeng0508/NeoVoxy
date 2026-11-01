@@ -39,6 +39,7 @@ public class SeasonalMeshView implements SeasonalLod.View {
             ThreadLocal.withInitial(RandomSource::createNewThreadLocalInstance);
     private static final ThreadLocal<BlockPos.MutableBlockPos> POS =
             ThreadLocal.withInitial(BlockPos.MutableBlockPos::new);
+    private static final ThreadLocal<long[]> ABOVE_FACE = ThreadLocal.withInitial(() -> new long[1024]);
 
     //Per-real-block-id verdicts: whether the block has seasonal model definitions, whether it is
     //freezable water, plus the snow-type flag. Static between data reloads; racy rebuilds only
@@ -206,6 +207,7 @@ public class SeasonalMeshView implements SeasonalLod.View {
                     if (!aboveChecked) {
                         aboveChecked = true;
                         aboveSection = world.acquireIfExists(section.lvl, section.x, section.y + 1, section.z);
+                        if (aboveSection != null) aboveSection.copyFaceInto(2, ABOVE_FACE.get(), 0);
                     }
                     if (aboveSection == null) {
                         // Snow and ice require evidence about the voxel above, but seasonal models
@@ -214,9 +216,7 @@ public class SeasonalMeshView implements SeasonalLod.View {
                         aboveKnown = false;
                         aboveMappingId = 0;
                     } else {
-                        //Single-voxel read: materialising the neighbour would permanently expand a
-                        //uniform section into a pooled 256KiB array for a 1024-voxel row
-                        aboveMappingId = aboveSection.get(index & 0x3FF);
+                        aboveMappingId = ABOVE_FACE.get()[index & 0x3FF];
                     }
                 }
 
