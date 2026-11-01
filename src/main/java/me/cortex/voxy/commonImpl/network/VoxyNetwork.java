@@ -31,20 +31,22 @@ import java.util.function.Consumer;
  *       {@link BiomeMapBatchS2C} / {@link MappingDeltaS2C}) received beforehand.</li>
  *   <li>Sections are pulled on demand: the client requests a section when its local
  *       store reports a miss, the server answers with {@link SectionDataS2C}. Live
- *       updates are pushed to voxy clients in the same dimension within the maximum
- *       supported LoD radius, sharing bounded dispatch credit with pull responses.</li>
+ *       updates are pushed within the negotiated LoD radius (maximum supported radius
+ *       for V1), sharing bounded dispatch credit with pull responses.</li>
  * </ul>
  */
 public final class VoxyNetwork {
     private VoxyNetwork() {}
 
     public static final int PROTOCOL_VERSION = 1;
+    public static final int VIEW_PROTOCOL_VERSION = 2;
 
     //Client bound handlers live in client-only code. Registered here via a setter so that
     // the common payload handler never forces client classes to load on a dedicated server.
     public interface ClientHandler {
         boolean acceptsConnection(Connection connection);
         void handleHello(HelloS2C payload);
+        default void handleHelloV2(HelloV2S2C payload) {}
         void handleBlockMaps(BlockMapBatchS2C payload);
         void handleBiomeMaps(BiomeMapBatchS2C payload);
         void handleMappingDelta(MappingDeltaS2C payload);
@@ -72,6 +74,30 @@ public final class VoxyNetwork {
         public static final StreamCodec<RegistryFriendlyByteBuf, HelloS2C> CODEC = StreamCodec.of(
                 (buf, p) -> buf.writeVarInt(p.version),
                 buf -> new HelloS2C(buf.readVarInt()));
+        @Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
+    }
+
+    /** Separate optional channels keep the seven V1 codecs and their registration version unchanged. */
+    public record HelloV2C2S(int version, String dimension, int radiusBlocks) implements CustomPacketPayload {
+        public static final Type<HelloV2C2S> TYPE = new Type<>(ResourceLocation.fromNamespaceAndPath("voxy", "hello_v2_c2s"));
+        public static final StreamCodec<RegistryFriendlyByteBuf, HelloV2C2S> CODEC = StreamCodec.of(
+                (buf, p) -> { buf.writeVarInt(p.version); buf.writeUtf(p.dimension, 256); buf.writeVarInt(p.radiusBlocks); },
+                buf -> new HelloV2C2S(buf.readVarInt(), buf.readUtf(256), buf.readVarInt()));
+        @Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
+    }
+
+    public record HelloV2S2C(int version) implements CustomPacketPayload {
+        public static final Type<HelloV2S2C> TYPE = new Type<>(ResourceLocation.fromNamespaceAndPath("voxy", "hello_v2_s2c"));
+        public static final StreamCodec<RegistryFriendlyByteBuf, HelloV2S2C> CODEC = StreamCodec.of(
+                (buf, p) -> buf.writeVarInt(p.version), buf -> new HelloV2S2C(buf.readVarInt()));
+        @Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
+    }
+
+    public record ViewDistanceC2S(String dimension, int radiusBlocks) implements CustomPacketPayload {
+        public static final Type<ViewDistanceC2S> TYPE = new Type<>(ResourceLocation.fromNamespaceAndPath("voxy", "view_distance"));
+        public static final StreamCodec<RegistryFriendlyByteBuf, ViewDistanceC2S> CODEC = StreamCodec.of(
+                (buf, p) -> { buf.writeUtf(p.dimension, 256); buf.writeVarInt(p.radiusBlocks); },
+                buf -> new ViewDistanceC2S(buf.readUtf(256), buf.readVarInt()));
         @Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
     }
 
@@ -211,6 +237,10 @@ public final class VoxyNetwork {
         registrar.playToClient(BiomeMapBatchS2C.TYPE, BiomeMapBatchS2C.CODEC, VoxyNetwork::handleBiomeMaps);
         registrar.playToClient(MappingDeltaS2C.TYPE, MappingDeltaS2C.CODEC, VoxyNetwork::handleMappingDelta);
         registrar.playToClient(SectionDataS2C.TYPE, SectionDataS2C.CODEC, VoxyNetwork::handleSectionData);
+        registrar.playToServer(HelloV2C2S.TYPE, HelloV2C2S.CODEC, VoxyServerNet::onClientHelloV2);
+        registrar.playToServer(ViewDistanceC2S.TYPE, ViewDistanceC2S.CODEC, VoxyServerNet::onViewDistance);
+        registrar.playToClient(HelloV2S2C.TYPE, HelloV2S2C.CODEC,
+                (payload, ctx) -> ctx.enqueueWork(() -> dispatchClient(ctx.connection(), h -> h.handleHelloV2(payload))));
     }
 
     // ---------- server-bound handlers (run on logical server) ----------
@@ -279,6 +309,7 @@ public final class VoxyNetwork {
         int size = 16 + stringSize(payload.type().id().toString());
         return size + switch (payload) {
             case HelloS2C p -> varIntSize(p.version());
+            case HelloV2S2C p -> varIntSize(p.version());
             case BlockMapBatchS2C p -> p.encoded() != null ? p.encoded().length : varIntSize(p.startId()) + varIntSize(p.entries().size())
                     + p.entries().stream().mapToInt(e -> varIntSize(e.length) + e.length).sum();
             case BiomeMapBatchS2C p -> p.encoded() != null ? p.encoded().length : varIntSize(p.startId()) + varIntSize(p.entries().size())

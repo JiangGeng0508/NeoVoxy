@@ -108,6 +108,9 @@ public class VoxyRenderSystem {
         return this.pipeline == null ? "none" : this.pipeline.getClass().getSimpleName();
     }
 
+    /** Includes model waiters: generation must not grow a blocked downstream indefinitely. */
+    public int getPendingMeshCount() { return this.renderGen.getTaskCount(); }
+
     private static AbstractSectionRenderer.Factory<?, ? extends IGeometryData> getRenderBackendFactory() {
         return MDICSectionRenderer.FACTORY;
     }

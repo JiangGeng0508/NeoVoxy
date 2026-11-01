@@ -133,6 +133,19 @@ public class VoxyServerInstance extends VoxyInstance {
         this.scheduler.hello(view(player));
     }
 
+    public void onClientHelloV2(ServerPlayer player, int radiusBlocks) {
+        if (!this.isRunning() || this.networkClosed) return;
+        this.voxyClients.add(player.getUUID());
+        this.scheduler.helloV2(new LodServerScheduler.View(player.getUUID(),
+                player.serverLevel().dimension().location().toString(), player.getX(), player.getZ(), radiusBlocks));
+    }
+
+    public void onViewDistance(ServerPlayer player, VoxyNetwork.ViewDistanceC2S payload) {
+        if (!this.isRunning() || this.networkClosed) return;
+        this.scheduler.updateView(view(player));
+        this.scheduler.viewDistance(player.getUUID(), payload.dimension(), payload.radiusBlocks());
+    }
+
     public void onPlayerLogout(ServerPlayer player) {
         this.voxyClients.remove(player.getUUID());
         this.scheduler.logout(player.getUUID());
@@ -140,7 +153,7 @@ public class VoxyServerInstance extends VoxyInstance {
 
     public void resyncPlayer(ServerPlayer player) {
         if (this.isRunning() && this.voxyClients.contains(player.getUUID())) {
-            this.scheduler.hello(view(player));
+            this.scheduler.resync(view(player));
         }
     }
 

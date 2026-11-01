@@ -65,6 +65,23 @@ class VoxyClientNetworkTest {
     }
 
     @Test
+    void v2AcknowledgementEnablesAuthorityWithoutLosingPendingRequests() throws Exception {
+        LodSectionRequests requests = get("sectionRequests");
+        requests.request("minecraft:overworld", key(1));
+        this.handler.handleHelloV2(new VoxyNetwork.HelloV2S2C(-1));
+        assertFalse(VoxyClientNetwork.isServerAuthoritative());
+        this.handler.handleHelloV2(new VoxyNetwork.HelloV2S2C(2));
+        assertTrue(VoxyClientNetwork.isServerAuthoritative());
+        assertEquals(1, requests.pendingCount());
+        this.handler.handleHelloV2(new VoxyNetwork.HelloV2S2C(2));
+        assertEquals(1, requests.pendingCount());
+        VoxyClientNetwork.onLoggingOut(null);
+        assertFalse(VoxyClientNetwork.isServerAuthoritative());
+        LodClientView view = get("view");
+        assertTrue(view.contains(new LodSectionRequests.Request("minecraft:overworld", key(600)), 0, 0));
+    }
+
+    @Test
     void helloResyncKeepsRequestsAndEmptyRepliesReleaseSlotsWithoutRepeatingAbsences() throws Exception {
         LodSectionRequests requests = get("sectionRequests");
         for (int i = 0; i < 600; i++) requests.request("minecraft:overworld", key(i));

@@ -29,6 +29,11 @@ public final class ServerCapabilities {
                 VoxyNetwork.MappingDeltaS2C.TYPE);
     }
 
+    public static boolean lodViewDistance() {
+        return lodSync() && supports(VoxyNetwork.HelloV2C2S.TYPE, VoxyNetwork.HelloV2S2C.TYPE,
+                VoxyNetwork.ViewDistanceC2S.TYPE);
+    }
+
     public static boolean trains() {
         return supports(DistantTrainProtocol.CarriageShapePayload.TYPE, DistantTrainProtocol.TrainPosesPayload.TYPE);
     }

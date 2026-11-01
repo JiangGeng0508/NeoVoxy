@@ -48,7 +48,9 @@ public final class LodClientIngestion implements AutoCloseable {
         void mappings(String dimension, Snapshot snapshot);
     }
     public record Stats(int tasks, int queued, int waiting, int confirmations, long bytes, long peakBytes,
-                 int peakTasks, long applied, long coalesced, long refused, long stale, long failures) {}
+                 int peakTasks, long applied, long coalesced, long refused, long stale, long failures) {
+        public double pressure() { return Math.max((double) tasks / MAX_TASKS, (double) bytes / MAX_BYTES); }
+    }
     private enum State { QUEUED, RUNNING, WAITING, DONE }
     private static final class Entry {
         long desired;

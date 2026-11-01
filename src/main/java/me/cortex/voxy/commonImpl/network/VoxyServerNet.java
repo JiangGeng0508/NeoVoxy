@@ -38,6 +38,30 @@ public final class VoxyServerNet {
         });
     }
 
+    public static void onClientHelloV2(VoxyNetwork.HelloV2C2S payload, IPayloadContext ctx) {
+        if (payload.version() != VoxyNetwork.VIEW_PROTOCOL_VERSION) return;
+        ctx.enqueueWork(() -> {
+            var instance = serverInstance();
+            if (instance != null && ctx.player() instanceof ServerPlayer player
+                    && player.connection.hasChannel(VoxyNetwork.HelloV2C2S.TYPE)
+                    && player.connection.hasChannel(VoxyNetwork.HelloV2S2C.TYPE)
+                    && player.connection.hasChannel(VoxyNetwork.ViewDistanceC2S.TYPE)
+                    && player.serverLevel().dimension().location().toString().equals(payload.dimension())) {
+                instance.onClientHelloV2(player, payload.radiusBlocks());
+            }
+        });
+    }
+
+    public static void onViewDistance(VoxyNetwork.ViewDistanceC2S payload, IPayloadContext ctx) {
+        ctx.enqueueWork(() -> {
+            var instance = serverInstance();
+            if (instance != null && ctx.player() instanceof ServerPlayer player
+                    && player.serverLevel().dimension().location().toString().equals(payload.dimension())) {
+                instance.onViewDistance(player, payload);
+            }
+        });
+    }
+
     public static void onSectionRequest(IPayloadContext ctx, VoxyNetwork.SectionRequestC2S payload) {
         ctx.enqueueWork(() -> {
             var instance = serverInstance();

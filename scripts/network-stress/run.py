@@ -55,6 +55,8 @@ def start(name, server=False):
             arg = '-Dvoxy.networkStress=' + str(run)
         launch.append(arg)
     launch.insert(0, '-Xmx3G')
+    if name == 'Slow':
+        launch.insert(0, '-Dvoxy.networkStressLegacy=true')
     if not server:
         for flag, value in [('--username', name), ('--uuid', format(1 if name == 'Fast' else 2, '032x')),
                             ('--quickPlayMultiplayer', '127.0.0.1:' + str(args.port)),
@@ -117,6 +119,8 @@ try:
         assert re.search(r'/(ERROR|FATAL)\]', log) is None, name + ' logged an error'
         if name != 'Server':
             assert 'NETWORK_STRESS FINAL_STORE PASS sections=2304' in log, name + ' did not verify its final store'
+            protocol = 2 if name == 'Fast' else 1
+            assert f'NETWORK_STRESS VIEW_FILTER PASS protocol={protocol}' in log, name + ' did not verify its negotiated view'
     results['state'] = 'passed'
     results['evidence'] = {name: (run / name).read_text() for name in ['Fast.pass', 'Slow.pass', 'server.pass']}
     print('NETWORK_STRESS all three processes exited normally.', flush=True)

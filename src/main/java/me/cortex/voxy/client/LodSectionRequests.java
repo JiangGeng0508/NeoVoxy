@@ -43,11 +43,16 @@ final class LodSectionRequests {
 
     /** Call only after the hello response. Repeated hellos do not reset this state. */
     synchronized void pump(String dimension, long now, Predicate<Request> sender) {
+        this.pump(dimension, now, request -> true, sender);
+    }
+
+    synchronized void pump(String dimension, long now, Predicate<Request> interested, Predicate<Request> sender) {
         if (this.closed) return;
         var expired = this.inFlight.entrySet().iterator();
         while (expired.hasNext()) {
             var entry = expired.next();
-            if (now - entry.getValue() >= TIMEOUT_NANOS) {
+            if (!entry.getKey().dimension().equals(dimension) || !interested.test(entry.getKey())
+                    || now - entry.getValue() >= TIMEOUT_NANOS) {
                 var request = entry.getKey();
                 expired.remove();
                 this.enqueue(request, now, 0);
@@ -62,6 +67,7 @@ final class LodSectionRequests {
             var entry = iterator.next();
             if (!entry.getValue().ready(now)) continue;
             var request = new Request(dimension, entry.getKey());
+            if (!interested.test(request)) continue; // Retain demand for movement or a later radius increase.
             iterator.remove();
             this.inFlight.put(request, now);
             attempts++;

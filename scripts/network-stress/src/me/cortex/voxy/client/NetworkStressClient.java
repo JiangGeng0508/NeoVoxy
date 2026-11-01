@@ -4,6 +4,7 @@ import me.cortex.voxy.common.world.WorldEngine;
 import me.cortex.voxy.common.world.other.Mapper;
 import me.cortex.voxy.commonImpl.WorldIdentifier;
 import me.cortex.voxy.commonImpl.network.VoxyNetwork;
+import me.cortex.voxy.client.config.VoxyConfig;
 import net.minecraft.client.Minecraft;
 import net.minecraft.network.Connection;
 import net.minecraft.world.level.block.Blocks;
@@ -26,6 +27,8 @@ public final class NetworkStressClient {
     private static final Set<Long> inspect = new HashSet<>(), airToVerify = new HashSet<>();
     private static int emptyReplies, airReplies;
     private static boolean passed;
+    private static boolean ready, expanded, filterSeen;
+    private static int readyTick, protocol;
 
     @SubscribeEvent public static void tick(ClientTickEvent.Post event) throws Exception {
         String output = System.getProperty("voxy.networkStress");
@@ -37,7 +40,8 @@ public final class NetworkStressClient {
             delegate = (VoxyNetwork.ClientHandler) field.get(null);
             VoxyNetwork.setClientHandler(new VoxyNetwork.ClientHandler() {
                 public boolean acceptsConnection(Connection c) { return delegate.acceptsConnection(c); }
-                public void handleHello(VoxyNetwork.HelloS2C p) { delegate.handleHello(p); }
+                public void handleHello(VoxyNetwork.HelloS2C p) { delegate.handleHello(p); protocol = 1; }
+                public void handleHelloV2(VoxyNetwork.HelloV2S2C p) { delegate.handleHelloV2(p); protocol = 2; }
                 public void handleBlockMaps(VoxyNetwork.BlockMapBatchS2C p) { delegate.handleBlockMaps(p); }
                 public void handleBiomeMaps(VoxyNetwork.BiomeMapBatchS2C p) { delegate.handleBiomeMaps(p); }
                 public void handleMappingDelta(VoxyNetwork.MappingDeltaS2C p) { delegate.handleMappingDelta(p); }
@@ -45,6 +49,10 @@ public final class NetworkStressClient {
                     delegate.handleSectionData(p);
                     responses++; bytes += VoxyNetwork.encodedSize(p);
                     if (p.lvl() != 0 || p.y() != 0) return;
+                    if (p.x() == 600 && p.z() == 600) {
+                        if (protocol == 2 && !expanded) throw new AssertionError("V2 delivered terrain outside its radius");
+                        filterSeen = true;
+                    }
                     long key = WorldEngine.getWorldSectionId(p.lvl(), p.x(), p.y(), p.z());
                     if (p.x() >= 400 && p.x() < 500 && p.z() >= 400 && p.z() < 406) {
                         if (p.data().length == 0) emptyReplies++;
@@ -66,16 +74,29 @@ public final class NetworkStressClient {
         if (processing != null && processing.tasks() == 0) verifyApplied(mc);
         String name = mc.getUser().getName();
         Path base = Path.of(output);
-        if (worldTicks == 40) {
+        if (worldTicks == 10) {
+            int expectedProtocol = name.equals("Slow") ? 1 : 2;
+            if (protocol != expectedProtocol) throw new AssertionError("expected protocol " + expectedProtocol + " but got " + protocol);
+            if (protocol == 2) VoxyNetwork.sendToServer(new VoxyNetwork.SectionRequestC2S("minecraft:overworld", 0, 600, 0, 600));
+            Files.writeString(base.resolve(name + ".connected"), "protocol=" + protocol);
+        }
+        if (name.equals("Slow") && filterSeen) Files.writeString(base.resolve("filter.seen"), "V1 received distant broadcast");
+        if (!ready && worldTicks >= 40 && Files.exists(base.resolve("filter.seen"))) {
+            if (protocol == 2) {
+                if (filterSeen) throw new AssertionError("out-of-range probe reached V2 client");
+                VoxyConfig.CONFIG.sectionRenderDistance = 64; expanded = true;
+            }
+            System.out.println("NETWORK_STRESS VIEW_FILTER PASS protocol=" + protocol + " filterSeen=" + filterSeen);
             var listener = VoxyClientNetwork.missListener("minecraft:overworld");
             for (int i = 0; i < 600; i++) listener.onMissing(WorldEngine.getWorldSectionId(0, 400 + i % 100, 0, 400 + i / 100));
             Files.writeString(base.resolve(name + ".ready"), "ready");
+            ready = true; readyTick = worldTicks;
             if (name.equals("Slow")) {
                 mc.getConnection().getConnection().channel().config().setAutoRead(false);
                 System.out.println("NETWORK_STRESS paused socket reads");
             }
         }
-        if (worldTicks == 160 && name.equals("Slow")) {
+        if (ready && worldTicks == readyTick + 120 && name.equals("Slow")) {
             mc.getConnection().getConnection().channel().config().setAutoRead(true);
             System.out.println("NETWORK_STRESS resumed socket reads");
         }
@@ -86,6 +107,7 @@ public final class NetworkStressClient {
                 && processing != null && processing.tasks() == 0) {
             if (processing.applied() == 0 || processing.failures() != 0) throw new AssertionError("client background work failed or was not exercised");
             String result = "NETWORK_STRESS CLIENT PASS name=" + name + " latest=" + latest.size()
+                    + " protocol=" + protocol
                     + " absent=" + absent.size() + " emptyReplies=" + emptyReplies + " airReplies=" + airReplies
                     + " responses=" + responses + " bytes=" + bytes + " processing=" + processing;
             Files.writeString(base.resolve(name + ".pass"), result); System.out.println(result); passed = true;

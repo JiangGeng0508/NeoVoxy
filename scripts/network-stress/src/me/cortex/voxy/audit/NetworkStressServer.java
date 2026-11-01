@@ -21,6 +21,7 @@ public final class NetworkStressServer {
     private static int tick, started = -1, maxPackets, maxBytes;
     private static long heapBefore, heapPeak;
     private static boolean done;
+    private static boolean filterSent;
 
     @SubscribeEvent public static void tick(ServerTickEvent.Post event) throws Exception {
         String output = System.getProperty("voxy.networkStress");
@@ -39,6 +40,17 @@ public final class NetworkStressServer {
         long heap = Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory();
         heapPeak = Math.max(heapPeak, heap);
         Path base = Path.of(output);
+        if (!filterSent && Files.exists(base.resolve("Fast.connected")) && Files.exists(base.resolve("Slow.connected"))) {
+            var engine = server.getEngineForLevel(event.getServer().overworld());
+            var section = engine.acquire(0, 600, 0, 600);
+            try {
+                int block = engine.getMapper().getIdForBlockState(Blocks.GOLD_BLOCK.defaultBlockState());
+                section.setUniform(Mapper.composeMappingId((byte) 15, block, 0));
+                section.addNonEmptyBlockCount(WorldSection.SECTION_VOLUME - section.getNonEmptyBlockCount());
+                engine.markDirty(section);
+            } finally { section.release(); }
+            filterSent = true;
+        }
         if (started < 0 && Files.exists(base.resolve("Fast.ready")) && Files.exists(base.resolve("Slow.ready"))) {
             started = tick; heapBefore = heap;
         }

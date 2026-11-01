@@ -19,17 +19,15 @@ public final class LodServerScheduler {
     public static final int BYTES_PER_TICK = 2 << 20;
     public static final int PLAYER_PACKETS_PER_TICK = 8;
     public static final int PLAYER_BYTES_PER_TICK = 512 << 10;
-    public static final int RANGE_BLOCKS = 32768; // Maximum supported client LoD distance (2048 chunks).
+    public static final int RANGE_BLOCKS = LodViewDistance.MAX_BLOCKS;
 
-    public record View(UUID player, String dimension, double x, double z) {
+    public record View(UUID player, String dimension, double x, double z, int radiusBlocks) {
+        public View { radiusBlocks = LodViewDistance.clamp(radiusBlocks); }
+        public View(UUID player, String dimension, double x, double z) { this(player, dimension, x, z, RANGE_BLOCKS); }
+        View withRadius(int radius) { return new View(player, dimension, x, z, radius); }
         public boolean contains(LodUpdateQueue.Key key) {
-            if (!this.dimension.equals(key.dimension())) return false;
-            long width = 32L << WorldEngine.getLevel(key.section());
-            long x0 = (long) WorldEngine.getX(key.section()) * width;
-            long z0 = (long) WorldEngine.getZ(key.section()) * width;
-            double dx = Math.max(0, Math.max(x0 - this.x, this.x - (x0 + width)));
-            double dz = Math.max(0, Math.max(z0 - this.z, this.z - (z0 + width)));
-            return dx * dx + dz * dz <= (double) RANGE_BLOCKS * RANGE_BLOCKS;
+            return this.dimension.equals(key.dimension())
+                    && LodViewDistance.contains(key.section(), this.x, this.z, this.radiusBlocks);
         }
     }
 
@@ -51,6 +49,7 @@ public final class LodServerScheduler {
         final LinkedHashSet<LodUpdateQueue.Key> requests = new LinkedHashSet<>();
         final Set<LodUpdateQueue.Key> deferred = new HashSet<>();
         int blockCursor, biomeCursor, packets, bytes;
+        int protocol = VoxyNetwork.PROTOCOL_VERSION;
         boolean hello = true, preferPush, syncing = true;
         Client(View view) { this.view = view; }
     }
@@ -65,6 +64,12 @@ public final class LodServerScheduler {
     public LodServerScheduler(int updateCapacity) { this.updates = new LodUpdateQueue(updateCapacity); }
 
     public void hello(View view) {
+        this.hello(view.withRadius(RANGE_BLOCKS), VoxyNetwork.PROTOCOL_VERSION);
+    }
+
+    public void helloV2(View view) { this.hello(view, VoxyNetwork.VIEW_PROTOCOL_VERSION); }
+
+    private void hello(View view, int protocol) {
         Client client = this.clients.get(view.player());
         if (client == null || !client.view.dimension().equals(view.dimension())) {
             this.logout(view.player());
@@ -76,14 +81,28 @@ public final class LodServerScheduler {
             client.syncing = true;
             client.view = view;
         }
+        this.clients.get(view.player()).protocol = protocol;
+        this.publishViews();
+    }
+
+    public void resync(View view) {
+        Client client = this.clients.get(view.player());
+        if (client != null) this.hello(view.withRadius(client.view.radiusBlocks()), client.protocol);
+    }
+
+    public void viewDistance(UUID player, String dimension, int radiusBlocks) {
+        Client client = this.clients.get(player);
+        if (client == null || client.protocol != VoxyNetwork.VIEW_PROTOCOL_VERSION
+                || !client.view.dimension().equals(dimension)) return;
+        client.view = client.view.withRadius(radiusBlocks);
         this.publishViews();
     }
 
     public void updateView(View view) {
         Client client = this.clients.get(view.player());
         if (client == null) return;
-        if (!client.view.dimension().equals(view.dimension())) this.hello(view);
-        else client.view = view;
+        if (!client.view.dimension().equals(view.dimension())) this.resync(view);
+        else client.view = view.withRadius(client.view.radiusBlocks());
     }
 
     public void logout(UUID player) {
@@ -157,7 +176,10 @@ public final class LodServerScheduler {
                 attempts++;
                 try {
                 if (client.hello) {
-                    if (this.send(transport, player, client, new VoxyNetwork.HelloS2C(VoxyNetwork.PROTOCOL_VERSION), credit)) client.hello = false;
+                    CustomPacketPayload hello = client.protocol == VoxyNetwork.VIEW_PROTOCOL_VERSION
+                            ? new VoxyNetwork.HelloV2S2C(VoxyNetwork.VIEW_PROTOCOL_VERSION)
+                            : new VoxyNetwork.HelloS2C(VoxyNetwork.PROTOCOL_VERSION);
+                    if (this.send(transport, player, client, hello, credit)) client.hello = false;
                     continue;
                 }
                 Mappings mapping = transport.nextMappings(player, client.blockCursor, client.biomeCursor, credit);

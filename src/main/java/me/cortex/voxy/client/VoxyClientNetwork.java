@@ -29,6 +29,7 @@ public final class VoxyClientNetwork implements VoxyNetwork.ClientHandler {
     private static VoxyInstance ingestionOwner;
     private static long generation;
     private static volatile long lastHelloNanos;
+    private static final LodClientView view = new LodClientView();
 
     public static boolean isServerAuthoritative() { return serverAuthoritative; }
     public static void init() { VoxyNetwork.setClientHandler(new VoxyClientNetwork()); }
@@ -42,13 +43,20 @@ public final class VoxyClientNetwork implements VoxyNetwork.ClientHandler {
 
     private static void sendHello() {
         if (Minecraft.getInstance().hasSingleplayerServer() || !ServerCapabilities.lodSync() || !VoxyCommon.isAvailable()) return;
-        lastHelloNanos = System.nanoTime();
-        try { VoxyNetwork.sendToServer(new VoxyNetwork.HelloC2S(VoxyNetwork.PROTOCOL_VERSION)); }
-        catch (Exception e) { Logger.error("Voxy failed sending hello to server", e); }
+        var level = Minecraft.getInstance().level;
+        long now = System.nanoTime();
+        if (view.hello(ServerCapabilities.lodViewDistance(), level == null ? null : level.dimension().location().toString(),
+                VoxyConfig.CONFIG.getFarEntityRenderDistanceBlocks(), now, VoxyClientNetwork::sendControl)) lastHelloNanos = now;
+    }
+
+    private static boolean sendControl(net.minecraft.network.protocol.common.custom.CustomPacketPayload payload) {
+        try { VoxyNetwork.sendToServer(payload); return true; }
+        catch (Exception e) { Logger.error("Voxy failed sending view negotiation", e); return false; }
     }
 
     @SubscribeEvent public static void onLoggingOut(ClientPlayerNetworkEvent.LoggingOut event) {
         serverAuthoritative = false; lastHelloNanos = 0; generation++;
+        view.reset();
         sectionRequests.close();
         stopIngestion(ingestionOwner);
         sectionRequests = new LodSectionRequests();
@@ -108,11 +116,15 @@ public final class VoxyClientNetwork implements VoxyNetwork.ClientHandler {
         if (level == null || minecraft.hasSingleplayerServer() || !VoxyCommon.isAvailable()
                 || !VoxyConfig.CONFIG.enabled || !ServerCapabilities.lodSync()) return;
         long now = System.nanoTime();
+        view.update(level.dimension().location().toString(), VoxyConfig.CONFIG.getFarEntityRenderDistanceBlocks(),
+                now, VoxyClientNetwork::sendControl);
         if (!serverAuthoritative || ingestion == null || ingestion.needsMappings()) {
             if (now - lastHelloNanos >= LodSectionRequests.RETRY_NANOS) sendHello();
         }
-        if (serverAuthoritative && (ingestion == null || !ingestion.pressured()))
-            sectionRequests.pump(level.dimension().location().toString(), now, VoxyClientNetwork::sendSectionRequest);
+        if (serverAuthoritative && minecraft.player != null && (ingestion == null || !ingestion.pressured()))
+            sectionRequests.pump(level.dimension().location().toString(), now,
+                    request -> view.contains(request, minecraft.player.getX(), minecraft.player.getZ()),
+                    VoxyClientNetwork::sendSectionRequest);
     }
 
     private static boolean sendSectionRequest(LodSectionRequests.Request request) {
@@ -129,7 +141,15 @@ public final class VoxyClientNetwork implements VoxyNetwork.ClientHandler {
             Logger.warn("Voxy server uses incompatible protocol version: " + payload.version()); return;
         }
         serverAuthoritative = true;
+        view.acknowledge(false);
         Logger.info("Voxy server sync enabled, local ingest suspended");
+    }
+
+    @Override public void handleHelloV2(VoxyNetwork.HelloV2S2C payload) {
+        if (payload.version() != VoxyNetwork.VIEW_PROTOCOL_VERSION) return;
+        serverAuthoritative = true;
+        view.acknowledge(true);
+        Logger.info("Voxy V2 server sync enabled with client LoD view distance");
     }
 
     private static void acceptMapping(Object payload) {

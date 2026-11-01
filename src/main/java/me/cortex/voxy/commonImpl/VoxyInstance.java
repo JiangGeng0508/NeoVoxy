@@ -90,6 +90,8 @@ public abstract class VoxyInstance {
         return this.ingestService;
     }
 
+    public int getSavingTaskCount() { return this.savingService.getTaskCount(); }
+
     public ImportManager getImportManager() {
         return this.importManager;
     }

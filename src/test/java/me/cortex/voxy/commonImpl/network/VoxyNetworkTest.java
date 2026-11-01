@@ -21,6 +21,11 @@ import static org.junit.jupiter.api.Assertions.*;
 class VoxyNetworkTest {
     @SuppressWarnings("unchecked")
     private static List<NegotiableNetworkComponent> lodChannels() throws ReflectiveOperationException {
+        return lodChannels(true);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<NegotiableNetworkComponent> lodChannels(boolean v2) throws ReflectiveOperationException {
         var field = NetworkRegistry.class.getDeclaredField("PAYLOAD_REGISTRATIONS");
         field.setAccessible(true);
         var registrations = (Map<ConnectionProtocol, Map<ResourceLocation, PayloadRegistration<?>>>) field.get(null);
@@ -28,7 +33,10 @@ class VoxyNetworkTest {
         return List.of(VoxyNetwork.HelloC2S.TYPE, VoxyNetwork.HelloS2C.TYPE,
                         VoxyNetwork.SectionRequestC2S.TYPE, VoxyNetwork.SectionDataS2C.TYPE,
                         VoxyNetwork.BlockMapBatchS2C.TYPE, VoxyNetwork.BiomeMapBatchS2C.TYPE,
-                        VoxyNetwork.MappingDeltaS2C.TYPE).stream()
+                        VoxyNetwork.MappingDeltaS2C.TYPE, VoxyNetwork.HelloV2C2S.TYPE,
+                        VoxyNetwork.HelloV2S2C.TYPE, VoxyNetwork.ViewDistanceC2S.TYPE).stream()
+                .filter(type -> v2 || !List.of(VoxyNetwork.HelloV2C2S.TYPE,
+                        VoxyNetwork.HelloV2S2C.TYPE, VoxyNetwork.ViewDistanceC2S.TYPE).contains(type))
                 .map(type -> {
                     var registration = play.get(type.id());
                     assertNotNull(registration, type.id().toString());
@@ -51,7 +59,16 @@ class VoxyNetworkTest {
         var channels = lodChannels();
         var result = NetworkComponentNegotiator.negotiate(channels, channels);
         assertTrue(result.success());
-        assertEquals(7, result.components().size());
+        assertEquals(10, result.components().size());
+    }
+
+    @Test void oldClientAndOldServerBothNegotiateOnlyTheOriginalSevenChannels() throws Exception {
+        var old = lodChannels(false); var current = lodChannels();
+        for (var result : List.of(NetworkComponentNegotiator.negotiate(old, current),
+                NetworkComponentNegotiator.negotiate(current, old))) {
+            assertTrue(result.success());
+            assertEquals(7, result.components().size());
+        }
     }
 
     @Test
@@ -76,6 +93,7 @@ class VoxyNetworkTest {
             assertEquals(1, delivered.get());
             current.set(newConnection);
             VoxyNetwork.dispatchClient(oldConnection, h -> h.handleHello(new VoxyNetwork.HelloS2C(1)));
+            VoxyNetwork.dispatchClient(oldConnection, h -> h.handleHelloV2(new VoxyNetwork.HelloV2S2C(2)));
             VoxyNetwork.dispatchClient(oldConnection, h -> h.handleSectionData(
                     new VoxyNetwork.SectionDataS2C("minecraft:overworld", 0, 0, 0, 0, new byte[0])));
             assertEquals(1, delivered.get());
