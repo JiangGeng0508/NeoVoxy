@@ -98,7 +98,7 @@ public final class LittleTilesCompat {
         }
     }
 
-    private static boolean isLittleTilesState(BlockState state) {
+    public static boolean isLittleTilesState(BlockState state) {
         var id = BuiltInRegistries.BLOCK.getKey(state.getBlock());
         if (id == null || !"littletiles".equals(id.getNamespace())) return false;
         return switch (id.getPath()) {

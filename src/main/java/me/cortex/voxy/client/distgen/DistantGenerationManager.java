@@ -114,6 +114,7 @@ public class DistantGenerationManager {
                     instance.getSavingTaskCount(), pressure.owner() == instance ? pressure.mesh() : 0,
                     pressure.owner() == instance ? pressure.network() : 0,
                     pressure.owner() == instance ? pressure.meshMemory() : 0,
+                    instance.getIngestService().getStats().pressure(),
                     server.getAverageTickTimeNanos(), cfg.distantGenMaxMspt * 1_000_000L);
             ServerPlayer player = players.isEmpty() ? null : players.get(0);
             if (allowNewWork && player != null) {

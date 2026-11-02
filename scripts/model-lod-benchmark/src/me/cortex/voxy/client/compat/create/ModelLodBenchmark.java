@@ -50,6 +50,7 @@ public final class ModelLodBenchmark {
     private static boolean capturing;
     private static CreateMeshQueue.Stats asyncPipeline;
     private static long meshBudgetSamples, meshPeakNativeBytes, meshPeakHeapBytes, meshPeakEntries;
+    private static long ingestSamples, ingestPeakBytes, ingestCoalesced, ingestRefused, ingestOverTarget;
     private record CapturedSource(String name, DistantMesh mesh, long captureNanos) {}
     private static final List<CapturedSource> capturedSources = new ArrayList<>();
 
@@ -66,6 +67,18 @@ public final class ModelLodBenchmark {
         var mc = Minecraft.getInstance();
         if (++ticks > 12000 && !finished) throw new AssertionError("Model LOD benchmark timeout");
         if (mc.level != null && !finished) {
+            var instance = me.cortex.voxy.commonImpl.VoxyCommon.getInstance();
+            if (instance != null) {
+                var ingest = instance.getIngestService().getStats();
+                check(ingest.arrayBytes() >= 0 && ingest.compatibilityBytes() >= 0, "negative ingest payload bytes");
+                check(ingest.queued() >= 0 && ingest.running() >= 0 && ingest.running() <= ingest.keys()
+                        && ingest.queued() <= ingest.keys() && ingest.queued() + ingest.running() >= ingest.keys(), "ingest key ownership");
+                ingestSamples++;
+                ingestPeakBytes = Math.max(ingestPeakBytes, ingest.peakBytes());
+                ingestCoalesced = Math.max(ingestCoalesced, ingest.coalesced());
+                ingestRefused = Math.max(ingestRefused, ingest.refused());
+                ingestOverTarget = Math.max(ingestOverTarget, ingest.overTarget());
+            }
             var renderer = ((IGetVoxyRenderSystem)mc.levelRenderer).voxy$getRenderSystem();
             if (renderer != null) {
                 var stats = renderer.getMeshResultMemoryStats();
@@ -358,6 +371,9 @@ public final class ModelLodBenchmark {
         check(meshBudgetSamples > 0 && meshPeakEntries > 0, "mesh result budget was not exercised");
         report.put("meshResultBudget", Map.of("samples", meshBudgetSamples, "peakNativeBytes", meshPeakNativeBytes,
                 "peakHeapBytes", meshPeakHeapBytes, "peakEntries", meshPeakEntries));
+        check(ingestSamples > 0 && ingestPeakBytes > 0, "ingest queue was not exercised");
+        report.put("ingestQueue", Map.of("samples", ingestSamples, "peakAccountedBytes", ingestPeakBytes,
+                "coalesced", ingestCoalesced, "refused", ingestRefused, "overTarget", ingestOverTarget));
         report.put("scope", "Same captured Create geometry, full vs adaptive mesh policy in one binary; actual shader pipeline renders an offscreen scene during normal Minecraft frames. GPU timers cover scene draws. frameNs is RenderFrameEvent Pre/Post wall time including the scene and normal game rendering, excluding presentation/vsync. CPU payload excludes Java object overhead and is freed after upload; shared index/FBO/texture memory is common to both modes.");
         Files.writeString(Path.of("results.json"), new GsonBuilder().setPrettyPrinting().create().toJson(report));
         for (var fixture : fixtures) { fixture.full.free(); fixture.lod.free(); }

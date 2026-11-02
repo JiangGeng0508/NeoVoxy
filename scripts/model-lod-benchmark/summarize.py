@@ -23,6 +23,8 @@ def distribution(values, scale=1):
 
 
 def validate_profile(data, metadata, log, profile):
+    ingest = data["ingestQueue"]
+    require(ingest["samples"] > 0 and ingest["peakAccountedBytes"] > 0, f"{profile}: ingest queue not exercised")
     mesh = data["meshResultBudget"]
     require(mesh["samples"] > 0 and 0 < mesh["peakEntries"] <= 1024, f"{profile}: mesh results not exercised or over capacity")
     require(0 <= mesh["peakNativeBytes"] <= 64 * 1024 * 1024
@@ -82,7 +84,8 @@ def validate_profile(data, metadata, log, profile):
 def summarize(data):
     result = {"pipeline": data["pipeline"], "renderer": data["renderer"], "glVersion": data["glVersion"],
               "javaVersion": data["javaVersion"], "asyncPipeline": data["asyncPipeline"],
-              "meshResultBudget": data["meshResultBudget"], "modes": {}, "blocks": [], "bakes": []}
+              "meshResultBudget": data["meshResultBudget"], "ingestQueue": data["ingestQueue"],
+              "modes": {}, "blocks": [], "bakes": []}
     for mode in ("full", "lod"):
         rows = [row for row in data["frames"] if row["mode"] == mode]
         result["modes"][mode] = {"samples": len(rows),

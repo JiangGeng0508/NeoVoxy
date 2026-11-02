@@ -125,7 +125,7 @@ public class MixinRenderSectionManager {
                     var slp = lp.getLayerListener(LightLayer.SKY).getDataLayerData(csp);
 
                     //Note: we dont do this check and just blindly ingest, it shouldbe ok :tm:
-                        VoxelIngestService.rawIngest(system.getEngine(), chunk, section, x, y, z, blp == null ? null : blp.copy(), slp == null ? null : slp.copy());
+                        VoxelIngestService.rawIngest(system.getEngine(), chunk, section, x, y, z, blp, slp);
                 }
             }
         }

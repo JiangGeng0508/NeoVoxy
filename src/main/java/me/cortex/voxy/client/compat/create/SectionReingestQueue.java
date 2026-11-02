@@ -62,8 +62,7 @@ public final class SectionReingestQueue {
         }
     }
 
-    //Same recipe as the per-block trigger in MixinClientLevel: live section reference plus copied
-    //light layers, through the shared ingest pipeline.
+    // The shared ingest service captures private state, biome and light snapshots on this thread.
     private static void reingest(ClientLevel level, long sectionPos) {
         if (me.cortex.voxy.commonImpl.VoxyCommon.getInstance() == null
                 || !me.cortex.voxy.client.config.VoxyConfig.CONFIG.ingestEnabled) {
@@ -83,7 +82,7 @@ public final class SectionReingestQueue {
         var blp = lp.getLayerListener(LightLayer.BLOCK).getDataLayerData(csp);
         var slp = lp.getLayerListener(LightLayer.SKY).getDataLayerData(csp);
         me.cortex.voxy.common.world.service.VoxelIngestService.rawIngest(wi, levelChunk, section,
-                csp.x(), csp.y(), csp.z(), blp == null ? null : blp.copy(), slp == null ? null : slp.copy());
+                csp.x(), csp.y(), csp.z(), blp, slp);
     }
 
     public static void clear() {

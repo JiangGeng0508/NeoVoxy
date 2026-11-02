@@ -239,6 +239,7 @@ public abstract class VoxyInstance {
                 .map(world -> Integer.toString(world.getActiveSectionCount()))
                 .collect(Collectors.joining(", "));
         debug.add("I/S/AWSC: " + this.ingestService.getTaskCount() + "/" + this.savingService.getTaskCount() + "/[" + sectionCounts + "]");
+        this.ingestService.addDebug(debug);
     }
 
     private List<WorldEngine> snapshotWorlds() {

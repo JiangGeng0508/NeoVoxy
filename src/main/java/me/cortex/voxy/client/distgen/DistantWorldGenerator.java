@@ -337,7 +337,7 @@ public class DistantWorldGenerator {
             var bl = blockLight.getDataLayerData(spos);
             var sl = skyLight.getDataLayerData(spos);
             if (!VoxelIngestService.rawIngest(this.worldId, section, cx, sy, cz,
-                    bl == null ? null : bl.copy(), sl == null ? null : sl.copy(), batch)) {
+                    bl, sl, batch)) {
                 //Partial ingestion would leave the chunk marked done with missing sections,
                 // so require every section to go through before considering it complete.
                 allIngested = false;

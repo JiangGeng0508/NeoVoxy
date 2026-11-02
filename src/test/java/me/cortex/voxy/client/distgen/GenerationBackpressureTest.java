@@ -41,4 +41,12 @@ class GenerationBackpressureTest {
         assertTrue(gate.allow(0, 0, 0, 0.49, 0.49, 0, MAX));
         assertTrue(gate.allow(0, 0, 0, 0, 0.75, 0, MAX));
     }
+
+    @Test void ingestPayloadBytesPauseAndRequireRecoveryEvenWithFewTasks() {
+        var gate = new GenerationBackpressure();
+        assertFalse(gate.allow(1, 0, 0, 0, 0, 0.751, 0, MAX));
+        assertFalse(gate.allow(0, 0, 0, 0, 0, 0.50, 0, MAX));
+        assertFalse(gate.allow(0, 0, 0, 0, 0.50, 0.49, 0, MAX));
+        assertTrue(gate.allow(0, 0, 0, 0, 0.49, 0.49, 0, MAX));
+    }
 }

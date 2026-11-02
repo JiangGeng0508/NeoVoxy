@@ -92,7 +92,7 @@ public abstract class MixinClientLevel {
                 var blp = lp.getLayerListener(LightLayer.BLOCK).getDataLayerData(csp);
                 var slp = lp.getLayerListener(LightLayer.SKY).getDataLayerData(csp);
 
-                VoxelIngestService.rawIngest(wi, levelChunk, section, csp.x(), csp.y(), csp.z(), blp == null ? null : blp.copy(), slp == null ? null : slp.copy());
+                VoxelIngestService.rawIngest(wi, levelChunk, section, csp.x(), csp.y(), csp.z(), blp, slp);
             }
         }
     }
