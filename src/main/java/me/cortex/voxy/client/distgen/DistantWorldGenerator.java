@@ -23,6 +23,7 @@ import net.minecraft.world.level.chunk.status.ChunkStatus;
 import java.nio.file.Path;
 import java.util.Comparator;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.Consumer;
 
 /**
  * Background distant chunk generator for a single ServerLevel (integrated server only).
@@ -350,13 +351,7 @@ public class DistantWorldGenerator {
 
     /** Release all in-flight tickets and persist the bitmap. Called on disable/world shutdown. */
     public void shutdown() {
-        var it = this.inFlight.long2ObjectEntrySet().fastIterator();
-        while (it.hasNext()) {
-            var entry = it.next();
-            it.remove();
-            var cp = new ChunkPos(ChunkPos.getX(entry.getLongKey()), ChunkPos.getZ(entry.getLongKey()));
-            this.chunkSource().distanceManager.removeTicket(TICKET, cp, TICKET_LEVEL, cp);
-        }
+        releaseInFlightTickets(this.inFlight, this::releaseTicket);
         this.pending.clear();
         this.currentRadius = -1;
         this.lightRetries.clear();
@@ -364,6 +359,17 @@ public class DistantWorldGenerator {
             this.submitted.clear();
         }
         this.doneMap.saveIfDirty();
+    }
+
+    static void releaseInFlightTickets(Long2ObjectOpenHashMap<?> tasks, Consumer<ChunkPos> release) {
+        var it = tasks.long2ObjectEntrySet().fastIterator();
+        while (it.hasNext()) {
+            // Fast entries point into the backing table; remove() can shift another key
+            // into that slot. Capture and release the original ticket before removing it.
+            long pos = it.next().getLongKey();
+            release.accept(new ChunkPos(pos));
+            it.remove();
+        }
     }
 
     public void saveIfDirty() {

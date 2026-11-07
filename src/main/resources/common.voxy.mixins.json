@@ -9,6 +9,7 @@
   "mixins": [
     "minecraft.AccessorPalettedContainerData",
     "minecraft.AccessorPalettedContainer",
+    "minecraft.MixinChunkMap",
     "minecraft.MixinWorld"
   ],
   "overwrites": {

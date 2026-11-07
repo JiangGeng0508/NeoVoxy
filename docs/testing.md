@@ -2,6 +2,9 @@
 
 帧计时、GPU 查询及会话隔离的回归与采样口径见 [帧采样说明](frame-capture.md)。
 
+后台生成退出的票据释放、卸载回调让出回归及实机故障注入见 [后台生成停机说明](distant-generation-shutdown.md)；
+可复跑的 Sodium／Iris 开启生成夹具见 [运行说明](../scripts/distant-gen-smoke/README.md)。
+
 PingWheel 的 CPU 射线和请求代数回归随标准构建执行；真实 Mixin、集成服发包和可选依赖启动
 见 [PingWheel 隔离验收](../scripts/pingwheel-smoke/README.md)。功能说明见 [PingWheel 兼容](pingwheel.md)。
 
