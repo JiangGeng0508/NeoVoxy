@@ -15,7 +15,6 @@ import me.cortex.voxy.client.core.rendering.util.DownloadStream;
 import me.cortex.voxy.client.core.rendering.util.PrintfDebugUtil;
 import me.cortex.voxy.client.core.rendering.util.UploadStream;
 import me.cortex.voxy.common.Logger;
-import me.cortex.voxy.common.util.MemoryBuffer;
 import me.cortex.voxy.common.world.WorldEngine;
 import net.minecraft.client.Minecraft;
 import org.lwjgl.system.MemoryUtil;
@@ -362,32 +361,44 @@ public class HierarchicalOcclusionTraverser {
 
 
     private void downloadResetRequestQueue() {
+        var batch = this.nodeManager.reserveRequestBatch(this.requestBuffer.size());
+        // Leave the bounded GPU queue intact. Traversal cannot append past its limit, and the
+        // retained requests will be downloaded when CPU capacity returns.
+        if (batch == null) return;
         glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
-        DownloadStream.INSTANCE.download(this.requestBuffer, this::forwardDownloadResult);
+        try {
+            DownloadStream.INSTANCE.download(this.requestBuffer, (ptr, size) -> this.forwardDownloadResult(batch, ptr, size));
+        } catch (RuntimeException | Error failure) {
+            batch.close();
+            throw failure;
+        }
         nglClearNamedBufferSubData(this.requestBuffer.id, GL_R32UI, 0, 4, GL_RED_INTEGER, GL_UNSIGNED_INT, 0);
     }
 
-    private void forwardDownloadResult(long ptr, long size) {
-        int count = MemoryUtil.memGetInt(ptr);ptr += 8;//its 8 since we need to skip the second value (which is empty)
-        if (count < 0 || count > 50000) {
-            Logger.error(new IllegalStateException("Count unexpected extreme value: " + count + " things may get weird"));
-            return;
-        }
-        if (count > (this.requestBuffer.size()>>3)-1) {
-            //This should not break the synchonization between gpu and cpu as in the traversal shader is
-            // `if (atomRes < REQUEST_QUEUE_SIZE) {` which forcefully clamps to the request size
+    private void forwardDownloadResult(NodeBatchQueue.Batch batch, long ptr, long size) {
+        boolean published = false;
+        try {
+            if (size < 8) throw new IllegalStateException("Truncated node request header");
+            int count = MemoryUtil.memGetInt(ptr);ptr += 8;//its 8 since we need to skip the second value (which is empty)
+            if (count < 0 || count > 50000) {
+                Logger.error(new IllegalStateException("Count unexpected extreme value: " + count + " things may get weird"));
+                return;
+            }
+            if (count > (this.requestBuffer.size()>>3)-1) {
+                //This should not break the synchonization between gpu and cpu as in the traversal shader is
+                // `if (atomRes < REQUEST_QUEUE_SIZE) {` which forcefully clamps to the request size
 
 
-            count = (int) ((this.requestBuffer.size()>>3)-1);
+                count = (int) ((this.requestBuffer.size()>>3)-1);
 
-        }
-        if (count != 0) {
-            var buffer = new MemoryBuffer(count*8L+8).cpyFrom(ptr-8);
-            // Never mutate the mapped download stream: it can still be owned by the GPU. Put the
-            // clamped count in the independent request batch instead.
-            MemoryUtil.memPutInt(buffer.address, count);
-            this.nodeManager.submitRequestBatch(buffer);// the -8 is because we incremented it by 8
-        }
+            }
+            if (count != 0) {
+                if (count * 8L + 8 > size) throw new IllegalStateException("Truncated node requests");
+                // Never mutate the mapped download stream: it can still be owned by the GPU. Put the
+                // clamped count in the independent request batch instead.
+                published = batch.publish(ptr - 8, count * 8L + 8, count);
+            }
+        } finally { if (!published) batch.close(); }
     }
 
     public GlBuffer getNodeBuffer() {

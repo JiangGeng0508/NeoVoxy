@@ -33,21 +33,22 @@ import java.util.concurrent.ConcurrentHashMap;
 public class DistantGenerationManager {
     private static final int BITMAP_SAVE_INTERVAL_TICKS = 20*60;//60 seconds
     private static final GenerationBackpressure BACKPRESSURE = new GenerationBackpressure();
-    private record Downstream(VoxyClientInstance owner, int mesh, double network, double meshMemory) {}
-    private static volatile Downstream downstream = new Downstream(null, 0, 0, 0);
+    private record Downstream(VoxyClientInstance owner, int mesh, double network, double meshMemory, double nodeQueues) {}
+    private static volatile Downstream downstream = new Downstream(null, 0, 0, 0, 0);
     private static VoxyClientInstance generationOwner;
 
     @SubscribeEvent
     public static void onClientTick(ClientTickEvent.Post event) {
         if (!(VoxyCommon.getInstance() instanceof VoxyClientInstance instance)) {
-            downstream = new Downstream(null, 0, 0, 0);
+            downstream = new Downstream(null, 0, 0, 0, 0);
             return;
         }
         // Resolve the renderer on its owning client thread; the server reads only immutable counts.
         var renderer = IGetVoxyRenderSystem.getNullable();
         var network = VoxyClientNetwork.ingestionStats();
         downstream = new Downstream(instance, renderer == null ? 0 : renderer.getPendingMeshCount(),
-                network == null ? 0 : network.pressure(), renderer == null ? 0 : renderer.getMeshResultPressure());
+                network == null ? 0 : network.pressure(), renderer == null ? 0 : renderer.getMeshResultPressure(),
+                renderer == null ? 0 : renderer.getNodeQueuePressure());
     }
 
     //ConcurrentHashMap only because the client command thread reads it for /voxy distantgen status;
@@ -115,6 +116,7 @@ public class DistantGenerationManager {
                     pressure.owner() == instance ? pressure.network() : 0,
                     pressure.owner() == instance ? pressure.meshMemory() : 0,
                     instance.getIngestService().getStats().pressure(),
+                    pressure.owner() == instance ? pressure.nodeQueues() : 0,
                     server.getAverageTickTimeNanos(), cfg.distantGenMaxMspt * 1_000_000L);
             ServerPlayer player = players.isEmpty() ? null : players.get(0);
             if (allowNewWork && player != null) {

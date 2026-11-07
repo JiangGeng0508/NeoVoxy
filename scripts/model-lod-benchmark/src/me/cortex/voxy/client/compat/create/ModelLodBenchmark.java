@@ -51,6 +51,7 @@ public final class ModelLodBenchmark {
     private static CreateMeshQueue.Stats asyncPipeline;
     private static long meshBudgetSamples, meshPeakNativeBytes, meshPeakHeapBytes, meshPeakEntries;
     private static long ingestSamples, ingestPeakBytes, ingestCoalesced, ingestRefused, ingestOverTarget;
+    private static long nodeSamples, nodePeakRequestBytes, nodePeakRemovalBytes, nodePeakChildArrays, nodePeakChildPending, nodeDeferred;
     private record CapturedSource(String name, DistantMesh mesh, long captureNanos) {}
     private static final List<CapturedSource> capturedSources = new ArrayList<>();
 
@@ -89,6 +90,19 @@ public final class ModelLodBenchmark {
                 meshPeakNativeBytes = Math.max(meshPeakNativeBytes, stats.nativeBytes());
                 meshPeakHeapBytes = Math.max(meshPeakHeapBytes, stats.heapBytes());
                 meshPeakEntries = Math.max(meshPeakEntries, stats.entries());
+                var nodes = renderer.getNodeQueueStats();
+                check(nodes.requestReservedBytes() >= 0 && nodes.requestReservedBytes() <= 16 * 1024, "node request budget");
+                check(nodes.removalReservedBytes() >= 0 && nodes.removalReservedBytes() <= 128 * 1024, "node removal budget");
+                check(nodes.nativeBytes() >= 0 && nodes.nativeBytes() <= nodes.requestReservedBytes() + nodes.removalReservedBytes(), "node actual bytes");
+                check(nodes.requestEntries() >= 0 && nodes.requestEntries() <= 64
+                        && nodes.removalEntries() >= 0 && nodes.removalEntries() <= 64, "node batch entries");
+                check(nodes.children().pending() >= 0 && nodes.children().pending() <= nodes.children().watches(), "child notification ownership");
+                nodeSamples++;
+                nodePeakRequestBytes = Math.max(nodePeakRequestBytes, nodes.requestReservedBytes());
+                nodePeakRemovalBytes = Math.max(nodePeakRemovalBytes, nodes.removalReservedBytes());
+                nodePeakChildArrays = Math.max(nodePeakChildArrays, nodes.children().heapArrayBytes());
+                nodePeakChildPending = Math.max(nodePeakChildPending, nodes.children().pending());
+                nodeDeferred = Math.max(nodeDeferred, nodes.deferred());
             }
         }
         if (mc.level == null || mc.player == null || ready || finished) return;
@@ -374,6 +388,10 @@ public final class ModelLodBenchmark {
         check(ingestSamples > 0 && ingestPeakBytes > 0, "ingest queue was not exercised");
         report.put("ingestQueue", Map.of("samples", ingestSamples, "peakAccountedBytes", ingestPeakBytes,
                 "coalesced", ingestCoalesced, "refused", ingestRefused, "overTarget", ingestOverTarget));
+        check(nodeSamples > 0 && nodePeakRequestBytes > 0 && nodePeakChildArrays > 0, "node queues were not exercised");
+        report.put("nodeQueues", Map.of("samples", nodeSamples, "peakRequestReservedBytes", nodePeakRequestBytes,
+                "peakRemovalReservedBytes", nodePeakRemovalBytes, "peakChildHeapArrays", nodePeakChildArrays,
+                "peakChildPending", nodePeakChildPending, "deferred", nodeDeferred));
         report.put("scope", "Same captured Create geometry, full vs adaptive mesh policy in one binary; actual shader pipeline renders an offscreen scene during normal Minecraft frames. GPU timers cover scene draws. frameNs is RenderFrameEvent Pre/Post wall time including the scene and normal game rendering, excluding presentation/vsync. CPU payload excludes Java object overhead and is freed after upload; shared index/FBO/texture memory is common to both modes.");
         Files.writeString(Path.of("results.json"), new GsonBuilder().setPrettyPrinting().create().toJson(report));
         for (var fixture : fixtures) { fixture.full.free(); fixture.lod.free(); }

@@ -61,6 +61,7 @@ public class AsyncNodeManager {
     private final long geometryCapacity;
     private volatile boolean running = true;
     private volatile Throwable uncaughtException;
+    private boolean stopped;
 
     private final NodeManager manager;
     private final BasicAsyncGeometryManager geometryManager;
@@ -109,7 +110,8 @@ public class AsyncNodeManager {
         this.geometryManager = new BasicAsyncGeometryManager(((BasicSectionGeometryData)geometryData).getMaxSectionCount(), this.geometryCapacity);
 
         this.router = new SectionUpdateRouter();
-        this.router.setCallbacks(renderService::enqueueTask, renderService::enqueueTask, this::submitChildChange);
+        this.router.bufferChildUpdates(() -> LockSupport.unpark(this.thread));
+        this.router.setCallbacks(renderService::enqueueTask, renderService::enqueueTask, null);
         renderService.setResultConsumer(this::submitGeometryResult);
 
         this.manager = new NodeManager(maxNodeCount, this.geometryManager, this.router);
@@ -176,9 +178,9 @@ public class AsyncNodeManager {
             .compile();
 
     private void run() {
-        if (this.workCounter.get() <= 0) {
+        if (this.workCounter.get() <= 0 && !this.router.hasPendingChildren()) {
             LockSupport.park();
-            if (this.workCounter.get() <= 0 || !this.running) {//No work
+            if ((this.workCounter.get() <= 0 && !this.router.hasPendingChildren()) || !this.running) {//No work
                 return;
             }
             try {
@@ -230,14 +232,7 @@ public class AsyncNodeManager {
             workDone += work;
         }
 
-        do {
-            var job = this.childUpdateQueue.poll();
-            if (job == null)
-                break;
-            workDone++;
-            this.manager.processChildChange(job.key, job.getNonEmptyChildren());
-            job.release();
-        } while (true);
+        int childWork = this.router.drainChildUpdates(this.manager::processChildChange, 4096);
 
 
         //Limit uploading as well as by geometry capacity being available
@@ -256,50 +251,55 @@ public class AsyncNodeManager {
             }
         }
 
-        while (true) {//Process all request batches
+        for (int batches = 0; batches < 64; batches++) {
             var job = this.requestBatchQueue.poll();
             if (job == null)
                 break;
             workDone++;
-            long ptr = job.address;
-            int count = MemoryUtil.memGetInt(ptr);
-            ptr += 8;//Its 8 to keep alignment
-            if (job.size < count * 8L + 8) {
-                throw new IllegalStateException();
-            }
-            for (int i = 0; i < count; i++) {
-                long pos = ((long) MemoryUtil.memGetInt(ptr)) << 32; ptr += 4;
-                pos |= Integer.toUnsignedLong(MemoryUtil.memGetInt(ptr)); ptr += 4;
-                this.manager.processRequest(pos);
-            }
-            job.free();
+            try {
+                var buffer = job.buffer();
+                long ptr = buffer.address;
+                int count = MemoryUtil.memGetInt(ptr);
+                ptr += 8;//Its 8 to keep alignment
+                if (count < 0 || buffer.size < count * 8L + 8) {
+                    throw new IllegalStateException();
+                }
+                for (int i = 0; i < count; i++) {
+                    long pos = ((long) MemoryUtil.memGetInt(ptr)) << 32; ptr += 4;
+                    pos |= Integer.toUnsignedLong(MemoryUtil.memGetInt(ptr)); ptr += 4;
+                    this.manager.processRequest(pos);
+                }
+            } finally { job.close(); }
         }
 
 
-        do {
+        for (int batches = 0; batches < 64; batches++) {
             var job = this.removeBatchQueue.poll();
             if (job == null)
                 break;
             workDone++;
-            long ptr = job.address;
-            int zeroCount = 0;
-            for (int i = 0; i < NodeCleaner.OUTPUT_COUNT; i++) {
-                long pos = ((long) MemoryUtil.memGetInt(ptr)) << 32; ptr += 4;
-                pos |= Integer.toUnsignedLong(MemoryUtil.memGetInt(ptr)); ptr += 4;
+            try {
+                var buffer = job.buffer();
+                if (buffer.size != NodeCleaner.OUTPUT_COUNT * 8L) throw new IllegalStateException("Invalid removal batch");
+                long ptr = buffer.address;
+                int zeroCount = 0;
+                for (int i = 0; i < NodeCleaner.OUTPUT_COUNT; i++) {
+                    long pos = ((long) MemoryUtil.memGetInt(ptr)) << 32; ptr += 4;
+                    pos |= Integer.toUnsignedLong(MemoryUtil.memGetInt(ptr)); ptr += 4;
 
-                if (pos == -1) {
-                    continue;
+                    if (pos == -1) {
+                        continue;
+                    }
+
+                    if (pos == 0 && zeroCount++>0) {
+                        Logger.error("Remove node pos is 0 " + zeroCount + " times, this is really bad, please report" );
+                        continue;
+                    }
+
+                    this.manager.removeNodeGeometry(pos);
                 }
-
-                if (pos == 0 && zeroCount++>0) {
-                    Logger.error("Remove node pos is 0 " + zeroCount + " times, this is really bad, please report" );
-                    continue;
-                }
-
-                this.manager.removeNodeGeometry(pos);
-            }
-            job.free();
-        } while (true);
+            } finally { job.close(); }
+        }
 
         if (this.workCounter.addAndGet(-workDone) < 0) {
             try {
@@ -313,7 +313,7 @@ public class AsyncNodeManager {
             }
         }
 
-        if (workDone == 0) {//Nothing happened, which is odd, but just return
+        if (workDone == 0 && childWork == 0) {
             //Should probably log that nothing happened, at least once
             return;
         }
@@ -592,11 +592,10 @@ public class AsyncNodeManager {
     //==================================================================================================================
     //Incoming events
 
-    private final ConcurrentLinkedDeque<MemoryBuffer> requestBatchQueue = new ConcurrentLinkedDeque<>();
-    private final ConcurrentLinkedDeque<WorldSection> childUpdateQueue = new ConcurrentLinkedDeque<>();
+    private final NodeBatchQueue requestBatchQueue = new NodeBatchQueue(16L << 10, 64, this::addWork);
     private final ConcurrentLinkedDeque<BuiltSection> geometryUpdateQueue = new ConcurrentLinkedDeque<>();
 
-    private final ConcurrentLinkedDeque<MemoryBuffer> removeBatchQueue = new ConcurrentLinkedDeque<>();
+    private final NodeBatchQueue removeBatchQueue = new NodeBatchQueue(128L << 10, 64, this::addWork);
 
     private final StampedLock tlnLock = new StampedLock();
     private final LongOpenHashSet tlnAdd = new LongOpenHashSet();
@@ -614,19 +613,8 @@ public class AsyncNodeManager {
         }
     }
 
-    public void submitRequestBatch(MemoryBuffer batch) {//Only called from render thread
-        this.requestBatchQueue.add(batch);
-        this.addWork();
-    }
-
-    private void submitChildChange(WorldSection section) {
-        if (!this.running) {
-            return;
-        }
-        section.acquire();//We must acquire the section before putting in the queue
-        this.childUpdateQueue.add(section);
-        this.addWork();
-    }
+    NodeBatchQueue.Batch reserveRequestBatch(long bytes) { return this.requestBatchQueue.reserve(bytes); }
+    NodeBatchQueue.Batch reserveRemoveBatch(long bytes) { return this.removeBatchQueue.reserve(bytes); }
 
     private void submitGeometryResult(BuiltSection geometry) {
         synchronized (this.geometryUpdateQueue) {
@@ -637,11 +625,6 @@ public class AsyncNodeManager {
             this.geometryUpdateQueue.add(geometry);
             this.addWork();
         }
-    }
-
-    public void submitRemoveBatch(MemoryBuffer batch) {//Only called from render thread
-        this.removeBatchQueue.add(batch);
-        this.addWork();
     }
 
     public void addTopLevel(long section) {//Only called from render thread
@@ -685,12 +668,12 @@ public class AsyncNodeManager {
     }
 
     public void stop() {
-        if (!this.running) {
-            throw new IllegalStateException();
-        }
+        if (this.stopped) return;
+        this.stopped = true;
         synchronized (this.geometryUpdateQueue) {
             this.running = false;
         }
+        this.router.closeChildUpdates();
         LockSupport.unpark(this.thread);
         try {
             while (this.thread.isAlive()) {
@@ -701,17 +684,8 @@ public class AsyncNodeManager {
             throw new RuntimeException(e);
         }
 
-        while (true) {
-            var buffer = this.requestBatchQueue.poll();
-            if (buffer == null) break;
-            buffer.free();
-        }
-
-        while (true) {
-            var buffer = this.removeBatchQueue.poll();
-            if (buffer == null) break;
-            buffer.free();
-        }
+        this.requestBatchQueue.close();
+        this.removeBatchQueue.close();
 
         while (true) {
             var buffer = this.geometryUpdateQueue.poll();
@@ -719,12 +693,6 @@ public class AsyncNodeManager {
             buffer.free();
         }
         this.geometryManager.freePendingUploads();
-
-        while (true) {
-            var section = this.childUpdateQueue.poll();
-            if (section == null) break;
-            section.release();
-        }
 
         if (RESULT_HANDLE.get(this) != null) {
             var result = (SyncResults)RESULT_HANDLE.getAndSet(this, null);
@@ -748,6 +716,25 @@ public class AsyncNodeManager {
     public void addDebug(List<String> debug) {
         debug.add("GPU geometry used/capacity MiB, sections: " + (this.getUsedGeometryCapacity()/(1<<20))+"/"+(this.getGeometryCapacity()/(1<<20)) + "," + (this.geometryData.getSectionCount()));
         debug.add("Node sync native capacity KiB: " + (this.getSyncNativeBytes() >> 10));
+        var s = this.getQueueStats();
+        debug.add("Node request/removal native reserved/limit KiB: " + (s.requestReservedBytes() >> 10) + "/16, "
+                + (s.removalReservedBytes() >> 10) + "/128; actual " + (s.nativeBytes() >> 10));
+        debug.add("Node batches request/removal, deferred: " + s.requestEntries() + "/" + s.removalEntries() + ", " + s.deferred());
+        debug.add("Node child pending/watches/coalesced: " + s.children().pending() + "/" + s.children().watches() + "/" + s.children().coalesced());
+        debug.add("Node child heap arrays/scratch KiB: " + (s.children().heapArrayBytes() >> 10) + "/" + (s.children().scratchBytes() >> 10));
+    }
+
+    public record QueueStats(long nativeBytes, long requestReservedBytes, long removalReservedBytes,
+                             int requestEntries, int removalEntries, long deferred,
+                             SectionUpdateRouter.ChildStats children, double pressure) {}
+
+    public QueueStats getQueueStats() {
+        var requests = this.requestBatchQueue.stats();
+        var removals = this.removeBatchQueue.stats();
+        var children = this.router.childStats();
+        return new QueueStats(requests.nativeBytes() + removals.nativeBytes(), requests.reservedBytes(), removals.reservedBytes(),
+                requests.entries(), removals.entries(), requests.refused() + removals.refused(), children,
+                Math.max(children.pressure(), Math.max(requests.pressure(), removals.pressure())));
     }
 
     public long getSyncNativeBytes() {
@@ -757,7 +744,7 @@ public class AsyncNodeManager {
     }
 
     public boolean hasWork() {
-        return this.workCounter.get()!=0 || RESULT_HANDLE.get(this) != null;
+        return this.workCounter.get()!=0 || this.router.hasPendingChildren() || RESULT_HANDLE.get(this) != null;
     }
 
     public void worldEvent(WorldSection section, int flags, int neighborMask) {

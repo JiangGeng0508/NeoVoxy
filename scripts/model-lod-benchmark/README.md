@@ -2,6 +2,10 @@ This benchmark compares the full-mesh submission policy used before dedicated mo
 
 Before timed frames, `SectionSnapshotCheck` meshes air, stone, glass, water and Create casing using both uniform and expanded storage. It compares geometry bytes, offsets, bounds and child metadata, and verifies that model substitutions do not modify either source. Both builds pin the same 26 neighbouring sections so a first-read storage miss cannot change lighting between the pair. Completion requires `SECTION_SNAPSHOT_PASS cases=5`. This checks real model integration, not seasonal visual appearance or historical-binary performance.
 
+Each client tick also checks node request/removal readback reservations (16 KiB/128 KiB, at most 64 batches each), actual native copy bytes, and coalesced child notifications against registered watches. `nodeQueues` records sampled maxima; a sampled zero for removals or deferrals means that path was not observed in this scene. CPU tests separately cover capacity rejection, recovery and shutdown races.
+
+The init script writes a fresh Voxy config with background generation disabled, matching the historical local fixture and preventing unrelated terrain generation from changing the workload. Production defaults are unchanged. The summarizer requires this metadata, renderer shutdown and a successful process exit; a forced stop never counts as a passing run. Background-generation shutdown is a separate game acceptance scenario.
+
 Run from the repository root with Java 21 and an existing Minecraft 1.21.1 world:
 
 ```powershell

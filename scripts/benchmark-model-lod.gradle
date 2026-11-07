@@ -39,6 +39,9 @@ allprojects {
                 copy { from configurations.createOuter.singleFile; into new File(dir, 'mods') }
                 new File(dir, 'options.txt').text = 'renderDistance:4\nsimulationDistance:5\nmaxFps:260\nenableVsync:false\npauseOnLostFocus:false\nfov:0.5\n'
                 new File(dir, 'config').mkdirs()
+                // Pin the workload even in a fresh report directory. The historic fixture had
+                // this disabled, while the production default intentionally remains enabled.
+                new File(dir, 'config/voxy-config.json').text = groovy.json.JsonOutput.toJson([distant_gen_enabled: false])
                 if (shaders) {
                     copy { from configurations.benchmarkIris.singleFile; into new File(dir, 'mods') }
                     copy { from shaderPack; into new File(dir, 'shaderpacks') }
@@ -49,7 +52,7 @@ allprojects {
                 new File(dir, 'source-world.json').text = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson([
                     source: world.absolutePath,
                     levelDatSha256: digest.digest(new File(world, 'level.dat').bytes).encodeHex().toString(),
-                    shaders: shaders, resolution: [1920, 1080], renderDistance: 4,
+                    shaders: shaders, resolution: [1920, 1080], renderDistance: 4, distantGeneration: false,
                     minecraft: minecraft_version, neoforge: neo_version, sodium: sodium_version,
                     iris: shaders ? iris_version : null, create: '6.0.10',
                     shaderPack: shaders ? shaderPack.name : null,

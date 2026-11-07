@@ -6,6 +6,15 @@ import static org.junit.jupiter.api.Assertions.*;
 class GenerationBackpressureTest {
     private static final long MAX = 45_000_000;
 
+    @Test void nodeQueuesPauseGenerationUntilEveryDownstreamRecovers() {
+        var gate = new GenerationBackpressure();
+        assertTrue(gate.allow(0, 0, 0, 0, 0, 0, 0.75, 0, MAX));
+        assertFalse(gate.allow(0, 0, 0, 0, 0, 0, 0.751, 0, MAX));
+        assertFalse(gate.allow(0, 0, 0, 0, 0, 0, 0.50, 0, MAX));
+        assertFalse(gate.allow(0, 0, 0, 0, 0.50, 0, 0.49, 0, MAX));
+        assertTrue(gate.allow(0, 0, 0, 0, 0.49, 0, 0.49, 0, MAX));
+    }
+
     @Test void eachDownstreamPausesAboveThreeQuartersAndAllMustRecoverBelowHalf() {
         int[][] triggers = {{1501, 0, 0}, {0, 901, 0}, {0, 0, 1501}};
         for (int[] counts : triggers) {

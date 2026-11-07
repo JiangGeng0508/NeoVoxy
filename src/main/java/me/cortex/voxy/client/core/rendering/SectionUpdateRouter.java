@@ -25,6 +25,19 @@ public class SectionUpdateRouter implements ISectionWatcher {
     private LongConsumer initialRenderMeshGen;
     private LongConsumer renderMeshGen;
     private IChildUpdate childUpdateCallback;
+    private ChildUpdateMailbox childMailbox;
+
+    /** Configure before publishing the router; the node worker is the sole drain consumer. */
+    public void bufferChildUpdates(Runnable wakeup) { this.childMailbox = new ChildUpdateMailbox(wakeup); }
+    @FunctionalInterface public interface ChildConsumer { void accept(long position, byte children); }
+    public int drainChildUpdates(ChildConsumer consumer, int scanLimit) { return this.childMailbox.drain(consumer, scanLimit); }
+    public boolean hasPendingChildren() { return this.childMailbox != null && this.childMailbox.hasPending(); }
+    public record ChildStats(int watches, int pending, long coalesced, long heapArrayBytes, long scratchBytes) {
+        // Admission target for new generation; all existing watches can still receive updates.
+        public double pressure() { return (double) pending / 8192; }
+    }
+    public ChildStats childStats() { return this.childMailbox.stats(); }
+    public void closeChildUpdates() { this.childMailbox.close(); }
 
     public void setCallbacks(LongConsumer initialRenderMeshGen, LongConsumer renderMeshGen, IChildUpdate childUpdateCallback) {
         if (this.renderMeshGen != null) {
@@ -67,6 +80,9 @@ public class SectionUpdateRouter implements ISectionWatcher {
                     set.put(position, current);
                 }
             }
+            if (this.childMailbox != null && (current & WorldEngine.UPDATE_TYPE_CHILD_EXISTENCE_BIT) != 0) {
+                this.childMailbox.watch(position);
+            }
             lock.unlock(stamp);
         }
         if (((delta&types)&UPDATE_TYPE_BLOCK_BIT)!=0) {
@@ -89,6 +105,7 @@ public class SectionUpdateRouter implements ISectionWatcher {
 
         byte current = set.getOrDefault(position, (byte)0);
         if (current == 0) {
+            lock.unlockRead(stamp);
             throw new IllegalStateException("Section pos not in map " + WorldEngine.pprintPos(position));
         }
         boolean removed = false;
@@ -100,6 +117,7 @@ public class SectionUpdateRouter implements ISectionWatcher {
 
                 current = set.getOrDefault(position, (byte)0);
                 if (current == 0) {
+                    lock.unlockWrite(stamp);
                     throw new IllegalStateException("Section pos not in map " + WorldEngine.pprintPos(position));
                 }
             } else {
@@ -115,6 +133,9 @@ public class SectionUpdateRouter implements ISectionWatcher {
                     set.put(position, current);
                 }
             }
+        }
+        if (this.childMailbox != null && (current & WorldEngine.UPDATE_TYPE_CHILD_EXISTENCE_BIT) == 0) {
+            this.childMailbox.unwatch(position);
         }
         lock.unlock(stamp);
         return removed;
@@ -143,7 +164,8 @@ public class SectionUpdateRouter implements ISectionWatcher {
 
         if (types!=0) {
             if ((types&WorldEngine.UPDATE_TYPE_CHILD_EXISTENCE_BIT)!=0) {
-                this.childUpdateCallback.accept(section);
+                if (this.childMailbox != null) this.childMailbox.offer(section);
+                else this.childUpdateCallback.accept(section);
             }
             if ((types&UPDATE_TYPE_BLOCK_BIT)!=0) {
                 this.renderMeshGen.accept(section.key);

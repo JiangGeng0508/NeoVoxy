@@ -18,8 +18,13 @@ final class GenerationBackpressure {
 
     boolean allow(int ingest, int save, int mesh, double network, double meshMemory, double ingestMemory,
                   long tickNanos, long maxTickNanos) {
-        double pressure = Math.max(Math.max(ingestMemory, Math.max(network, meshMemory)), Math.max((double) ingest / INGEST_TASKS,
-                Math.max((double) save / SAVE_TASKS, (double) mesh / MESH_TASKS)));
+        return allow(ingest, save, mesh, network, meshMemory, ingestMemory, 0, tickNanos, maxTickNanos);
+    }
+
+    boolean allow(int ingest, int save, int mesh, double network, double meshMemory, double ingestMemory,
+                  double nodeQueues, long tickNanos, long maxTickNanos) {
+        double pressure = Math.max(nodeQueues, Math.max(Math.max(ingestMemory, Math.max(network, meshMemory)), Math.max((double) ingest / INGEST_TASKS,
+                Math.max((double) save / SAVE_TASKS, (double) mesh / MESH_TASKS))));
         if (this.paused) {
             // MSPT keeps its configured ceiling and gets a 10% recovery margin.
             if (pressure < 0.50 && tickNanos < maxTickNanos * 0.90) this.paused = false;

@@ -78,29 +78,41 @@ public class NodeCleaner {
     public void tick(GlBuffer nodeDataBuffer) {
         this.visibilityId++;
         if (this.shouldCleanGeometry()) {
-            this.outputBuffer.fill(this.nodeManager.maxNodeCount - 2);
+            var batch = this.nodeManager.reserveRemoveBatch(8L * OUTPUT_COUNT);
+            // Reserve before the shader changes visibility timestamps. Refusal leaves all
+            // candidates eligible for a later cleaning pass.
+            if (batch == null) return;
+            try {
+                this.outputBuffer.fill(this.nodeManager.maxNodeCount - 2);
 
-            this.sorter.bind();
-            glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, nodeDataBuffer.id);
+                this.sorter.bind();
+                glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, nodeDataBuffer.id);
 
-            //
-            glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
-            glDispatchCompute((this.nodeManager.getCurrentMaxNodeId() + (SORTING_WORKER_SIZE*WORK_PER_THREAD) - 1) / (SORTING_WORKER_SIZE*WORK_PER_THREAD), 1, 1);
+                //
+                glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+                glDispatchCompute((this.nodeManager.getCurrentMaxNodeId() + (SORTING_WORKER_SIZE*WORK_PER_THREAD) - 1) / (SORTING_WORKER_SIZE*WORK_PER_THREAD), 1, 1);
 
-            this.resultTransformer.bind();
-            glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 0, this.outputBuffer.id, 0, 4 * OUTPUT_COUNT);
-            glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, nodeDataBuffer.id);
-            glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 2, this.outputBuffer.id, 4 * OUTPUT_COUNT, 8 * OUTPUT_COUNT);
-            glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, this.visibilityBuffer.id);
-            glUniform1ui(0, this.visibilityId);
+                this.resultTransformer.bind();
+                glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 0, this.outputBuffer.id, 0, 4 * OUTPUT_COUNT);
+                glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, nodeDataBuffer.id);
+                glBindBufferRange(GL_SHADER_STORAGE_BUFFER, 2, this.outputBuffer.id, 4 * OUTPUT_COUNT, 8 * OUTPUT_COUNT);
+                glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, this.visibilityBuffer.id);
+                glUniform1ui(0, this.visibilityId);
 
-            glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
-            glDispatchCompute(1, 1, 1);
-            glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+                glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+                glDispatchCompute(1, 1, 1);
+                glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 
-            DownloadStream.INSTANCE.download(this.outputBuffer, 4 * OUTPUT_COUNT, 8 * OUTPUT_COUNT,
-                    buffer -> this.nodeManager.submitRemoveBatch(buffer.copy())//Copy into buffer and emit to node manager
-            );
+                DownloadStream.INSTANCE.download(this.outputBuffer, 4 * OUTPUT_COUNT, 8 * OUTPUT_COUNT,
+                        (ptr, size) -> {
+                            try { batch.publish(ptr, size, null); }
+                            catch (RuntimeException | Error failure) { batch.close(); throw failure; }
+                        }
+                );
+            } catch (RuntimeException | Error failure) {
+                batch.close();
+                throw failure;
+            }
         }
     }
 

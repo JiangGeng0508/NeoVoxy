@@ -23,6 +23,11 @@ def distribution(values, scale=1):
 
 
 def validate_profile(data, metadata, log, profile):
+    nodes = data["nodeQueues"]
+    require(nodes["samples"] > 0 and 0 < nodes["peakRequestReservedBytes"] <= 16 * 1024,
+            f"{profile}: node requests not exercised or over capacity")
+    require(0 <= nodes["peakRemovalReservedBytes"] <= 128 * 1024 and nodes["peakChildHeapArrays"] > 0,
+            f"{profile}: node removal budget or child watch storage")
     ingest = data["ingestQueue"]
     require(ingest["samples"] > 0 and ingest["peakAccountedBytes"] > 0, f"{profile}: ingest queue not exercised")
     mesh = data["meshResultBudget"]
@@ -40,6 +45,8 @@ def validate_profile(data, metadata, log, profile):
     require(data["pipeline"] == pipeline, f"{profile}: unexpected pipeline")
     require(f"MODEL_LOD_BENCH PASS frames=480 pipeline={pipeline}" in log, f"{profile}: missing PASS")
     require("BUILD SUCCESSFUL" in log, f"{profile}: Gradle did not succeed")
+    require("Render shutdown completed" in log, f"{profile}: missing renderer shutdown")
+    require(metadata["distantGeneration"] is False, f"{profile}: background generation changed the fixture")
     errors = [line for line in log.splitlines() if any(token in line for token in
               ("/ERROR]", "/FATAL]", "GL_INVALID_", "falling back to plain"))]
     require(not errors, f"{profile}: client errors: {errors[:5]}")
@@ -84,7 +91,7 @@ def validate_profile(data, metadata, log, profile):
 def summarize(data):
     result = {"pipeline": data["pipeline"], "renderer": data["renderer"], "glVersion": data["glVersion"],
               "javaVersion": data["javaVersion"], "asyncPipeline": data["asyncPipeline"],
-              "meshResultBudget": data["meshResultBudget"], "ingestQueue": data["ingestQueue"],
+              "meshResultBudget": data["meshResultBudget"], "ingestQueue": data["ingestQueue"], "nodeQueues": data["nodeQueues"],
               "modes": {}, "blocks": [], "bakes": []}
     for mode in ("full", "lod"):
         rows = [row for row in data["frames"] if row["mode"] == mode]

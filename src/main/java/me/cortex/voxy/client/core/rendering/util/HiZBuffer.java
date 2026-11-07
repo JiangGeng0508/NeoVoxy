@@ -47,7 +47,8 @@ public class HiZBuffer implements HiZBufferAccess {
     }
 
     private void alloc(int width, int height) {
-        this.levels = (int)Math.ceil(Math.log(Math.max(width, height))/Math.log(2));
+        // Minimized windows can render a 1x1 target; immutable storage still needs level zero.
+        this.levels = Math.max(1, (int)Math.ceil(Math.log(Math.max(width, height))/Math.log(2)));
 
         //GL_DEPTH_COMPONENT32F
         this.texture = new GlTexture().store(this.type, this.levels, width, height).name("HiZ");
