@@ -14,35 +14,22 @@ import static net.irisshaders.iris.gl.uniform.UniformUpdateFrequency.PER_FRAME;
 
 public class VoxyUniforms {
 
-    public static Matrix4f getViewProjection() {//This is 1 frame late ;-; cries, since the update occurs _before_ the voxy render pipeline
-        var getVrs = (IGetVoxyRenderSystem) Minecraft.getInstance().levelRenderer;
-        if (getVrs == null || getVrs.voxy$getRenderSystem() == null) {
-            return new Matrix4f();
+    private static me.cortex.voxy.client.core.rendering.ViewHistory history() {
+        var renderer = Minecraft.getInstance().levelRenderer;
+        if (renderer instanceof IGetVoxyRenderSystem access && access.voxy$getRenderSystem() != null) {
+            var viewport = access.voxy$getRenderSystem().getActiveViewport();
+            if (viewport != null) return viewport.history;
         }
-        var vrs = getVrs.voxy$getRenderSystem();
-        return new Matrix4f(vrs.getViewport().MVP);
+        return new me.cortex.voxy.client.core.rendering.ViewHistory();
     }
 
-    public static Matrix4f getModelView() {//This is 1 frame late ;-; cries, since the update occurs _before_ the voxy render pipeline
-        var getVrs = (IGetVoxyRenderSystem) Minecraft.getInstance().levelRenderer;
-        if (getVrs == null || getVrs.voxy$getRenderSystem() == null) {
-            return new Matrix4f();
-        }
-        var vrs = getVrs.voxy$getRenderSystem();
-        return new Matrix4f(vrs.getViewport().modelView);
-    }
+    public static Matrix4f getViewProjection() { return new Matrix4f(history().viewProjection); }
+    public static Matrix4f getModelView() { return new Matrix4f(history().modelView); }
+    public static Matrix4f getProjection() { return new Matrix4f(history().projection); }
 
-    public static Matrix4f getProjection() {//This is 1 frame late ;-; cries, since the update occurs _before_ the voxy render pipeline
-        var getVrs = (IGetVoxyRenderSystem) Minecraft.getInstance().levelRenderer;
-        if (getVrs == null || getVrs.voxy$getRenderSystem() == null) {
-            return new Matrix4f();
-        }
-        var vrs = getVrs.voxy$getRenderSystem();
-        var mat = vrs.getViewport().projection;
-        if (mat == null) {
-            return new Matrix4f();
-        }
-        return new Matrix4f(mat);
+    private static LodBoundaryFade.Distances boundary() {
+        var context = me.cortex.voxy.client.core.rendering.WorldRenderContext.current();
+        return context != null && context.secondary ? new LodBoundaryFade.Distances(0, 0) : LodBoundaryFade.getDistances();
     }
 
     public static void addUniforms(UniformHolder uniforms) {
@@ -50,17 +37,17 @@ public class VoxyUniforms {
                 .uniform1i(PER_FRAME, "vxRenderDistance", ()->Math.round(VoxyConfig.CONFIG.sectionRenderDistance*32))//In chunks
                 // Used by the injected Iris terrain-cutout and shadow shaders. These must be
                 // registered even though the opaque LOD handoff itself uses the stencil pass.
-                .uniform1f(PER_FRAME, "voxyLodBoundaryFadeStart", () -> LodBoundaryFade.getDistances().fadeStart())
-                .uniform1f(PER_FRAME, "voxyLodBoundaryFadeEnd", () -> LodBoundaryFade.getDistances().fadeEnd())
+                .uniform1f(PER_FRAME, "voxyLodBoundaryFadeStart", () -> boundary().fadeStart())
+                .uniform1f(PER_FRAME, "voxyLodBoundaryFadeEnd", () -> boundary().fadeEnd())
                 .uniformMatrix(PER_FRAME, "vxViewProj", VoxyUniforms::getViewProjection)
                 .uniformMatrix(PER_FRAME, "vxViewProjInv", new Inverted(VoxyUniforms::getViewProjection))
-                .uniformMatrix(PER_FRAME, "vxViewProjPrev", new PreviousMat(VoxyUniforms::getViewProjection))
+                .uniformMatrix(PER_FRAME, "vxViewProjPrev", () -> history().previousViewProjection)
                 .uniformMatrix(PER_FRAME, "vxModelView", VoxyUniforms::getModelView)
                 .uniformMatrix(PER_FRAME, "vxModelViewInv", new Inverted(VoxyUniforms::getModelView))
-                .uniformMatrix(PER_FRAME, "vxModelViewPrev", new PreviousMat(VoxyUniforms::getModelView))
+                .uniformMatrix(PER_FRAME, "vxModelViewPrev", () -> history().previousModelView)
                 .uniformMatrix(PER_FRAME, "vxProj", VoxyUniforms::getProjection)
                 .uniformMatrix(PER_FRAME, "vxProjInv", new Inverted(VoxyUniforms::getProjection))
-                .uniformMatrix(PER_FRAME, "vxProjPrev", new PreviousMat(VoxyUniforms::getProjection));
+                .uniformMatrix(PER_FRAME, "vxProjPrev", () -> history().previousProjection);
 
     }
 
@@ -83,19 +70,4 @@ public class VoxyUniforms {
         }
     }
 
-    private static class PreviousMat implements Supplier<Matrix4fc> {
-        private final Supplier<Matrix4fc> parent;
-        private Matrix4f previous;
-
-        PreviousMat(Supplier<Matrix4fc> parent) {
-            this.parent = parent;
-            this.previous = new Matrix4f();
-        }
-
-        public Matrix4fc get() {
-            Matrix4f previous = this.previous;
-            this.previous = new Matrix4f(this.parent.get());
-            return previous;
-        }
-    }
 }

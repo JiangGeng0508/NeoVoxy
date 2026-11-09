@@ -41,11 +41,10 @@ public abstract class Viewport <A extends Viewport<A>> {
     //frames while the stamps in visibilityData stay at the build that wrote them, so "visible last
     //frame" means "visible at the previous build" - frameId-1 would never match after a hold.
     public int prevBuildFrameId;
-    //True for the default/main-camera viewport. Secondary passes (camera mods like Vista, mirrors,
-    //freecam...) get their own size-keyed viewport with this false. Only the main viewport may
-    //resize the shared iris depth framebuffer, otherwise a secondary pass flips its size every
-    //other frame and the main camera's water SSR samples a flickering depth texture.
+    // Main-camera scheduling/statistics identity. Shader selection belongs to the owning pipeline;
+    // secondary targets have independent views even when their dimensions match the main window.
     public boolean isMainViewport;
+    public final ViewHistory history = new ViewHistory();
     public Matrix4f vanillaProjection = new Matrix4f();
     public Matrix4f projection = new Matrix4f();
     public Matrix4f modelView = new Matrix4f();

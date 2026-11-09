@@ -165,7 +165,7 @@ public class NormalRenderPipeline extends AbstractRenderPipeline {
     @Override
     public void setupAndBindOpaque(Viewport<?> viewport) {
         if (!viewport.isMainViewport) {
-            // renderSecondary already bound its isolated target with reprojected depth.
+            this.bindSecondaryTarget();
             return;
         }
         this.fb.bind();
@@ -173,6 +173,10 @@ public class NormalRenderPipeline extends AbstractRenderPipeline {
 
     @Override
     public void setupAndBindTranslucent(Viewport<?> viewport) {
+        if (!viewport.isMainViewport) {
+            this.bindSecondaryTarget();
+            return;
+        }
         glBindFramebuffer(GL_FRAMEBUFFER, this.fbSSAO.id);
     }
 

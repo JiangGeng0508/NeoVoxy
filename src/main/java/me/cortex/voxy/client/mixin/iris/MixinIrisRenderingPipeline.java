@@ -37,27 +37,33 @@ public class MixinIrisRenderingPipeline implements IGetVoxyPatchData, IGetIrisVo
     @Inject(method = "<init>", at = @At(value = "INVOKE", target = "Lnet/irisshaders/iris/pipeline/IrisRenderingPipeline;createSetupComputes([Lnet/irisshaders/iris/shaderpack/programs/ComputeSource;Lnet/irisshaders/iris/shaderpack/programs/ProgramSet;Lnet/irisshaders/iris/shaderpack/texture/TextureStage;)[Lnet/irisshaders/iris/gl/program/ComputeProgram;"))
     private void voxy$injectPipeline(ProgramSet programSet, CallbackInfo ci) {
         if (this.patchData != null) {
-            this.pipeline = IrisVoxyRenderPipelineData.buildPipeline((IrisRenderingPipeline)(Object)this, this.patchData, this.customUniforms, this.shaderStorageBufferHolder);
+            try {
+                this.pipeline = IrisVoxyRenderPipelineData.buildPipeline((IrisRenderingPipeline)(Object)this, this.patchData, this.customUniforms, this.shaderStorageBufferHolder);
+            } catch (RuntimeException error) {
+                if (!me.cortex.voxy.client.compat.vista.VistaCompat.isRenderingFeed()) throw error;
+                me.cortex.voxy.common.Logger.error("Vista LOD shader bindings failed; using plain water after Iris composition", error);
+            }
         }
     }
 
     @Inject(method = "beginLevelRendering", at = @At(value = "INVOKE", target = "Lcom/mojang/blaze3d/systems/RenderSystem;activeTexture(I)V", shift = At.Shift.BEFORE), remap = false)
     private void voxy$injectViewportSetup(CallbackInfo ci) {
-        if (IrisUtil.CAPTURED_VIEWPORT_PARAMETERS != null) {
-            var renderer = ((IGetVoxyRenderSystem) Minecraft.getInstance().levelRenderer).voxy$getRenderSystem();
-            if (renderer != null) {
-                IrisUtil.CAPTURED_VIEWPORT_PARAMETERS.apply(renderer);
-                IrisUtil.CAPTURED_VIEWPORT_PARAMETERS = null;
-                IrisUtil.USED_IRIS_VIEWPORT = true;
-            }
+        var level = Minecraft.getInstance().levelRenderer;
+        if (level instanceof IGetVoxyRenderSystem access && access.voxy$getRenderSystem() != null) {
+            access.voxy$getRenderSystem().beginIrisPass(this, this.pipeline);
+        }
+    }
+
+    @Inject(method = "destroy", at = @At("HEAD"))
+    private void voxy$releaseFeedPipeline(CallbackInfo ci) {
+        var level = Minecraft.getInstance().levelRenderer;
+        if (level instanceof IGetVoxyRenderSystem access && access.voxy$getRenderSystem() != null) {
+            access.voxy$getRenderSystem().releaseIrisPass(this);
         }
     }
 
     @Inject(method = "finalizeLevelRendering", at = @At("TAIL"))
     private void voxy$renderUnpatchedShaderFallback(CallbackInfo ci) {
-        if (this.patchData != null) {
-            return;
-        }
         var levelRenderer = Minecraft.getInstance().levelRenderer;
         if (levelRenderer instanceof IGetVoxyRenderSystem access) {
             var renderer = access.voxy$getRenderSystem();

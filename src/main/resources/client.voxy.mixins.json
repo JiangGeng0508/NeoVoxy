@@ -18,6 +18,7 @@
     "minecraft.MixinLevelStorageAccess",
     "minecraft.MixinMinecraft",
     "minecraft.MixinRenderSystem",
+    "minecraft.MixinRenderTarget",
     "minecraft.MixinWindow",
     "sodium.AccessorChunkTracker",
     "sodium.AccessorSodiumWorldRenderer",

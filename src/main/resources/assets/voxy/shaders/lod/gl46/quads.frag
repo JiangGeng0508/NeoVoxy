@@ -276,6 +276,11 @@ void main() {
 
     #ifndef PATCHED_SHADER
     colour = computeColour(texPos, colour);
+    #ifndef TRANSLUCENT
+    // computeColour stores face/LOD/AO metadata in alpha for the primary SSAO pass.
+    // Secondary views skip SSAO and need coverage before water and sky are composited.
+    if (opaqueAlphaIsCoverage > 0.5) colour.a = 1.0;
+    #endif
     outColour = colour;
 
     #ifdef DEBUG_RENDER

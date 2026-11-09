@@ -21,6 +21,20 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 @Mixin(LevelRenderer.class)
 public abstract class MixinLevelRenderer implements IGetVoxyRenderSystem {
+    @com.llamalad7.mixinextras.injector.wrapmethod.WrapMethod(method = "renderLevel")
+    private void voxy$worldRenderContext(net.minecraft.client.DeltaTracker delta, boolean outline,
+            net.minecraft.client.Camera camera, net.minecraft.client.renderer.GameRenderer gameRenderer,
+            net.minecraft.client.renderer.LightTexture lightTexture, org.joml.Matrix4f modelView,
+            org.joml.Matrix4f projection, com.llamalad7.mixinextras.injector.wrapoperation.Operation<Void> original) {
+        var position = camera.getPosition();
+        try (var context = new me.cortex.voxy.client.core.rendering.WorldRenderContext(
+                net.minecraft.client.Minecraft.getInstance().getMainRenderTarget(),
+                me.cortex.voxy.client.compat.vista.VistaCompat.isRenderingFeed(), projection, modelView,
+                position.x, position.y, position.z)) {
+            original.call(delta, outline, camera, gameRenderer, lightTexture, modelView, projection);
+        }
+    }
+
     @Shadow private @Nullable ClientLevel level;
     @Unique private VoxyRenderSystem renderer;
 
@@ -31,6 +45,9 @@ public abstract class MixinLevelRenderer implements IGetVoxyRenderSystem {
 
     @Inject(method = "allChanged()V", at = @At("RETURN"), order = 900)//We want to inject before sodium
     private void voxy$reloadVoxyRenderer(CallbackInfo ci) {
+        // Iris may rebuild Sodium's terrain when entering a Vista virtual dimension.
+        // The real world and its shared geometry are unchanged; preserve the main owner.
+        if (me.cortex.voxy.client.compat.vista.VistaCompat.isRenderingFeed()) return;
         var seasonalView = me.cortex.voxy.client.core.compat.eclipticseasons.SeasonalLod.view;
         if (seasonalView != null) {
             try {

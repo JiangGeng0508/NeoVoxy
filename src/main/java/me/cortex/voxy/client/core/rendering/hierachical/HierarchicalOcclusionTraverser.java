@@ -75,8 +75,7 @@ public class HierarchicalOcclusionTraverser {
     private final int hizSampler = glGenSamplers();
 
     private AutoBindingShader traversal;
-
-    private AbstractRenderPipeline pipeline;//Used to bind shader taa uniforms
+    private final java.util.Map<AbstractRenderPipeline, AutoBindingShader> programs = new java.util.IdentityHashMap<>();
 
     public HierarchicalOcclusionTraverser(AsyncNodeManager nodeManager, NodeCleaner nodeCleaner, RenderGenerationService meshGen) {
         this.nodeCleaner = nodeCleaner;
@@ -96,11 +95,12 @@ public class HierarchicalOcclusionTraverser {
     }
 
     public void lateStageCompile(AbstractRenderPipeline pipeline) {
+        if (this.programs.containsKey(pipeline)) return;
         String taa = pipeline.taaFunction("getTAA");
         var scr = ShaderLoader.parse("voxy:lod/hierarchical/traversal_dev.comp");
         if (taa != null) {
             scr += "\n\n\n" + taa;
-            this.pipeline = pipeline;
+
         }
         this.traversal = Shader.makeAuto(PRINTF_processor)
             .apply(pipeline.properties::apply)
@@ -139,6 +139,12 @@ public class HierarchicalOcclusionTraverser {
                 .ssbo("NODE_QUEUE_META_BINDING", this.queueMetaBuffer)
                 .ssbo("RENDER_TRACKER_BINDING", this.nodeCleaner.visibilityBuffer)
                 .ssboIf("STATISTICS_BUFFER_BINDING", this.statisticsBuffer);
+        this.programs.put(pipeline, this.traversal);
+    }
+
+    public void releasePipeline(AbstractRenderPipeline pipeline) {
+        var program = this.programs.remove(pipeline);
+        if (program != null) program.free();
     }
 
     private void addTLN(int id) {
@@ -262,14 +268,16 @@ public class HierarchicalOcclusionTraverser {
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, RENDER_QUEUE_BINDING, viewport.getRenderList().id);
     }
 
-    public void doTraversal(Viewport<?> viewport) {
+    public void doTraversal(Viewport<?> viewport, AbstractRenderPipeline activePipeline) {
+        this.lateStageCompile(activePipeline);
+        this.traversal = this.programs.get(activePipeline);
         this.uploadUniform(viewport);
 
         this.traversal.bind();
         this.bindings(viewport);
 
         //Bind shader uniforms for taa if we have a pipeline
-        if (this.pipeline != null) this.pipeline.bindUniforms();
+        if (activePipeline != null) activePipeline.bindUniforms();
 
         PrintfDebugUtil.bind();
 
@@ -285,7 +293,7 @@ public class HierarchicalOcclusionTraverser {
 
         this.downloadResetRequestQueue();
 
-        if (RenderStatistics.enabled) {
+        if (RenderStatistics.enabled && viewport.isMainViewport) {
             DownloadStream.INSTANCE.download(this.statisticsBuffer, down->{
                 for (int i = 0; i < MAX_ITERATIONS; i++) {
                     RenderStatistics.hierarchicalTraversalCounts[i] = MemoryUtil.memGetInt(down.address+i*4L);
@@ -406,7 +414,8 @@ public class HierarchicalOcclusionTraverser {
     }
 
     public void free() {
-        if (this.traversal != null) this.traversal.free();
+        this.programs.values().forEach(AutoBindingShader::free);
+        this.programs.clear();
         this.requestBuffer.free();
         this.nodeBuffer.free();
         this.uniformBuffer.free();

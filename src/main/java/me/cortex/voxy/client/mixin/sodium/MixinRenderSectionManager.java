@@ -45,7 +45,7 @@ public class MixinRenderSectionManager {
         if (level.levelRenderer != null) {
             var system = ((IGetVoxyRenderSystem)(level.levelRenderer)).voxy$getRenderSystem();
             if (system != null) {
-                system.chunkBoundRenderer.reset();
+                system.getActiveChunkBoundRenderer().reset();
             }
         }
         this.bottomSectionY = this.level.getMinBuildHeight()>>4;
@@ -145,7 +145,7 @@ public class MixinRenderSectionManager {
         }
         var system = ((IGetVoxyRenderSystem)(this.level.levelRenderer)).voxy$getRenderSystem();
         if (system != null) {
-            system.chunkBoundRenderer.reset();
+            system.getActiveChunkBoundRenderer().reset();
         }
     }
 }

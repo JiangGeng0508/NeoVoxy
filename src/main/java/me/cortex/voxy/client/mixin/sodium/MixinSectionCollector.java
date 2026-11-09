@@ -29,7 +29,7 @@ public class MixinSectionCollector {
                 x -= sector<<10;
                 y += 16+(256-32-sector*30);
             }
-            system.chunkBoundRenderer.put(SectionPos.asLong(x, y, z));
+            system.getActiveChunkBoundRenderer().put(SectionPos.asLong(x, y, z));
         }
     }
 }

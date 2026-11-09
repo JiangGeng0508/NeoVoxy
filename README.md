@@ -12,7 +12,7 @@ NeoVoxy 是面向 Minecraft 1.21.1 + NeoForge 的 Voxy 移植项目，目标是�
 
 - Minecraft: `1.21.1`
 - NeoForge: `21.1.244`
-- Mod 版本: `0.2.19-beta+neoforge`
+- Mod 版本: `0.2.20-beta+neoforge`
 - Java: `21`
 - 客户端必需依赖: Sodium NeoForge `>=0.8.12, <0.9`，编译基线 `mc1.21.1-0.8.12-neoforge`
 - 客户端可选依赖: Iris NeoForge `>=1.8.14-beta.1`，编译基线 `1.8.14-beta.1+1.21.1-neoforge`（启用光影时自动切换到 Iris 渲染管线）
@@ -22,6 +22,8 @@ Voxy 使用 Sodium 的配置 API、内部区段渲染类及 mixin，暂将上界
 跨次版本需重新适配和验证。Iris 的安装下限不代表其后每个版本都已验证。
 Iris `1.8.12` 发布包仍引用 Sodium 已移除的 `SodiumGameOptions`，与本项目所需的 Sodium
 `0.8.12` 组合加载失败，因此不再列为支持版本。
+
+版本变更见 [更新日志](CHANGELOG.md)。
 
 ## 功能范围
 

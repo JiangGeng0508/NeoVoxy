@@ -97,7 +97,8 @@ public class ChunkBoundRenderer {
             this.pipeline = null;
         }
 
-        this.rasterShader = Shader.makeAuto()
+        try {
+            this.rasterShader = Shader.makeAuto()
                 .addSource(ShaderType.VERTEX, vert)
                 .defineIf("TAA", taa != null)
                 .add(ShaderType.FRAGMENT, "voxy:chunkoutline/outline.fsh")
@@ -105,6 +106,11 @@ public class ChunkBoundRenderer {
                 .compile()
                 .ubo(0, this.uniformBuffer)
                 .ssbo(1, this.chunkPosBuffer);
+        } catch (RuntimeException error) {
+            this.chunkPosBuffer.free();
+            this.uniformBuffer.free();
+            throw error;
+        }
     }
 
     //Called from sodium's section-list traversal for every visible built section. Also reached

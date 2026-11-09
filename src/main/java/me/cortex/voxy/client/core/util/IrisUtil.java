@@ -1,8 +1,5 @@
 package me.cortex.voxy.client.core.util;
 
-import me.cortex.voxy.client.core.VoxyRenderSystem;
-import me.cortex.voxy.client.core.rendering.Viewport;
-import net.caffeinemc.mods.sodium.client.render.chunk.ChunkRenderMatrices;
 import net.neoforged.fml.ModList;
 import net.irisshaders.iris.Iris;
 import net.irisshaders.iris.api.v0.IrisApi;
@@ -12,15 +9,6 @@ import net.irisshaders.iris.shadows.ShadowRenderer;
 import java.io.IOException;
 
 public class IrisUtil {
-    public record CapturedViewportParameters(ChunkRenderMatrices matrices, double x, double y, double z) {
-        public Viewport<?> apply(VoxyRenderSystem vrs) {
-            return vrs.setupViewport(this.matrices.projection(), this.matrices.modelView(), this.x, this.y, this.z);
-        }
-    }
-
-    public static boolean USED_IRIS_VIEWPORT;
-    public static CapturedViewportParameters CAPTURED_VIEWPORT_PARAMETERS;
-
     public static final boolean IRIS_INSTALLED = ModList.get().isLoaded("iris");
     public static final boolean SHADER_SUPPORT = true;//System.getProperty("voxy.enableExperimentalIrisPipeline", "false").equalsIgnoreCase("true");
 

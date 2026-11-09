@@ -14,6 +14,13 @@ import me.cortex.voxy.client.core.model.ModelBakerySubsystem;
 import me.cortex.voxy.client.core.rendering.ChunkBoundRenderer;
 import me.cortex.voxy.client.core.rendering.RenderDistanceTracker;
 import me.cortex.voxy.client.core.rendering.Viewport;
+import me.cortex.voxy.client.core.rendering.WorldRenderContext;
+import me.cortex.voxy.client.iris.IrisVoxyRenderPipelineData;
+import com.mojang.blaze3d.pipeline.RenderTarget;
+import java.util.IdentityHashMap;
+import java.util.Map;
+import java.util.Set;
+import java.util.Collections;
 import me.cortex.voxy.client.core.rendering.ViewportSelector;
 import me.cortex.voxy.client.core.rendering.building.RenderGenerationService;
 import me.cortex.voxy.client.core.rendering.hierachical.AsyncNodeManager;
@@ -102,6 +109,165 @@ public class VoxyRenderSystem {
     private final Matrix4f projectionScratch = new Matrix4f();
     private final Matrix4f modifiedProjectionScratch = new Matrix4f();
     private Viewport<?> pendingUnpatchedIrisViewport;
+    private static final Object PLAIN_SECONDARY = new Object();
+    private final Map<Object, SecondaryPass> secondaryPasses = new IdentityHashMap<>();
+    private final Set<Object> failedSecondaryPasses = Collections.newSetFromMap(new IdentityHashMap<>());
+
+    private static final class SecondaryView {
+        final Viewport<?> viewport;
+        final ChunkBoundRenderer bounds;
+        int depth = -1, colour = -1;
+        SecondaryView(AbstractRenderPipeline pipeline, AbstractSectionRenderer<?, ?> renderer) {
+            this.viewport = renderer.createViewport();
+            try {
+                this.bounds = new ChunkBoundRenderer(pipeline);
+            } catch (RuntimeException error) {
+                this.viewport.delete();
+                throw error;
+            }
+        }
+        void free() { this.bounds.free(); this.viewport.delete(); }
+    }
+
+    private final class SecondaryPass {
+        final AbstractRenderPipeline pipeline;
+        final AbstractSectionRenderer<?, ?> renderer;
+        final Map<RenderTarget, SecondaryView> views = new IdentityHashMap<>();
+        SecondaryPass(IrisVoxyRenderPipelineData data) {
+            this.pipeline = data == null
+                    ? new NormalRenderPipeline(properties, nodeManager, nodeCleaner, traversal, () -> false)
+                    : new IrisVoxyRenderPipeline(properties, data, nodeManager, nodeCleaner, traversal, () -> false, true);
+            try {
+                this.renderer = getRenderBackendFactory().create(this.pipeline, modelService.getStore(), geometryData);
+                this.pipeline.setSectionRenderer(this.renderer);
+                traversal.lateStageCompile(this.pipeline);
+            } catch (RuntimeException error) {
+                traversal.releasePipeline(this.pipeline);
+                this.pipeline.free();
+                throw error;
+            }
+        }
+        void free() {
+            this.views.values().forEach(SecondaryView::free);
+            this.views.clear();
+            traversal.releasePipeline(this.pipeline);
+            this.pipeline.free();
+        }
+    }
+
+    public void beginIrisPass(Object owner, IrisVoxyRenderPipelineData data) {
+        var context = WorldRenderContext.current();
+        if (context == null) return;
+        context.irisRendering = true;
+        if (context.irisOwner != owner) {
+            context.viewport = null;
+            context.pipeline = null;
+            context.chunkBounds = null;
+        }
+        context.irisOwner = owner;
+        context.irisData = data;
+        this.prepareContext(context);
+    }
+
+    public void releaseIrisPass(Object owner) {
+        var pass = this.secondaryPasses.remove(owner);
+        if (pass != null) pass.free();
+        this.failedSecondaryPasses.remove(owner);
+    }
+
+    public void releaseSecondaryPasses() {
+        this.secondaryPasses.values().forEach(SecondaryPass::free);
+        this.secondaryPasses.clear();
+        this.failedSecondaryPasses.clear();
+    }
+
+    /** Called before a RenderTarget destroys its attachments, including same-size rebuilds. */
+    public void releaseRenderTarget(RenderTarget target) {
+        for (var pass : this.secondaryPasses.values()) {
+            var view = pass.views.remove(target);
+            if (view != null) view.free();
+        }
+    }
+
+    private SecondaryView prepareSecondaryView(WorldRenderContext context) {
+        Object key = context.irisOwner == null ? PLAIN_SECONDARY : context.irisOwner;
+        var pass = this.secondaryPasses.get(key);
+        try {
+            if (pass == null) {
+                pass = new SecondaryPass(this.failedSecondaryPasses.contains(key) ? null : context.irisData);
+                this.secondaryPasses.put(key, pass);
+            }
+            var view = pass.views.get(context.target);
+            if (view == null) {
+                view = new SecondaryView(pass.pipeline, pass.renderer);
+                pass.views.put(context.target, view);
+            }
+            context.pipeline = pass.pipeline;
+            return view;
+        } catch (RuntimeException error) {
+            if (context.irisData == null || !this.failedSecondaryPasses.add(key)) throw error;
+            this.secondaryPasses.remove(key);
+            if (pass != null) pass.free();
+            Logger.error("Vista LOD shader pipeline failed; using plain water for this feed until shader reload", error);
+            return this.prepareSecondaryView(context);
+        }
+    }
+
+    private void prepareContext(WorldRenderContext context) {
+        if (context.viewport != null) return;
+        boolean resetHistory = false;
+        int width, height;
+        if (!context.secondary) {
+            context.pipeline = this.pipeline;
+            context.viewport = this.viewportSelector.getViewport();
+            context.chunkBounds = this.chunkBoundRenderer;
+            int[] size = this.mainViewportSize();
+            if (size == null) return;
+            width = size[0]; height = size[1];
+        } else {
+            var view = this.prepareSecondaryView(context);
+            context.viewport = view.viewport;
+            context.chunkBounds = view.bounds;
+            width = context.target.width; height = context.target.height;
+            float[] scale = context.pipeline.getRenderScalingFactor();
+            if (scale != null) { width = (int) (width * scale[0]); height = (int) (height * scale[1]); }
+            resetHistory = view.depth != context.target.getDepthTextureId() || view.colour != context.target.getColorTextureId();
+            view.depth = context.target.getDepthTextureId(); view.colour = context.target.getColorTextureId();
+        }
+        if (width <= 0 || height <= 0) throw new IllegalStateException("Empty world render target");
+        resetHistory |= context.viewport.width != width || context.viewport.height != height;
+        if (resetHistory) context.viewport.invalidateChunkMask();
+        double cameraX = context.x, cameraY = context.y;
+        if (VoxyCommon.IS_MINE_IN_ABYSS) {
+            int sector = (((int) Math.floor(cameraX) >> 4) + 512) >> 10;
+            cameraX -= sector << 14;
+            cameraY += (16 + (256 - 32 - sector * 30)) * 16;
+        }
+        this.configureViewport(context.viewport, new ChunkRenderMatrices(context.projection, context.modelView),
+                this.computeProjectionMat(this.properties, context.projection, this.currentFarPlane()),
+                cameraX, cameraY, context.z, width, height);
+        context.viewport.history.update(context.viewport.projection, context.viewport.modelView, resetHistory);
+    }
+
+    public Viewport<?> getActiveViewport() {
+        var context = WorldRenderContext.current();
+        if (context == null) return this.getViewport();
+        this.prepareContext(context);
+        return context.viewport;
+    }
+
+    public ChunkBoundRenderer getActiveChunkBoundRenderer() {
+        var context = WorldRenderContext.current();
+        if (context == null) return this.chunkBoundRenderer;
+        this.prepareContext(context);
+        return context.chunkBounds;
+    }
+
+    private AbstractRenderPipeline activePipeline() {
+        var context = WorldRenderContext.current();
+        return context != null && context.pipeline != null ? context.pipeline : this.pipeline;
+    }
+
 
 
     public String getPipelineName() {
@@ -273,7 +439,7 @@ public class VoxyRenderSystem {
     // Packs that opt in can match the projection far plane to Voxy's configured section cube.
     // The diagonal keeps every corner inside the frustum; two chunks cover traversal padding.
     private float currentFarPlane() {
-        if (this.pipeline.useDynamicFarPlane()) {
+        if (this.activePipeline().useDynamicFarPlane()) {
             return (float) ((VoxyConfig.CONFIG.createLodRadius() + 32.0) * Math.sqrt(3.0));
         }
         return 16.0f * 3000.0f;
@@ -298,100 +464,11 @@ public class VoxyRenderSystem {
         return new int[]{width, height};
     }
 
-    // 解析当前绑定渲染目标的尺寸，叠加渲染缩放系数；无法解析（尺寸为 0）时返回 null。
-    private int[] currentPassViewportSize() {
-        int[] dims = new int[4];
-        glGetIntegerv(GL_VIEWPORT, dims);
-
-        int width = dims[2];
-        int height = dims[3];
-
-        // 光影在捕获阶段可能把 GL 视口留成 0 尺寸，直接使用会构建不完整的帧缓冲并崩溃，回退到窗口尺寸。
-        if (width <= 0 || height <= 0) {
-            var window = Minecraft.getInstance().getWindow();
-            width = window.getWidth();
-            height = window.getHeight();
-        }
-        var factor = this.pipeline.getRenderScalingFactor();
-        if (factor != null) {
-            width = (int) (width * factor[0]);
-            height = (int) (height * factor[1]);
-        }
-        if (width <= 0 || height <= 0) {
-            Logger.error("Viewport width or height was zero, this is bad bad bad");
-            return null;
-        }
-        return new int[]{width, height};
-    }
-
-    // 副渲染通道（Vista 电视、后视镜、自由视角等相机模组）会用不同的矩阵重新渲染世界。
-    // 光影下缓存的主视口属于主相机，直接复用会把 LOD 按错误的视角绘制；只有当前通道的矩阵
-    // 确实与视口一致时才复用它。真正的副通道按目标尺寸分配独立视口，避免反复改写共享的
-    // 深度帧缓冲（主相机的水面 SSR 会因此闪烁）。
+    /** World renders carry explicit camera/target identity; legacy callers retain main-view semantics. */
     public Viewport<?> setupViewportForCurrentPass(ChunkRenderMatrices matrices, double cameraX, double cameraY, double cameraZ) {
-        // 光影阴影通道期间返回 null，Voxy 绝不能在其中渲染：那会把共享的 vxDepth 纹理
-        // 反复调整为阴影贴图尺寸，并留下正交投影的 LOD 深度，导致水面 SSR 出现残影。
-        if (IrisUtil.irisShadowActive()) {
-            return null;
-        }
-        var viewport = this.getViewport();
-        if (viewport == null) {
-            return null;
-        }
-        if (this.viewportMatches(viewport, matrices, cameraX, cameraY, cameraZ)) {
-            // A stationary camera can still change detail settings or resize the window
-            // without changing its aspect ratio. Refresh using the main target size, not
-            // Sodium/Iris's temporary GL viewport; keep this viewport's buffers and identity.
-            int[] size = this.mainViewportSize();
-            return size == null ? null : viewport.setScreenSize(size[0], size[1]).update();
-        }
-        // 不同通道，或 /voxy reload 后主相机面对仍是 0 尺寸的默认视口。按渲染目标尺寸区分：
-        // 主通道的目标就是主窗口，副通道则是尺寸永远不等于窗口的离屏帧缓冲。
-        int[] main = this.mainViewportSize();
-        int[] cur = this.currentPassViewportSize();
-        if (main == null || cur == null) {
-            return null;
-        }
-        if (main[0] == cur[0] && main[1] == cur[1]) {
-            // 主窗口通道：重新配置默认主视口，避免残留的 0 尺寸视口被后续通道占用。
-            return this.configureViewport(this.viewportSelector.getViewport(), matrices,
-                    this.computeProjectionMat(this.properties, matrices.projection(), this.currentFarPlane()),
-                    cameraX, cameraY, cameraZ, main[0], main[1]);
-        }
-        // 真正的副通道：分配独立视口，避免用电视机的矩阵/尺寸配置主视口而破坏共享深度纹理。
-        var secondary = this.viewportSelector.getViewportForSize(cur[0], cur[1]);
-        if (secondary == null) {
-            return null;
-        }
-        return this.configureViewport(secondary, matrices,
-                this.computeProjectionMat(this.properties, matrices.projection(), this.currentFarPlane()),
-                cameraX, cameraY, cameraZ, cur[0], cur[1]);
-    }
-
-    private boolean viewportMatches(Viewport<?> viewport, ChunkRenderMatrices matrices, double cameraX, double cameraY, double cameraZ) {
-        if (viewport.width <= 0 || viewport.height <= 0) {
-            return false;
-        }
-        // 只比较相机与矩阵：区块渲染期间 Sodium/光影即使在主通道也可能绑定缩放后的内部视口，
-        // 用尺寸判断会误判为需要重建主视口。
-        if (Math.abs(viewport.cameraX - cameraX) > 0.01
-                || Math.abs(viewport.cameraY - cameraY) > 0.01
-                || Math.abs(viewport.cameraZ - cameraZ) > 0.01) {
-            return false;
-        }
-        return matrixMatches(viewport.vanillaProjection, matrices.projection())
-                && matrixMatches(viewport.modelView, matrices.modelView());
-    }
-
-    private static boolean matrixMatches(Matrix4fc a, Matrix4fc b) {
-        for (int c = 0; c < 4; c++) {
-            for (int r = 0; r < 4; r++) {
-                if (Math.abs(a.get(c, r) - b.get(c, r)) > 1.0e-3f) {
-                    return false;
-                }
-            }
-        }
-        return true;
+        if (IrisUtil.irisShadowActive()) return null;
+        if (WorldRenderContext.current() != null) return this.getActiveViewport();
+        return this.setupViewport(matrices.projection(), matrices.modelView(), cameraX, cameraY, cameraZ);
     }
 
     private Viewport<?> configureViewport(Viewport<?> viewport, ChunkRenderMatrices matrices, Matrix4f voxyProjection,
@@ -524,8 +601,11 @@ public class VoxyRenderSystem {
             return;
         }
 
-        if (IrisUtil.irisShaderPackEnabled() && this.pipeline instanceof NormalRenderPipeline) {
-            this.pendingUnpatchedIrisViewport = viewport;
+        var context = WorldRenderContext.current();
+        if ((context != null ? context.irisRendering : IrisUtil.irisShaderPackEnabled())
+                && this.activePipeline() instanceof NormalRenderPipeline) {
+            if (context != null) context.pendingFallback = viewport;
+            else this.pendingUnpatchedIrisViewport = viewport;
             return;
         }
 
@@ -539,15 +619,27 @@ public class VoxyRenderSystem {
      * RGBA colour and Minecraft's shared world depth. Native Voxy-aware packs never enter this path.
      */
     public void renderUnpatchedIrisFallback() {
-        Viewport<?> viewport = this.pendingUnpatchedIrisViewport;
-        this.pendingUnpatchedIrisViewport = null;
-        if (viewport == null || !(this.pipeline instanceof NormalRenderPipeline)) {
+        var context = WorldRenderContext.current();
+        Viewport<?> viewport = context == null ? this.pendingUnpatchedIrisViewport : context.pendingFallback;
+        if (context != null) context.pendingFallback = null;
+        else this.pendingUnpatchedIrisViewport = null;
+        if (viewport == null || !(this.activePipeline() instanceof NormalRenderPipeline)) {
             return;
         }
         this.renderOpaqueNow(viewport);
     }
 
     private void renderOpaqueNow(Viewport<?> viewport) {
+        if (!viewport.isMainViewport) {
+            try (var state = new me.cortex.voxy.client.core.rendering.SecondaryGlState()) {
+                glDisable(GL_SCISSOR_TEST);
+                this.drawViewport(viewport);
+            }
+        } else this.drawViewport(viewport);
+    }
+
+    private void drawViewport(Viewport<?> viewport) {
+        var activePipeline = this.activePipeline();
 
         // 轻量且幂等；在这里标记渲染线程，避免每次采样都引入 ThreadLocal 开销。
         VoxyProfile.markRenderThread();
@@ -579,13 +671,13 @@ public class VoxyRenderSystem {
             throw new IllegalStateException("Cannot use the default framebuffer as cannot source from it");
         }
 
-        this.pipeline.preSetup(viewport);
+        activePipeline.preSetup(viewport);
 
         TimingStatistics.E.start();
         GPUTiming.INSTANCE.marker("CB");
         if (!VoxyClient.disableSodiumChunkRender() && !IrisUtil.irisShadowActive()) {
             WorldSection.setArrayPoolCapMiB(VoxyConfig.CONFIG.sectionArrayPoolMiB);
-            this.chunkBoundRenderer.render(viewport);
+            this.getActiveChunkBoundRenderer().render(viewport);
         } else {
             viewport.depthBoundingBuffer.clear(this.properties.inverseClearDepth());
             viewport.invalidateChunkMask();
@@ -600,11 +692,11 @@ public class VoxyRenderSystem {
             // 完整管线：写入共享的光影深度帧缓冲，并驱动渲染距离跟踪与模型服务。副渲染通道
             // （Vista 电视等）绘制到自己的离屏目标，绝不能走这里——否则每帧都会把共享帧缓冲
             // 调整为电视机尺寸（破坏主相机水面 SSR），并把渲染距离中心移到电视机相机上。
-            this.pipeline.runPipeline(viewport, boundFramebuffer, this.viewportDimensions[2], this.viewportDimensions[3]);
+            activePipeline.runPipeline(viewport, boundFramebuffer, this.viewportDimensions[2], this.viewportDimensions[3]);
         } else {
             // 副渲染通道（Vista 电视）：在独立缓冲中转换深度、绘制，再合成回调用方目标。
             glBindFramebuffer(GL_FRAMEBUFFER, boundFramebuffer);
-            this.pipeline.renderSecondary(viewport, boundFramebuffer);
+            activePipeline.renderSecondary(viewport, boundFramebuffer, this.viewportDimensions[2], this.viewportDimensions[3]);
         }
         GPUTiming.INSTANCE.marker();
 
@@ -823,6 +915,7 @@ public class VoxyRenderSystem {
 
             this.modelService.shutdown();
             this.renderGen.shutdown();
+            this.releaseSecondaryPasses();
             this.traversal.free();
             this.nodeCleaner.free();
             this.geometryData.free();

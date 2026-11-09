@@ -1,0 +1,47 @@
+// Opt-in real Vista/Iris integration fixture. Sources are excluded from distribution builds.
+allprojects {
+    afterEvaluate {
+        sourceSets.main.java.srcDir 'scripts/vista-water/src'
+        boolean shaders = project.findProperty('vistaShaders') == 'true'
+        boolean irisOff = project.findProperty('vistaIrisOff') == 'true'
+        def label = project.findProperty('vistaRun') ?: ((shaders ? 'iris-' : 'plain-') + System.currentTimeMillis())
+        def profile = layout.buildDirectory.dir('reports/vista-water/' + label)
+        def world = file(project.findProperty('vistaWorld') ?: '.agents/work/verification/server/smoke-world')
+        def vista = file('run/client/mods/vista-1.21.1-5.4.1-neoforge.jar')
+        def moonlight = file('run/client/mods/moonlight-1.21.1-3.3.3-neoforge.jar')
+        dependencies.add('compileOnly', files(vista, moonlight))
+        runs.named('client') {
+            workingDirectory profile
+            systemProperty 'voxy.vistaWaterShaders', shaders.toString()
+            systemProperty 'voxy.vistaWaterIrisOff', irisOff.toString()
+            systemProperty 'voxy.vistaWaterFailPatch', (project.findProperty('vistaFailPatch') == 'true').toString()
+            argument '--quickPlaySingleplayer'; argument 'fixture'
+            argument '--width'; argument '960'; argument '--height'; argument '540'
+        }
+        tasks.withType(JavaExec).configureEach {
+            if (name != 'runClient') return
+            doFirst {
+                def dir = profile.get().asFile
+                if (new File(dir, 'saves/fixture/level.dat').exists()) throw new GradleException('Use a fresh -PvistaRun label')
+                if (!new File(world, 'level.dat').isFile()) throw new GradleException('Missing fixture source world')
+                dir.mkdirs()
+                copy { from world; into new File(dir, 'saves/fixture'); exclude 'voxy/**', 'session.lock' }
+                copy { from files(vista, moonlight); into new File(dir, 'mods') }
+                new File(dir, 'config').mkdirs()
+                new File(dir, 'options.txt').text = 'renderDistance:4\nsimulationDistance:5\nmaxFps:60\nenableVsync:false\npauseOnLostFocus:false\nfov:0.5\nrenderClouds:false\n'
+                new File(dir, 'config/voxy-config.json').text = '{"distant_gen_enabled":false,"sectionRenderDistance":32,"subDivisionSize":28}'
+                new File(dir, 'config/vista-client.toml').text = '[television.live_feed]\niris_off_hack=' + irisOff + '\n'
+                if (shaders) {
+                    copy { from file('run/client/mods/iris-neoforge-1.8.14-beta.1+mc1.21.1.jar'); into new File(dir, 'mods') }
+                    copy { from file('run/client/shaderpacks/ComplementaryReimagined_r5.8.1.zip'); into new File(dir, 'shaderpacks') }
+                    new File(dir, 'config/iris.properties').text = 'enableShaders=true\nshaderPack=ComplementaryReimagined_r5.8.1.zip\n'
+                }
+                new File(dir, 'verification.json').text = groovy.json.JsonOutput.toJson([
+                    state:'running', shaders:shaders, irisOff:irisOff, vista:vista.name,
+                    shaderPack:shaders ? 'ComplementaryReimagined_r5.8.1.zip' : null,
+                    startedAtMillis:System.currentTimeMillis(), sourceWorld:world.absolutePath])
+                logger.lifecycle('Vista water output: ' + dir)
+            }
+        }
+    }
+}

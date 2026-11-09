@@ -26,58 +26,75 @@ import static org.lwjgl.opengl.GL45C.*;
 
 public class IrisVoxyRenderPipeline extends AbstractRenderPipeline {
     private final IrisVoxyRenderPipelineData data;
-    private final FullscreenBlit depthBlit;
+    private final boolean secondary;
+    private FullscreenBlit depthBlit;
     public final DepthFramebuffer fbTranslucent = new DepthFramebuffer(this.fb.getFormat());
 
-    private final FullscreenBlit shaderDepthHackFixTransformBlit;
+    private FullscreenBlit shaderDepthHackFixTransformBlit;
 
-    private final GlBuffer shaderUniforms;
+    private GlBuffer shaderUniforms;
     private final Matrix4f targetTransform = new Matrix4f();
 
     public IrisVoxyRenderPipeline(RenderProperties properties, IrisVoxyRenderPipelineData data, AsyncNodeManager nodeManager, NodeCleaner nodeCleaner, HierarchicalOcclusionTraverser traversal, BooleanSupplier frexSupplier) {
+        this(properties, data, nodeManager, nodeCleaner, traversal, frexSupplier, false);
+    }
+
+    public IrisVoxyRenderPipeline(RenderProperties properties, IrisVoxyRenderPipelineData data, AsyncNodeManager nodeManager, NodeCleaner nodeCleaner, HierarchicalOcclusionTraverser traversal, BooleanSupplier frexSupplier, boolean secondary) {
         super(properties, nodeManager, nodeCleaner, traversal, frexSupplier, data.shouldDeferTranslucency());
         this.data = data;
+        this.secondary = secondary;
         if (this.data.thePipeline != null) {
+            this.fbTranslucent.free();
+            super.free0();
             throw new IllegalStateException("Pipeline data already bound");
         }
         this.data.thePipeline = this;
+        try {
+            //Bind the drawbuffers
+            var oDT = this.data.opaqueDrawTargets;
+            Logger.info("Iris LOD framebuffer: " + oDT.length + " opaque draw targets, "
+                    + this.data.translucentDrawTargets.length + " translucent");
+            int[] binding = new int[oDT.length];
+            for (int i = 0; i < oDT.length; i++) {
+                binding[i] = GL30.GL_COLOR_ATTACHMENT0+i;
+                glNamedFramebufferTexture(this.fb.framebuffer.id, GL30.GL_COLOR_ATTACHMENT0+i, oDT[i], 0);
+            }
+            glNamedFramebufferDrawBuffers(this.fb.framebuffer.id, binding);
 
-        //Bind the drawbuffers
-        var oDT = this.data.opaqueDrawTargets;
-        Logger.info("Iris LOD framebuffer: " + oDT.length + " opaque draw targets, "
-                + this.data.translucentDrawTargets.length + " translucent");
-        int[] binding = new int[oDT.length];
-        for (int i = 0; i < oDT.length; i++) {
-            binding[i] = GL30.GL_COLOR_ATTACHMENT0+i;
-            glNamedFramebufferTexture(this.fb.framebuffer.id, GL30.GL_COLOR_ATTACHMENT0+i, oDT[i], 0);
+            var tDT = this.data.translucentDrawTargets;
+            binding = new int[tDT.length];
+            for (int i = 0; i < tDT.length; i++) {
+                binding[i] = GL30.GL_COLOR_ATTACHMENT0+i;
+                glNamedFramebufferTexture(this.fbTranslucent.framebuffer.id, GL30.GL_COLOR_ATTACHMENT0+i, tDT[i], 0);
+            }
+            glNamedFramebufferDrawBuffers(this.fbTranslucent.framebuffer.id, binding);
+
+            this.fb.framebuffer.verify();
+            this.fbTranslucent.framebuffer.verify();
+
+            if (data.getUniforms() != null) {
+                this.shaderUniforms = new GlBuffer(data.getUniforms().size());
+            } else {
+                this.shaderUniforms = null;
+            }
+
+            if (!this.data.skipShaderDepthHackFix) {
+                this.shaderDepthHackFixTransformBlit = new FullscreenBlit(properties, "voxy:post/fullscreen2.vert", "voxy:post/noop.frag");
+            } else {
+                this.shaderDepthHackFixTransformBlit = null;
+            }
+
+            this.depthBlit = new FullscreenBlit(properties, "voxy:post/blit_texture_depth_cutout.frag");
+        } catch (RuntimeException error) {
+            this.free();
+            throw error;
         }
-        glNamedFramebufferDrawBuffers(this.fb.framebuffer.id, binding);
-
-        var tDT = this.data.translucentDrawTargets;
-        binding = new int[tDT.length];
-        for (int i = 0; i < tDT.length; i++) {
-            binding[i] = GL30.GL_COLOR_ATTACHMENT0+i;
-            glNamedFramebufferTexture(this.fbTranslucent.framebuffer.id, GL30.GL_COLOR_ATTACHMENT0+i, tDT[i], 0);
-        }
-        glNamedFramebufferDrawBuffers(this.fbTranslucent.framebuffer.id, binding);
-
-        this.fb.framebuffer.verify();
-        this.fbTranslucent.framebuffer.verify();
-
-        if (data.getUniforms() != null) {
-            this.shaderUniforms = new GlBuffer(data.getUniforms().size());
-        } else {
-            this.shaderUniforms = null;
-        }
-
-        if (!this.data.skipShaderDepthHackFix) {
-            this.shaderDepthHackFixTransformBlit = new FullscreenBlit(properties, "voxy:post/fullscreen2.vert", "voxy:post/noop.frag");
-        } else {
-            this.shaderDepthHackFixTransformBlit = null;
-        }
-
-        this.depthBlit = new FullscreenBlit(properties, "voxy:post/blit_texture_depth_cutout.frag");
     }
+
+    @Override public boolean usesShaderPack() { return true; }
+
+    // A feed compilation failure must fall back as a whole, after Iris's final composite.
+    @Override public boolean allowsShaderPatchFallback() { return !this.secondary; }
 
     @Override
     public void setupExtraModelBakeryData(ModelBakerySubsystem modelService) {
@@ -91,7 +108,7 @@ public class IrisVoxyRenderPipeline extends AbstractRenderPipeline {
         }
         this.data.thePipeline = null;
 
-        this.depthBlit.delete();
+        if (this.depthBlit != null) this.depthBlit.delete();
         this.fbTranslucent.free();
 
         if (this.shaderDepthHackFixTransformBlit != null) {
@@ -118,13 +135,15 @@ public class IrisVoxyRenderPipeline extends AbstractRenderPipeline {
 
     @Override
     protected int setup(Viewport<?> viewport, int sourceFramebuffer, int srcWidth, int srcHeight) {
-        //The fb/fbTranslucent depth textures are shared with the main camera for water SSR. Only
-        //the main viewport may resize them: a secondary pass (Vista TV) resizing them every other
-        //frame flips the depth texture size and makes the reflection sample a flickering box.
-        if (viewport.isMainViewport) {
-            this.fb.resize(viewport.width, viewport.height);
-            this.fbTranslucent.resize(viewport.width, viewport.height);
-        }
+        // Each Iris instance owns its Voxy targets. Refresh color attachments after Iris
+        // has resized/flipped its buffers; a feed must never bind the main instance's targets.
+        this.data.refreshDrawTargets();
+        for (int i = 0; i < this.data.opaqueDrawTargets.length; i++)
+            glNamedFramebufferTexture(this.fb.framebuffer.id, GL_COLOR_ATTACHMENT0 + i, this.data.opaqueDrawTargets[i], 0);
+        for (int i = 0; i < this.data.translucentDrawTargets.length; i++)
+            glNamedFramebufferTexture(this.fbTranslucent.framebuffer.id, GL_COLOR_ATTACHMENT0 + i, this.data.translucentDrawTargets[i], 0);
+        this.fb.resize(viewport.width, viewport.height);
+        this.fbTranslucent.resize(viewport.width, viewport.height);
 
         if (!this.data.useViewportDims) {
             srcWidth = viewport.width;
@@ -172,7 +191,7 @@ public class IrisVoxyRenderPipeline extends AbstractRenderPipeline {
                     viewport, this.targetTransform.set(viewport.vanillaProjection).mul(viewport.modelView));
             glColorMask(true, true, true, true);
         } else {
-            if (net.neoforged.fml.ModList.get().isLoaded("create")) {
+            if (viewport.isMainViewport && net.neoforged.fml.ModList.get().isLoaded("create")) {
                 me.cortex.voxy.client.compat.create.DistantTrainRenderer.replayDepthToSource(
                         this, viewport, this.fb.getDepthTex().id, sourceFrameBuffer,
                         srcWidth, srcHeight, this.properties.closerEqualDepthCompare());
@@ -207,11 +226,6 @@ public class IrisVoxyRenderPipeline extends AbstractRenderPipeline {
     }
     @Override
     public void setupAndBindOpaque(Viewport<?> viewport) {
-        if (!viewport.isMainViewport) {
-            // renderSecondary already bound its isolated target with reprojected depth.
-            // The plain terrain shader needs neither the Iris framebuffer nor its uniforms.
-            return;
-        }
         this.fb.bind();
         this.doBindings();
     }

@@ -81,7 +81,7 @@ public abstract class AbstractSectionRenderer <T extends Viewport<T>, J extends 
         builder.define("X_AXIS_FACE_TINT", cl.getShade(Direction.EAST, true));
     }
 
-    protected static Shader tryCompilePatchedOrNormal(Shader.Builder<?> builder, String shader, String original) {
+    protected static Shader tryCompilePatchedOrNormal(Shader.Builder<?> builder, String shader, String original, boolean allowFallback) {
         boolean patched = shader != original;
         try {
             return builder.clone()
@@ -90,11 +90,12 @@ public abstract class AbstractSectionRenderer <T extends Viewport<T>, J extends 
                     .compile();
         } catch (RuntimeException e) {
             if (patched) {
+                if (!allowFallback) throw e;
                 if (LiteShaderStatus.get().code() == LiteShaderStatus.Code.ACTIVE) {
                     LiteShaderStatus.fail(LiteShaderStatus.Code.ERROR, "GLSL compilation failed");
                 }
                 Logger.error("Failed to compile shader patch, using normal pipeline to prevent errors", e);
-                return tryCompilePatchedOrNormal(builder, original, original);
+                return tryCompilePatchedOrNormal(builder, original, original, true);
             } else {
                 throw e;
             }

@@ -105,8 +105,17 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
         this.traversal = traversal;
         this.deferTranslucency = deferTranslucency;
 
-        this.depthStencilSetup = new FullscreenBlit(properties, "voxy:post/fullscreen2.vert", "voxy:post/setup_stencil_depth.frag");
-        this.sentinelRestore = new FullscreenBlit(properties, "voxy:post/fullscreen2.vert", "voxy:post/depth0.frag");
+        FullscreenBlit setup = null;
+        try {
+            setup = new FullscreenBlit(properties, "voxy:post/fullscreen2.vert", "voxy:post/setup_stencil_depth.frag");
+            this.sentinelRestore = new FullscreenBlit(properties, "voxy:post/fullscreen2.vert", "voxy:post/depth0.frag");
+            this.depthStencilSetup = setup;
+        } catch (RuntimeException error) {
+            if (setup != null) setup.delete();
+            this.fb.free();
+            super.free0();
+            throw error;
+        }
     }
 
     //Allows pipelines to configure model baking system
@@ -201,22 +210,42 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
     // reprojected into the LOD projection; directly comparing their different near/far planes makes
     // distant LOD appear in front of vanilla chunks. Only the final composite writes to the caller.
     public void renderSecondary(Viewport<?> viewport, int sourceFramebuffer) {
+        this.renderSecondary(viewport, sourceFramebuffer, viewport.width, viewport.height);
+    }
+
+    public void renderSecondary(Viewport<?> viewport, int sourceFramebuffer, int srcWidth, int srcHeight) {
         var rs = ((AbstractSectionRenderer)this.sectionRenderer);
         if (rs == null) {
             return;
         }
 
-        int depthTex = this.setupSecondary(viewport, sourceFramebuffer);
+        int depthTex = this.usesShaderPack()
+                ? this.setup(viewport, sourceFramebuffer, srcWidth, srcHeight)
+                : this.setupSecondary(viewport, sourceFramebuffer);
         viewport.hiZBuffer.buildMipChain(depthTex, viewport.width, viewport.height);
 
         //Build and draw this camera's current list in the same frame.
-        this.traversal.doTraversal(viewport);
-        this.secondaryFb.bind();
+        this.traverseSecondary(viewport);
+        this.setupAndBindOpaque(viewport);
         rs.buildDrawCalls(viewport);
         rs.renderOpaque(viewport);
+        rs.postOpaquePreperation(viewport);
+        if (this.usesShaderPack()) this.postOpaquePreTranslucent(viewport, sourceFramebuffer);
+        rs.renderTranslucent(viewport);
         viewport.prevBuildFrameId = viewport.frameId;
-        this.finishSecondary(viewport, sourceFramebuffer);
+        if (this.usesShaderPack()) this.finish(viewport, sourceFramebuffer, srcWidth, srcHeight);
+        else this.finishSecondary(viewport, sourceFramebuffer);
     }
+
+    protected void traverseSecondary(Viewport<?> viewport) {
+        this.traversal.doTraversal(viewport, this);
+    }
+
+    public boolean usesShaderPack() { return false; }
+
+    public boolean allowsShaderPatchFallback() { return true; }
+
+    protected final void bindSecondaryTarget() { this.secondaryFb.bind(); }
 
     protected int setupSecondary(Viewport<?> viewport, int sourceFramebuffer) {
         if (this.secondaryFb == null) {
@@ -246,8 +275,11 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
 
     protected void finishSecondary(Viewport<?> viewport, int sourceFramebuffer) {
         // Untouched pixels have alpha zero, so vanilla colour/depth survive without a round trip.
-        // Drawn pixels return to the caller's projection for subsequent entities/translucency.
-        glDisable(GL_BLEND);
+        // RGB accumulated over transparent black is premultiplied. Preserve the caller's
+        // background for water-only pixels; multiplying by alpha again would darken it.
+        glEnable(GL_BLEND);
+        glBlendEquation(GL_FUNC_ADD);
+        glBlendFuncSeparate(GL_ONE, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
         glDepthMask(true);
         glDepthFunc(this.properties.closerEqualDepthCompare());
         glBindTextureUnit(3, this.secondaryColour.id);
@@ -257,6 +289,7 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
                 viewport, this.secondaryTargetTransform.set(viewport.vanillaProjection).mul(viewport.modelView));
         glBindSampler(0, 0);
         glBindSampler(3, 0);
+        glDisable(GL_BLEND);
     }
 
     //The depth attachment point depends on whether the framebuffer carries a combined
@@ -442,7 +475,7 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
                 glMemoryBarrier(GL_FRAMEBUFFER_BARRIER_BIT | GL_PIXEL_BUFFER_BARRIER_BIT);
 
                 TimingStatistics.F.start();
-                this.traversal.doTraversal(viewport);
+                this.traversal.doTraversal(viewport, this);
                 TimingStatistics.F.stop();
                 built = true;
             }
@@ -463,7 +496,7 @@ public abstract class AbstractRenderPipeline extends TrackedObject {
             if (this.secondaryColour != null) this.secondaryColour.free();
         }
         this.fb.free();
-        this.sectionRenderer.free();
+        if (this.sectionRenderer != null) this.sectionRenderer.free();
         this.depthStencilSetup.delete();
         this.sentinelRestore.delete();
         super.free0();

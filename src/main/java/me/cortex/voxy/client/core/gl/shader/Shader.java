@@ -146,7 +146,7 @@ public class Shader extends TrackedObject {
         private int compileToProgram() {
             int program = GL20C.glCreateProgram();
             int[] shaders = new int[this.sources.size()];
-            {
+            try {
                 String defs = this.defines.entrySet().stream().map(a->"#define " + a.getKey() + " " + a.getValue() + "\n").collect(Collectors.joining());
                 int i = 0;
                 for (var entry : this.sources.entrySet()) {
@@ -163,19 +163,19 @@ public class Shader extends TrackedObject {
 
                     shaders[i++] = createShader(entry.getKey(), src);
                 }
+                for (int shader : shaders) GL20C.glAttachShader(program, shader);
+                GL20C.glLinkProgram(program);
+                for (int shader : shaders) GL20C.glDetachShader(program, shader);
+                printProgramLinkLog(program);
+                verifyProgramLinked(program);
+                return program;
+            } catch (RuntimeException error) {
+                GL20C.glDeleteProgram(program);
+                throw error;
+            } finally {
+                // A later stage may fail after earlier stages compiled successfully.
+                for (int shader : shaders) if (shader != 0) GL20C.glDeleteShader(shader);
             }
-
-            for (int i : shaders) {
-                GL20C.glAttachShader(program, i);
-            }
-            GL20C.glLinkProgram(program);
-            for (int i : shaders) {
-                GL20C.glDetachShader(program, i);
-                GL20C.glDeleteShader(i);
-            }
-            printProgramLinkLog(program);
-            verifyProgramLinked(program);
-            return program;
         }
 
         public T compile() {

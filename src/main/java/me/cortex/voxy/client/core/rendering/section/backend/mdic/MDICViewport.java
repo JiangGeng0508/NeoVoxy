@@ -14,7 +14,7 @@ public class MDICViewport extends Viewport<MDICViewport> {
 
     public MDICViewport(RenderProperties properties, int maxSectionCount, boolean chunkMaskHalfRes) {
         super(properties, chunkMaskHalfRes);
-        this.visibilityBuffer = new GlBuffer(maxSectionCount*4L);
+        this.visibilityBuffer = new GlBuffer(maxSectionCount*4L).zero();
     }
 
     @Override

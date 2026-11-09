@@ -40,6 +40,17 @@ import static org.lwjgl.opengl.GL43C.GL_SHADER_STORAGE_BUFFER;
 
 public class IrisVoxyRenderPipelineData {
     public IrisVoxyRenderPipeline thePipeline;
+    private IrisRenderingPipeline owner;
+    private int[] opaqueIndices, translucentIndices;
+
+    public void refreshDrawTargets() {
+        int[] opaque = getDrawBuffers(this.opaqueIndices, this.owner.getFlippedAfterPrepare(),
+                ((IrisRenderingPipelineAccessor) this.owner).getRenderTargets());
+        int[] translucent = getDrawBuffers(this.translucentIndices, this.owner.getFlippedAfterPrepare(),
+                ((IrisRenderingPipelineAccessor) this.owner).getRenderTargets());
+        System.arraycopy(opaque, 0, this.opaqueDrawTargets, 0, opaque.length);
+        System.arraycopy(translucent, 0, this.translucentDrawTargets, 0, translucent.length);
+    }
     public final int[] opaqueDrawTargets;
     public final int[] translucentDrawTargets;
     private final String opaquePatch;
@@ -109,7 +120,11 @@ public class IrisVoxyRenderPipelineData {
 
 
 
-        return new IrisVoxyRenderPipelineData(patch, opaqueDrawTargets, translucentDrawTargets, uniforms, patch.createBlendSetup(), imageSet, ssboSet);
+        var result = new IrisVoxyRenderPipelineData(patch, opaqueDrawTargets, translucentDrawTargets, uniforms, patch.createBlendSetup(), imageSet, ssboSet);
+        result.owner = ipipe;
+        result.opaqueIndices = patch.getOpqaueTargets().clone();
+        result.translucentIndices = patch.getTranslucentTargets().clone();
+        return result;
     }
 
     private static int[] getDrawBuffers(int[] targets, ImmutableSet<Integer> stageWritesToAlt, RenderTargets rt) {
@@ -551,13 +566,15 @@ public class IrisVoxyRenderPipelineData {
     private static SSBOSet createSSBOLayouts(Int2ObjectMap<String> ssbos, ShaderStorageBufferHolder ssboStore) {
         if (ssboStore == null) return null;//If there is no store, there cannot be any ssbos
         if (ssbos.isEmpty()) return null;
-        String header = "";
-        if (ssbos.containsKey(-1)) header = ssbos.remove(-1);
+        // The ProgramSet/patch is shared by the real dimension and Vista's pipeline.
+        // Never consume the common declarations while building the first instance.
+        String header = ssbos.containsKey(-1) ? ssbos.get(-1) : "";
         StringBuilder builder = new StringBuilder(header);
         builder.append("\n");
-        SSBOBinding[] bindings = new SSBOBinding[ssbos.size()];
+        SSBOBinding[] bindings = new SSBOBinding[ssbos.size() - (ssbos.containsKey(-1) ? 1 : 0)];
         int i = 0;
         for (var entry : ssbos.int2ObjectEntrySet()) {
+            if (entry.getIntKey() == -1) continue;
             var val = entry.getValue();
             bindings[i] = new SSBOBinding(entry.getIntKey(), i);
             builder.append("layout(binding = (BUFFER_BINDING_INDEX_BASE+").append(i).append(")) restrict buffer IrisBufferBinding").append(i);
